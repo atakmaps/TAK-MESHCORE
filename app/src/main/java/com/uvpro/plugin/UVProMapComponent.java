@@ -360,13 +360,22 @@ try {
             Object certMgr = getInst.invoke(null);
 
             // Find _impl field — the gov.tak.platform.engine.net.CertificateManager instance.
+            // Do NOT match by type name: ProGuard renames the type to a short obfuscated name
+            // (e.g. gov.tak.platform.engine.net.a) so contains("CertificateManager") fails.
+            // Instead, find the non-static field whose type exposes addCertificate(X509Certificate).
             java.lang.reflect.Field implField = null;
             for (java.lang.reflect.Field f : certMgrClass.getDeclaredFields()) {
-                if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())
-                        && f.getType().getName().contains("CertificateManager")) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                if (f.getType().isPrimitive()) continue;
+                try {
+                    f.getType().getMethod("addCertificate",
+                            java.security.cert.X509Certificate.class);
                     implField = f;
                     implField.setAccessible(true);
+                    Log.d(TAG, "injectCACert: found _impl field type=" + f.getType().getName());
                     break;
+                } catch (NoSuchMethodException ignored) {
+                    // not the right field
                 }
             }
             Object impl = (implField != null) ? implField.get(certMgr) : null;
@@ -408,9 +417,42 @@ try {
 
             Log.i(TAG, "Update server CA registered successfully");
 
+            // The startup sync fires before this plugin loads. Now that trust is established
+            // and the socketFactories cache is cleared, trigger a fresh silent sync so the
+            // update server check succeeds without the user having to press the button.
+            triggerUpdateServerSync();
+
         } catch (Exception e) {
             Log.w(TAG, "injectCACert failed (attempt " + attempt + "): " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Trigger a silent sync of ATAK's plugin update server.
+     * Called after CA injection so the startup sync (which fired before the plugin loaded)
+     * gets a second chance with the correct trust context.
+     */
+    private void triggerUpdateServerSync() {
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            try {
+                Class<?> cls = Class.forName("com.atakmap.android.update.ApkUpdateComponent");
+                Object comp = cls.getMethod("getInstance").invoke(null);
+                if (comp == null) {
+                    Log.w(TAG, "triggerUpdateServerSync: ApkUpdateComponent not ready");
+                    return;
+                }
+                Object mgr = cls.getMethod("getProviderManager").invoke(comp);
+                if (mgr == null) {
+                    Log.w(TAG, "triggerUpdateServerSync: providerManager null");
+                    return;
+                }
+                mgr.getClass().getMethod("sync", boolean.class, boolean.class)
+                        .invoke(mgr, true, false); // silent=true, checkIncompat=false
+                Log.i(TAG, "triggerUpdateServerSync: sync triggered");
+            } catch (Exception e) {
+                Log.w(TAG, "triggerUpdateServerSync failed: " + e.getMessage());
+            }
+        }, 2000);
     }
 
     /** Auto-connect to the last used radio on startup if one is saved. */
