@@ -42,9 +42,13 @@ cd "$SAVED" >/dev/null
 
 # TPC/CI often passes --init-script /root/.gradle/init.d/00-tak-artifactory.gradle
 # for Artifactory credentials; some images omit that file and Gradle aborts before
-# any project script runs. If the path is missing and we can create it, write a
-# no-op Groovy init script (takdev is on the classpath via gradle/takdev/*.jar).
+# any project script runs. If the path is missing, create a no-op Groovy script.
+# If /root is not writable (common when running as non-root), remap GRADLE_OPTS
+# references for that path to a user-writable fallback under $HOME.
 ensureOptionalTakArtifactoryInit() {
+    TAK_ROOT_INIT="/root/.gradle/init.d/00-tak-artifactory.gradle"
+    TAK_FALLBACK_INIT="${HOME}/.gradle/init.d/00-tak-artifactory.gradle"
+
     for _path in "${HOME}/.gradle/init.d/00-tak-artifactory.gradle" \
         "/root/.gradle/init.d/00-tak-artifactory.gradle"
     do
@@ -58,8 +62,46 @@ ensureOptionalTakArtifactoryInit() {
 TAK_INIT_EOF
         fi
     done
+
+    if [ ! -f "$TAK_ROOT_INIT" ] && [ -f "$TAK_FALLBACK_INIT" ]; then
+        GRADLE_OPTS=`printf '%s' "$GRADLE_OPTS" | sed "s|$TAK_ROOT_INIT|$TAK_FALLBACK_INIT|g"`
+    fi
 }
 ensureOptionalTakArtifactoryInit
+
+# Some CI systems pass --init-script /root/.gradle/init.d/00-tak-artifactory.gradle
+# directly as Gradle CLI args (not via GRADLE_OPTS). If /root is unwritable and the
+# file is absent, remap those args to the fallback script under $HOME.
+if [ ! -f "$TAK_ROOT_INIT" ] && [ -f "$TAK_FALLBACK_INIT" ]; then
+    quote_arg() {
+        printf '%s' "$1" | sed "s/'/'\\\\''/g;1s/^/'/;\$s/\$/'/"
+    }
+    remapped_args=""
+    while [ "$#" -gt 0 ]; do
+        arg="$1"
+        shift
+        case "$arg" in
+            --init-script|-I)
+                if [ "$#" -gt 0 ] && [ "$1" = "$TAK_ROOT_INIT" ]; then
+                    remapped_args="$remapped_args `quote_arg "$arg"` `quote_arg "$TAK_FALLBACK_INIT"`"
+                    shift
+                    continue
+                fi
+                remapped_args="$remapped_args `quote_arg "$arg"`"
+                ;;
+            --init-script="$TAK_ROOT_INIT")
+                remapped_args="$remapped_args `quote_arg "--init-script=$TAK_FALLBACK_INIT"`"
+                ;;
+            -I="$TAK_ROOT_INIT")
+                remapped_args="$remapped_args `quote_arg "-I=$TAK_FALLBACK_INIT"`"
+                ;;
+            *)
+                remapped_args="$remapped_args `quote_arg "$arg"`"
+                ;;
+        esac
+    done
+    eval "set -- $remapped_args"
+fi
 
 APP_NAME="Gradle"
 APP_BASE_NAME=`basename "$0"`
