@@ -55,8 +55,8 @@ Output directory: ${PLUGINS_DIR}/
 
   - ${SOURCE_ZIP}
       TPP source archive; root folder ${TPP_ROOT}/
-      Includes gradle/takdev/atak-gradle-takdev.jar so TPC can use classpath files(...)
-      without Artifactory init.d (see root build.gradle).
+      Includes gradle/takdev/atak-gradle-takdev.jar (classpath files; see root build.gradle).
+      gradlew creates a no-op 00-tak-artifactory.gradle if the image references it but omits the file.
 EOF
 if [[ -n "${APK_NAME}" ]]; then
   cat >> "${MANIFEST}" << EOF

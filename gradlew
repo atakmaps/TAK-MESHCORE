@@ -40,6 +40,27 @@ cd "`dirname \"$PRG\"`/" >/dev/null
 APP_HOME="`pwd -P`"
 cd "$SAVED" >/dev/null
 
+# TPC/CI often passes --init-script /root/.gradle/init.d/00-tak-artifactory.gradle
+# for Artifactory credentials; some images omit that file and Gradle aborts before
+# any project script runs. If the path is missing and we can create it, write a
+# no-op Groovy init script (takdev is on the classpath via gradle/takdev/*.jar).
+ensureOptionalTakArtifactoryInit() {
+    for _path in "${HOME}/.gradle/init.d/00-tak-artifactory.gradle" \
+        "/root/.gradle/init.d/00-tak-artifactory.gradle"
+    do
+        if [ -f "$_path" ]; then
+            continue
+        fi
+        _dir=$(dirname "$_path")
+        if mkdir -p "$_dir" 2>/dev/null && [ -w "$_dir" ]; then
+            cat > "$_path" <<'TAK_INIT_EOF' 2>/dev/null || true
+// No-op: builder referenced this init script but it was absent on the image.
+TAK_INIT_EOF
+        fi
+    done
+}
+ensureOptionalTakArtifactoryInit
+
 APP_NAME="Gradle"
 APP_BASE_NAME=`basename "$0"`
 
