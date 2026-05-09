@@ -48,3 +48,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Vendored takdev JAR — local builds only, excluded from TPC submission
+gradle/takdev/
