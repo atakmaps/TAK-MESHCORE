@@ -38,15 +38,25 @@ buildscript {
     ext.takrepoUrl = getProperty(urlKey, 'https://localhost/')
     ext.takrepoUser = getProperty('takrepo.user', 'invalid')
     ext.takrepoPassword = getProperty('takrepo.password', 'invalid')
-    ext.takdevPlugin = getProperty('takdev.plugin', "${rootDir}/app/libs/atak-civ/atak-gradle-takdev.jar")
+
+    // TPC/takrepo often sets `takrepo.url`, which used to force resolving
+    // `com.atakmap.gradle:atak-gradle-takdev` from Artifactory and required a Gradle init
+    // script that may be missing in the builder image. Prefer a real JAR on disk first:
+    // checked-in `gradle/takdev/atak-gradle-takdev.jar`, optional `-Ptakdev.plugin=`, then SDK copy.
+    def resolveTakdevJar = {
+        String override = getProperty('takdev.plugin', null)
+        if (override != null) {
+            def o = file(override)
+            if (o.exists()) return o
+        }
+        def vendored = file("${rootDir}/gradle/takdev/atak-gradle-takdev.jar")
+        if (vendored.exists()) return vendored
+        return file("${rootDir}/app/libs/atak-civ/atak-gradle-takdev.jar")
+    }
+    def takdevJarFile = resolveTakdevJar()
+    ext.takdevPlugin = takdevJarFile.absolutePath
 
     repositories {
-        google()
-        mavenCentral()
-        mavenLocal()
-        maven {
-            url "https://jitpack.io"
-        }
         if(isDevKitEnabled()) {
             maven {
                 url = takrepoUrl
@@ -56,14 +66,24 @@ buildscript {
                 }
             }
         }
+        google()
+        mavenCentral()
+        mavenLocal()
+        maven {
+            url "https://jitpack.io"
+        }
     }
 
     dependencies {
         classpath 'com.android.tools.build:gradle:8.8.2'
-        if(isDevKitEnabled()) {
+        if (takdevJarFile.exists()) {
+            classpath files(takdevJarFile)
+        } else if (isDevKitEnabled()) {
             classpath "com.atakmap.gradle:atak-gradle-takdev:${takdevVersion}"
         } else {
-            classpath files(takdevPlugin)
+            throw new GradleException(
+                    "atak-gradle-takdev.jar not found. Commit gradle/takdev/atak-gradle-takdev.jar "
+                            + "or install the ATAK SDK under app/libs/atak-civ/, or enable takrepo.url.")
         }
     }
 }
@@ -86,6 +106,15 @@ if (!System.getProperty("atak.proguard.mapping")) {
 
 allprojects {
     repositories {
+        if (project.hasProperty('isDevKitEnabled') && isDevKitEnabled()) {
+            maven {
+                url = takrepoUrl
+                credentials {
+                    username = takrepoUser
+                    password = takrepoPassword
+                }
+            }
+        }
         mavenCentral()
         google()
         mavenLocal()
