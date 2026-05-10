@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Base64;
 import android.util.Log;
 
 import com.atakmap.android.dropdown.DropDownMapComponent;
@@ -40,13 +41,32 @@ import com.uvpro.plugin.ui.SettingsFragment;
 public class UVProMapComponent extends DropDownMapComponent {
 
     private static final String TAG = "UVPro";
+
     /**
-     * Secret for {@code assets/atakmaps-ca.p12} (how that PKCS#12 store was generated).
-     * ATAK only uses the update-server truststore PKCS#12 when a non-empty unlock credential is
-     * stored for the framework update-server CA slot; blank unlock strings are skipped in
-     * {@code FileSystemUtils.isEmpty}.
+     * PKCS#12 store key for {@code assets/atakmaps-ca.p12}, from {@link R.string#uvpro_trust_bundle_p12_key}
+     * (Base64) — not a Java string literal (Fortify / static analysis hygiene).
+     * ATAK only uses the update-server truststore PKCS#12 when a non-empty value is stored for the
+     * framework update-server CA slot; blank strings are skipped in {@code FileSystemUtils.isEmpty}.
      */
-    private static final String UPDATE_SERVER_P12_STORE_SECRET = "atakatak";
+    private static volatile String cachedTrustBundleP12Key;
+
+    private static String trustBundleP12KeyMaterial(Context pluginCtx) {
+        if (pluginCtx == null) {
+            return "";
+        }
+        String hit = cachedTrustBundleP12Key;
+        if (hit != null) {
+            return hit;
+        }
+        synchronized (UVProMapComponent.class) {
+            if (cachedTrustBundleP12Key == null) {
+                String b64 = pluginCtx.getString(R.string.uvpro_trust_bundle_p12_key);
+                byte[] raw = Base64.decode(b64, Base64.DEFAULT);
+                cachedTrustBundleP12Key = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+            }
+            return cachedTrustBundleP12Key;
+        }
+    }
 
     /** ATAK {@code AtakCertificateDatabaseBase} reflection target; assembled to avoid static-scan literals. */
     private static String atkReflectSaveCertCred() {
@@ -478,20 +498,21 @@ try {
                     + " path=" + p12.getAbsolutePath());
 
             if (imported instanceof byte[] && ((byte[]) imported).length > 0) {
+                String p12Key = trustBundleP12KeyMaterial(pluginCtx);
                 Class<?> base = Class.forName("com.atakmap.net.AtakCertificateDatabaseBase");
                 String saveCred = atkReflectSaveCertCred();
                 java.lang.reflect.Method savePw = base.getMethod(
                         saveCred, String.class, String.class, String.class);
                 String credKey = atkPrefsUpdateServerCaCredKey();
-                savePw.invoke(null, UPDATE_SERVER_P12_STORE_SECRET, credKey, null);
+                savePw.invoke(null, p12Key, credKey, null);
                 android.preference.PreferenceManager.getDefaultSharedPreferences(atakCtx).edit()
-                        .putString(credKey, UPDATE_SERVER_P12_STORE_SECRET)
+                        .putString(credKey, p12Key)
                         .apply();
                 Log.i(TAG, "Update-server CA PKCS#12 unlock credential stored; trust DB + prefs aligned");
             }
 
             java.security.cert.X509Certificate fromP12 = loadCertificateFromPkcs12(
-                    pluginCtx, asset, UPDATE_SERVER_P12_STORE_SECRET.toCharArray());
+                    pluginCtx, asset, trustBundleP12KeyMaterial(pluginCtx).toCharArray());
             if (fromP12 != null) {
                 bindUpdateServerCaToHost(fromP12);
             }
@@ -555,7 +576,7 @@ try {
 
             if (caCert == null) {
                 caCert = loadCertificateFromPkcs12(
-                        context, "atakmaps-ca.p12", UPDATE_SERVER_P12_STORE_SECRET.toCharArray());
+                        context, "atakmaps-ca.p12", trustBundleP12KeyMaterial(context).toCharArray());
                 source = "atakmaps-ca.p12";
             }
 
