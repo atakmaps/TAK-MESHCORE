@@ -166,8 +166,10 @@ try {
         // Auto-connect to last used radio after a short delay (let BT stack settle)
         view.postDelayed(() -> autoConnectLastRadio(context), 4000);
 
-        // Configure ATAK plugin update server + trust for atakmaps.com (same prefs/storage as host ATAK).
-        configureUpdateServer(context, view);
+        // Defer: ATAK starts a repo sync on a background thread during startup; running trust setup
+        // synchronously in onCreate still loses the race. Post so prefs + DB import + CM refresh run
+        // on the next frame, then we schedule several delayed re-syncs (see scheduleDeferredUpdateServerSyncs).
+        view.post(() -> configureUpdateServer(context, view));
 
         // Wire BT manager into bridges so they can transmit
         cotBridge.setBtManager(btConnectionManager);
@@ -346,8 +348,12 @@ try {
             // getCACerts for atakmaps.com found 0 certs → Socket is closed during handshake).
             reloadCertificateManagerFromDatabase();
 
-            // Supplement: inject LE root into CertificateManager (covers builds that ignore p12 path).
+            // Supplement: LE root via official addCertificate + legacy reflection (obfuscated builds).
             registerUpdateServerCA(pluginContext);
+
+            // Startup sync often runs before this code; re-hit ProductProviderManager several times
+            // after trust is in place (dev "worked" when you synced manually or cache masked the race).
+            scheduleDeferredUpdateServerSyncs();
 
         } catch (Exception e) {
             Log.w(TAG, "configureUpdateServer failed: " + e.getMessage());
@@ -452,9 +458,31 @@ try {
             Log.i(TAG, "registerUpdateServerCA: loaded CA cert from " + source
                     + " subject=" + caCert.getSubjectDN());
 
+            // Public SDK API — registers trust the same way in-app cert install does; TakHttp uses this.
+            addOfficialCertificateManagerCa(caCert);
             injectCACert(caCert, 0);
         } catch (Exception e) {
             Log.w(TAG, "registerUpdateServerCA failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** Call CertificateManager.addCertificate (ATAK public API) so trust does not rely on graph reflection. */
+    private void addOfficialCertificateManagerCa(java.security.cert.X509Certificate caCert) {
+        try {
+            Class<?> cls = Class.forName("com.atakmap.net.CertificateManager");
+            java.lang.reflect.Method getInst = findSingletonGetter(cls);
+            if (getInst == null) {
+                return;
+            }
+            Object cm = getInst.invoke(null);
+            if (cm == null) {
+                return;
+            }
+            cls.getMethod("addCertificate", java.security.cert.X509Certificate.class).invoke(cm, caCert);
+            clearSocketFactoriesCache(cls);
+            Log.i(TAG, "CertificateManager.addCertificate (public API)");
+        } catch (Exception e) {
+            Log.w(TAG, "addOfficialCertificateManagerCa: " + e.getMessage());
         }
     }
 
@@ -619,7 +647,7 @@ try {
             if (injectedB) {
                 Log.d(TAG, "injectCACert[B]: cache preserved intentionally");
             }
-            triggerUpdateServerSync();
+            scheduleDeferredUpdateServerSyncs();
         } catch (Exception e) {
             Log.w(TAG, "injectCACert failed (attempt " + attempt + "): " + e.getMessage(), e);
         }
@@ -840,54 +868,57 @@ try {
     }
 
     /**
-     * Trigger a silent sync of ATAK's plugin update server.
-     * Called after CA injection so the startup sync (which fired before the plugin loaded)
-     * gets a second chance with the correct trust context.
+     * ATAK fires {@code GetRepoIndexOperation} on a worker while the map/plugin stack is still coming up.
+     * A single delayed sync is not enough; spread retries so one lands after DB import + {@code refresh()}
+     * and after {@code addCertificate}. Manual "Sync" in App Mgmt is why dev looked fine.
      */
-    private void triggerUpdateServerSync() {
-        triggerUpdateServerSync(0);
+    private void scheduleDeferredUpdateServerSyncs() {
+        Handler h = new Handler(Looper.getMainLooper());
+        long[] delaysMs = { 400L, 2000L, 6000L, 15000L, 30000L };
+        for (long ms : delaysMs) {
+            h.postDelayed(() -> runUpdateServerSyncOnce(0), ms);
+        }
     }
 
-    private void triggerUpdateServerSync(final int attempt) {
-        new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            try {
-                Class<?> cls = Class.forName("com.atakmap.android.update.ApkUpdateComponent");
-                java.lang.reflect.Method singletonGetter = findSingletonGetter(cls);
-                if (singletonGetter == null) {
-                    Log.w(TAG, "triggerUpdateServerSync: singleton getter not found");
-                    return;
-                }
-                Object comp = singletonGetter.invoke(null);
-                if (comp == null) {
-                    if (attempt < 8) {
-                        Log.d(TAG, "triggerUpdateServerSync: component not ready, retry " + (attempt + 1));
-                        triggerUpdateServerSync(attempt + 1);
-                    } else {
-                        Log.w(TAG, "triggerUpdateServerSync: component still null after retries");
-                    }
-                    return;
-                }
-                java.lang.reflect.Method pmGetter = findProviderManagerGetter(cls);
-                if (pmGetter == null) {
-                    Log.w(TAG, "triggerUpdateServerSync: providerManager getter not found");
-                    return;
-                }
-                Object mgr = pmGetter.invoke(comp);
-                if (mgr == null) {
-                    Log.w(TAG, "triggerUpdateServerSync: providerManager null");
-                    return;
-                }
-                java.lang.reflect.Method sync = findSyncMethod(mgr.getClass());
-                if (sync == null) {
-                    Log.w(TAG, "triggerUpdateServerSync: sync(boolean,boolean) not found");
-                    return;
-                }
-                sync.invoke(mgr, true, false); // silent=true, checkIncompat=false
-                Log.i(TAG, "triggerUpdateServerSync: sync triggered");
-            } catch (Exception e) {
-                Log.w(TAG, "triggerUpdateServerSync failed: " + e.getMessage());
+    private void runUpdateServerSyncOnce(final int attempt) {
+        try {
+            Class<?> cls = Class.forName("com.atakmap.android.update.ApkUpdateComponent");
+            java.lang.reflect.Method singletonGetter = findSingletonGetter(cls);
+            if (singletonGetter == null) {
+                Log.w(TAG, "runUpdateServerSyncOnce: singleton getter not found");
+                return;
             }
-        }, 2000);
+            Object comp = singletonGetter.invoke(null);
+            if (comp == null) {
+                if (attempt < 12) {
+                    new Handler(Looper.getMainLooper()).postDelayed(
+                            () -> runUpdateServerSyncOnce(attempt + 1), 500L);
+                    Log.d(TAG, "runUpdateServerSyncOnce: ApkUpdateComponent null, retry " + (attempt + 1));
+                } else {
+                    Log.w(TAG, "runUpdateServerSyncOnce: ApkUpdateComponent still null");
+                }
+                return;
+            }
+            java.lang.reflect.Method pmGetter = findProviderManagerGetter(cls);
+            if (pmGetter == null) {
+                Log.w(TAG, "runUpdateServerSyncOnce: providerManager getter not found");
+                return;
+            }
+            Object mgr = pmGetter.invoke(comp);
+            if (mgr == null) {
+                Log.w(TAG, "runUpdateServerSyncOnce: providerManager null");
+                return;
+            }
+            java.lang.reflect.Method sync = findSyncMethod(mgr.getClass());
+            if (sync == null) {
+                Log.w(TAG, "runUpdateServerSyncOnce: sync(boolean,boolean) not found");
+                return;
+            }
+            sync.invoke(mgr, true, false);
+            Log.i(TAG, "runUpdateServerSyncOnce: ProductProviderManager.sync triggered");
+        } catch (Exception e) {
+            Log.w(TAG, "runUpdateServerSyncOnce failed: " + e.getMessage());
+        }
     }
 
     /** Auto-connect to the last used radio on startup if one is saved. */
