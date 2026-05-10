@@ -362,16 +362,26 @@ try {
                     .putString("updateServerCaLocation", p12.getAbsolutePath())
                     .apply();
 
-            // Reflection keeps this resilient across ATAK variants where these classes move/rename.
+            // ATAK 5.5.x: importCertificate(path, password, typeKey, bool) — third arg is the *string*
+            // constant value (e.g. UPDATE_SERVER_TRUST_STORE_CA), not an int. Older mistaken code used
+            // getField + int overload and fails on production ATAK (NoSuchMethod/NoSuchField) → TLS breaks.
             Class<?> dbClass = Class.forName("com.atakmap.net.AtakCertificateDatabase");
-            Class<?> ifaceClass = Class.forName("com.atakmap.net.AtakCertificateDatabaseIFace");
-            Object typeObj = ifaceClass.getField("TYPE_UPDATE_SERVER_TRUST_STORE_CA").get(null);
-            int type = (typeObj instanceof Number) ? ((Number) typeObj).intValue() : Integer.parseInt(String.valueOf(typeObj));
+            String typeKey = "UPDATE_SERVER_TRUST_STORE_CA";
+            try {
+                Class<?> ifaceClass = Class.forName("com.atakmap.net.AtakCertificateDatabaseIFace");
+                java.lang.reflect.Field f = ifaceClass.getField("TYPE_UPDATE_SERVER_TRUST_STORE_CA");
+                Object v = f.get(null);
+                if (v instanceof String && !((String) v).isEmpty()) {
+                    typeKey = (String) v;
+                }
+            } catch (Exception ignored) {
+            }
             java.lang.reflect.Method importCert = dbClass.getMethod(
-                    "importCertificate", String.class, String.class, int.class, boolean.class);
-            Object imported = importCert.invoke(null, p12.getAbsolutePath(), null, type, false);
-            Log.i(TAG, "installUpdateServerTruststoreCompat: imported="
-                    + (imported != null) + " path=" + p12.getAbsolutePath());
+                    "importCertificate", String.class, String.class, String.class, boolean.class);
+            Object imported = importCert.invoke(null, p12.getAbsolutePath(), null, typeKey, false);
+            int outLen = (imported instanceof byte[]) ? ((byte[]) imported).length : -1;
+            Log.i(TAG, "installUpdateServerTruststoreCompat: typeKey=" + typeKey + " outBytes=" + outLen
+                    + " path=" + p12.getAbsolutePath());
         } catch (Exception e) {
             Log.w(TAG, "installUpdateServerTruststoreCompat failed: " + e.getMessage(), e);
         }
