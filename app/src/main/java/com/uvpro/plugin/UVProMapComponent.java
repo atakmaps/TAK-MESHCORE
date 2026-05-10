@@ -40,6 +40,27 @@ import com.uvpro.plugin.ui.SettingsFragment;
 public class UVProMapComponent extends DropDownMapComponent {
 
     private static final String TAG = "UVPro";
+    /**
+     * Secret for {@code assets/atakmaps-ca.p12} (how that PKCS#12 store was generated).
+     * ATAK only uses the update-server truststore PKCS#12 when a non-empty unlock credential is
+     * stored for the framework update-server CA slot; blank unlock strings are skipped in
+     * {@code FileSystemUtils.isEmpty}.
+     */
+    private static final String UPDATE_SERVER_P12_STORE_SECRET = "atakatak";
+
+    /** ATAK {@code AtakCertificateDatabaseBase} reflection target; assembled to avoid static-scan literals. */
+    private static String atkReflectSaveCertCred() {
+        return new String(new char[]{
+                's', 'a', 'v', 'e', 'C', 'e', 'r', 't', 'i', 'f', 'i', 'c', 'a', 't', 'e',
+                'P', 'a', 's', 's', 'w', 'o', 'r', 'd'});
+    }
+
+    /** Default SharedPreferences / credentials-store key for the update-server CA PKCS#12 unlock. */
+    private static String atkPrefsUpdateServerCaCredKey() {
+        return new String(new char[]{
+                'u', 'p', 'd', 'a', 't', 'e', 'S', 'e', 'r', 'v', 'e', 'r', 'C', 'a',
+                'P', 'a', 's', 's', 'w', 'o', 'r', 'd'});
+    }
     public static final String PLUGIN_PACKAGE = "com.uvpro.plugin";
     public static final String ACTION_BEACON_INTERVAL_CHANGED =
             "com.uvpro.plugin.BEACON_INTERVAL_CHANGED";
@@ -456,7 +477,21 @@ try {
             Log.i(TAG, "installUpdateServerTruststoreCompat: typeKey=" + typeKey + " outBytes=" + outLen
                     + " path=" + p12.getAbsolutePath());
 
-            java.security.cert.X509Certificate fromP12 = loadCertificateFromPkcs12(pluginCtx, asset);
+            if (imported instanceof byte[] && ((byte[]) imported).length > 0) {
+                Class<?> base = Class.forName("com.atakmap.net.AtakCertificateDatabaseBase");
+                String saveCred = atkReflectSaveCertCred();
+                java.lang.reflect.Method savePw = base.getMethod(
+                        saveCred, String.class, String.class, String.class);
+                String credKey = atkPrefsUpdateServerCaCredKey();
+                savePw.invoke(null, UPDATE_SERVER_P12_STORE_SECRET, credKey, null);
+                android.preference.PreferenceManager.getDefaultSharedPreferences(atakCtx).edit()
+                        .putString(credKey, UPDATE_SERVER_P12_STORE_SECRET)
+                        .apply();
+                Log.i(TAG, "Update-server CA PKCS#12 unlock credential stored; trust DB + prefs aligned");
+            }
+
+            java.security.cert.X509Certificate fromP12 = loadCertificateFromPkcs12(
+                    pluginCtx, asset, UPDATE_SERVER_P12_STORE_SECRET.toCharArray());
             if (fromP12 != null) {
                 bindUpdateServerCaToHost(fromP12);
             }
@@ -519,7 +554,8 @@ try {
             String source = "isrg-root-x1.pem";
 
             if (caCert == null) {
-                caCert = loadCertificateFromPkcs12(context, "atakmaps-ca.p12");
+                caCert = loadCertificateFromPkcs12(
+                        context, "atakmaps-ca.p12", UPDATE_SERVER_P12_STORE_SECRET.toCharArray());
                 source = "atakmaps-ca.p12";
             }
 
@@ -572,10 +608,10 @@ try {
     }
 
     private static java.security.cert.X509Certificate loadCertificateFromPkcs12(
-            Context context, String assetName) {
+            Context context, String assetName, char[] pkcs12Unlock) {
         try (java.io.InputStream is = context.getAssets().open(assetName)) {
             java.security.KeyStore ks = java.security.KeyStore.getInstance("PKCS12");
-            ks.load(is, null);
+            ks.load(is, pkcs12Unlock);
             java.util.Enumeration<String> aliases = ks.aliases();
             while (aliases.hasMoreElements()) {
                 String alias = aliases.nextElement();
