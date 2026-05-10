@@ -342,6 +342,9 @@ try {
 
             // Official route: PKCS#12 under ATAK's files dir + importCertificate.
             installUpdateServerTruststoreCompat(pluginContext, atakContext);
+            // DB import does not update TakHttp until CertificateManager reloads its trust (see log:
+            // getCACerts for atakmaps.com found 0 certs → Socket is closed during handshake).
+            reloadCertificateManagerFromDatabase();
 
             // Supplement: inject LE root into CertificateManager (covers builds that ignore p12 path).
             registerUpdateServerCA(pluginContext);
@@ -378,12 +381,41 @@ try {
             }
             java.lang.reflect.Method importCert = dbClass.getMethod(
                     "importCertificate", String.class, String.class, String.class, boolean.class);
-            Object imported = importCert.invoke(null, p12.getAbsolutePath(), null, typeKey, false);
+            Object imported = importCert.invoke(null, p12.getAbsolutePath(), "", typeKey, false);
             int outLen = (imported instanceof byte[]) ? ((byte[]) imported).length : -1;
             Log.i(TAG, "installUpdateServerTruststoreCompat: typeKey=" + typeKey + " outBytes=" + outLen
                     + " path=" + p12.getAbsolutePath());
         } catch (Exception e) {
             Log.w(TAG, "installUpdateServerTruststoreCompat failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * After {@link #installUpdateServerTruststoreCompat}, trust lives in ATAK's cert DB but
+     * {@code CertificateManager} still serves empty {@code getCACerts(atakmaps.com)} until reloaded.
+     */
+    private void reloadCertificateManagerFromDatabase() {
+        try {
+            Class<?> cls = Class.forName("com.atakmap.net.CertificateManager");
+            try {
+                cls.getMethod("invalidate", String.class).invoke(null, "atakmaps.com");
+            } catch (Exception e) {
+                Log.d(TAG, "CertificateManager.invalidate skipped: " + e.getMessage());
+            }
+            java.lang.reflect.Method getInst = findSingletonGetter(cls);
+            if (getInst == null) {
+                Log.w(TAG, "reloadCertificateManagerFromDatabase: no singleton getter");
+                return;
+            }
+            Object cm = getInst.invoke(null);
+            if (cm == null) {
+                Log.w(TAG, "reloadCertificateManagerFromDatabase: CertificateManager null");
+                return;
+            }
+            cls.getMethod("refresh").invoke(cm);
+            Log.i(TAG, "CertificateManager refreshed after update-server DB import");
+        } catch (Exception e) {
+            Log.w(TAG, "reloadCertificateManagerFromDatabase failed: " + e.getMessage());
         }
     }
 
