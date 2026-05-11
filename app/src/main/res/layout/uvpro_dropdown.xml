@@ -442,6 +442,115 @@
             </LinearLayout>
         </LinearLayout>
 
+        <!-- ==================== CHANNEL CONTROL ==================== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#FF2D2D2D"
+            android:padding="12dp"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="CHANNEL CONTROL"
+                android:textColor="#FF00BCD4"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:paddingBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Dual Watch"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="13sp" />
+
+                <Switch
+                    android:id="@+id/switch_dual_watch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="false" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/text_dual_watch_state"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="A: --  B: --  Active: --"
+                android:textColor="#FFAAAAAA"
+                android:textSize="11sp"
+                android:paddingTop="2dp"
+                android:paddingBottom="6dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingBottom="8dp">
+
+                <Button
+                    android:id="@+id/btn_refresh_channels"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:text="Refresh Grid"
+                    android:textSize="11sp"
+                    android:layout_marginEnd="4dp"
+                    android:backgroundTint="#FF455A64" />
+
+                <Button
+                    android:id="@+id/btn_channel_target"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:text="Target: A"
+                    android:textSize="11sp"
+                    android:backgroundTint="#FF607D8B" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingBottom="8dp">
+
+                <Button
+                    android:id="@+id/btn_tune_a_now"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:text="Tune A Now"
+                    android:textSize="11sp"
+                    android:layout_marginEnd="4dp"
+                    android:backgroundTint="#FF00695C" />
+
+                <Button
+                    android:id="@+id/btn_tune_b_now"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:text="Tune B Now"
+                    android:textSize="11sp"
+                    android:backgroundTint="#FF6A1B9A" />
+            </LinearLayout>
+
+            <GridLayout
+                android:id="@+id/grid_channels"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:columnCount="5"
+                android:useDefaultMargins="true" />
+        </LinearLayout>
+
         <!-- ==================== ACTIONS ==================== -->
         <LinearLayout
             android:layout_width="match_parent"

@@ -4,10 +4,12 @@ import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.preference.PreferenceManager;
 import android.util.Log;
+import android.text.InputType;
 import android.text.method.ScrollingMovementMethod;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -15,6 +17,8 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CompoundButton;
+import android.widget.GridLayout;
+import android.widget.CheckBox;
 import android.widget.Switch;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
@@ -88,7 +92,14 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private Button btnScan;
     private Button btnDisconnect;
     private Button btnLoadSelectedRepeater;
+    private Button btnRefreshChannels;
+    private Button btnChannelTarget;
+    private Button btnTuneANow;
+    private Button btnTuneBNow;
     private TextView selectedRepeaterText;
+    private TextView dualWatchStateText;
+    private GridLayout channelsGrid;
+    private Switch switchDualWatch;
 
     private TextView favoritesLabel;
     private HorizontalScrollView favoritesScroll;
@@ -105,6 +116,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private int txCount = 0;
     private int rxCount = 0;
     private UVProRadioControlManager radioControlManager;
+    private boolean channelTargetVfoB = false;
 
     public UVProDropDownReceiver(MapView mapView,
                                      Context pluginContext,
@@ -196,6 +208,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         refreshFavoriteStrip();
         updateScanButtonText();
         updateSelectedRepeaterUi();
+        refreshChannelGridAsync();
         refreshLogView();
         appendLog("UV-PRO ready");
         return rootView;
@@ -221,7 +234,14 @@ public class UVProDropDownReceiver extends DropDownReceiver
         btnScan = rootView.findViewById(getId("btn_scan"));
         btnDisconnect = rootView.findViewById(getId("btn_disconnect"));
         btnLoadSelectedRepeater = rootView.findViewById(getId("btn_load_selected_repeater"));
+        btnRefreshChannels = rootView.findViewById(getId("btn_refresh_channels"));
+        btnChannelTarget = rootView.findViewById(getId("btn_channel_target"));
+        btnTuneANow = rootView.findViewById(getId("btn_tune_a_now"));
+        btnTuneBNow = rootView.findViewById(getId("btn_tune_b_now"));
         selectedRepeaterText = rootView.findViewById(getId("text_selected_repeater"));
+        dualWatchStateText = rootView.findViewById(getId("text_dual_watch_state"));
+        channelsGrid = rootView.findViewById(getId("grid_channels"));
+        switchDualWatch = rootView.findViewById(getId("switch_dual_watch"));
 
         favoritesLabel = rootView.findViewById(getId("favorites_label"));
         favoritesScroll = rootView.findViewById(getId("favorites_scroll"));
@@ -311,6 +331,34 @@ public class UVProDropDownReceiver extends DropDownReceiver
 
         if (btnLoadSelectedRepeater != null) {
             btnLoadSelectedRepeater.setOnClickListener(v -> loadSelectedRepeaterToRadio());
+        }
+
+        if (btnRefreshChannels != null) {
+            btnRefreshChannels.setOnClickListener(v -> refreshChannelGridAsync());
+        }
+
+        if (btnChannelTarget != null) {
+            btnChannelTarget.setOnClickListener(v -> {
+                channelTargetVfoB = !channelTargetVfoB;
+                updateChannelTargetButton();
+            });
+            updateChannelTargetButton();
+        }
+
+        if (switchDualWatch != null) {
+            switchDualWatch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (!buttonView.isPressed()) {
+                    return;
+                }
+                applyDualWatch(isChecked);
+            });
+        }
+
+        if (btnTuneANow != null) {
+            btnTuneANow.setOnClickListener(v -> setActiveVfo(false));
+        }
+        if (btnTuneBNow != null) {
+            btnTuneBNow.setOnClickListener(v -> setActiveVfo(true));
         }
     }
 
@@ -556,6 +604,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         if (btnDisconnect != null) btnDisconnect.setEnabled(connected);
         refreshFavoriteStrip();
         updateScanButtonText();
+        refreshChannelGridAsync();
     }
 
     private void updateContactCount() {
@@ -663,6 +712,351 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 Locale.US, "%s (RX %.5f / TX %.5f)",
                 spec.name, spec.rxFreqMHz, spec.txFreqMHz));
         btnLoadSelectedRepeater.setEnabled(true);
+    }
+
+    private void refreshChannelGridAsync() {
+        if (radioControlManager == null || channelsGrid == null) {
+            return;
+        }
+        new Thread(() -> {
+            UVProRadioControlManager.RadioControlSnapshot snapshot =
+                    radioControlManager.readSnapshot(30);
+            getMapView().post(() -> renderChannelGrid(snapshot));
+        }, "uvpro-read-channels").start();
+    }
+
+    private void renderChannelGrid(UVProRadioControlManager.RadioControlSnapshot snapshot) {
+        if (channelsGrid == null) {
+            return;
+        }
+        channelsGrid.removeAllViews();
+
+        if (snapshot == null) {
+            if (dualWatchStateText != null) {
+                dualWatchStateText.setText(btManager.isConnected()
+                        ? "Unable to read radio channels."
+                        : "Connect radio to read channels.");
+            }
+            if (switchDualWatch != null) {
+                switchDualWatch.setChecked(false);
+                switchDualWatch.setEnabled(false);
+            }
+            if (btnChannelTarget != null) {
+                btnChannelTarget.setEnabled(false);
+            }
+            return;
+        }
+
+        if (switchDualWatch != null) {
+            switchDualWatch.setEnabled(true);
+            switchDualWatch.setChecked(snapshot.dualWatchEnabled);
+        }
+
+        if (dualWatchStateText != null) {
+            dualWatchStateText.setText(String.format(
+                    Locale.US,
+                    "A: CH%02d  B: CH%02d  Active: CH%02d",
+                    snapshot.channelA + 1,
+                    snapshot.channelB + 1,
+                    snapshot.currentChannelId + 1));
+        }
+
+        if (!snapshot.dualWatchEnabled) {
+            channelTargetVfoB = false;
+        }
+        if (btnChannelTarget != null) {
+            btnChannelTarget.setEnabled(snapshot.dualWatchEnabled);
+        }
+        updateChannelTargetButton();
+
+        for (UVProRadioControlManager.ChannelSummary channel : snapshot.channels) {
+            if (channel == null) {
+                continue;
+            }
+            Button chip = new Button(getMapView().getContext());
+            chip.setAllCaps(false);
+            chip.setTextSize(10f);
+            chip.setMinHeight(0);
+            chip.setMinimumHeight(0);
+            chip.setPadding(dip(getMapView().getContext(), 4),
+                    dip(getMapView().getContext(), 3),
+                    dip(getMapView().getContext(), 4),
+                    dip(getMapView().getContext(), 3));
+
+            String name = (channel.name == null || channel.name.isEmpty())
+                    ? "--" : channel.name;
+            chip.setText(String.format(
+                    Locale.US,
+                    "%02d %s\n%.5f",
+                    channel.channelId + 1,
+                    name,
+                    channel.rxFreqMHz));
+
+            int bgColor = 0xFF3D3D3D;
+            if (channel.channelId == snapshot.currentChannelId) {
+                bgColor = 0xFF005A8D; // Active now
+            }
+            if (channel.channelId == snapshot.channelA) {
+                bgColor = 0xFF00695C; // VFO A
+            }
+            if (snapshot.dualWatchEnabled && channel.channelId == snapshot.channelB) {
+                bgColor = 0xFF6A1B9A; // VFO B
+            }
+            if (channel.channelId == snapshot.currentChannelId
+                    && (channel.channelId == snapshot.channelA
+                    || (snapshot.dualWatchEnabled && channel.channelId == snapshot.channelB))) {
+                bgColor = 0xFF2E7D32; // Active and assigned
+            }
+
+            chip.setBackgroundColor(bgColor);
+            chip.setTextColor(0xFFFFFFFF);
+            chip.setOnClickListener(v -> applyChannelSelection(channel.channelId));
+            chip.setOnLongClickListener(v -> {
+                showChannelProgramDialog(channel);
+                return true;
+            });
+
+            GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+            lp.width = 0;
+            lp.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
+            lp.setMargins(dip(getMapView().getContext(), 2),
+                    dip(getMapView().getContext(), 2),
+                    dip(getMapView().getContext(), 2),
+                    dip(getMapView().getContext(), 2));
+            channelsGrid.addView(chip, lp);
+        }
+    }
+
+    private void applyDualWatch(boolean enabled) {
+        if (radioControlManager == null) {
+            return;
+        }
+        appendLog("Updating dual watch...");
+        new Thread(() -> {
+            UVProRadioControlManager.ProgramResult result =
+                    radioControlManager.setDualWatchEnabled(enabled);
+            getMapView().post(() -> {
+                appendLog(result.message);
+                Toast.makeText(getMapView().getContext(),
+                        result.message,
+                        result.success ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG).show();
+                refreshChannelGridAsync();
+            });
+        }, "uvpro-dual-watch").start();
+    }
+
+    private void applyChannelSelection(int channelId) {
+        if (radioControlManager == null) {
+            return;
+        }
+        boolean targetB = channelTargetVfoB;
+        appendLog(String.format(Locale.US,
+                "Setting %s to CH%02d...",
+                targetB ? "VFO-B" : "VFO-A",
+                channelId + 1));
+        new Thread(() -> {
+            UVProRadioControlManager.ProgramResult result =
+                    radioControlManager.setWatchChannel(channelId, targetB);
+            getMapView().post(() -> {
+                appendLog(result.message);
+                if (!result.success) {
+                    Toast.makeText(getMapView().getContext(),
+                            result.message, Toast.LENGTH_LONG).show();
+                }
+                refreshChannelGridAsync();
+            });
+        }, "uvpro-set-channel").start();
+    }
+
+    private void setActiveVfo(boolean useVfoB) {
+        if (radioControlManager == null) {
+            return;
+        }
+        appendLog(useVfoB ? "Switching active side to VFO-B..." : "Switching active side to VFO-A...");
+        new Thread(() -> {
+            UVProRadioControlManager.ProgramResult result = radioControlManager.setActiveVfo(useVfoB);
+            getMapView().post(() -> {
+                appendLog(result.message);
+                if (!result.success) {
+                    Toast.makeText(getMapView().getContext(),
+                            result.message, Toast.LENGTH_LONG).show();
+                }
+                refreshChannelGridAsync();
+            });
+        }, "uvpro-set-active-vfo").start();
+    }
+
+    private void updateChannelTargetButton() {
+        if (btnChannelTarget == null) {
+            return;
+        }
+        btnChannelTarget.setText(channelTargetVfoB ? "Target: B" : "Target: A");
+    }
+
+    private void showChannelProgramDialog(UVProRadioControlManager.ChannelSummary channel) {
+        if (channel == null) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+
+        LinearLayout layout = new LinearLayout(ctx);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int p = dip(ctx, 12);
+        layout.setPadding(p, p, p, p);
+
+        EditText editName = new EditText(ctx);
+        editName.setHint("Name (max 10)");
+        editName.setSingleLine(true);
+        editName.setText(channel.name == null ? "" : channel.name);
+        layout.addView(editName);
+
+        EditText editRx = new EditText(ctx);
+        editRx.setHint("RX Frequency MHz (e.g. 146.940)");
+        editRx.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        if (channel.rxFreqMHz > 0) {
+            editRx.setText(String.format(Locale.US, "%.5f", channel.rxFreqMHz));
+        }
+        layout.addView(editRx);
+
+        EditText editTx = new EditText(ctx);
+        editTx.setHint("TX Frequency MHz");
+        editTx.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        if (channel.txFreqMHz > 0) {
+            editTx.setText(String.format(Locale.US, "%.5f", channel.txFreqMHz));
+        }
+        layout.addView(editTx);
+
+        EditText editTxTone = new EditText(ctx);
+        editTxTone.setHint("TX Tone (blank, 100.0, D023)");
+        editTxTone.setSingleLine(true);
+        layout.addView(editTxTone);
+
+        EditText editRxTone = new EditText(ctx);
+        editRxTone.setHint("RX Tone (blank, 100.0, D023)");
+        editRxTone.setSingleLine(true);
+        layout.addView(editRxTone);
+
+        EditText editSquelch = new EditText(ctx);
+        editSquelch.setHint("Squelch 0-9 (optional)");
+        editSquelch.setInputType(InputType.TYPE_CLASS_NUMBER);
+        layout.addView(editSquelch);
+
+        CheckBox cbScan = new CheckBox(ctx);
+        cbScan.setText("Scan enabled");
+        cbScan.setChecked(channel.scanEnabled);
+        layout.addView(cbScan);
+
+        CheckBox cbMute = new CheckBox(ctx);
+        cbMute.setText("Mute channel audio");
+        cbMute.setChecked(channel.muted);
+        layout.addView(cbMute);
+
+        CheckBox cbHighPower = new CheckBox(ctx);
+        cbHighPower.setText("TX high power");
+        cbHighPower.setChecked(true);
+        layout.addView(cbHighPower);
+
+        CheckBox cbWide = new CheckBox(ctx);
+        cbWide.setText("Wide bandwidth");
+        cbWide.setChecked(true);
+        layout.addView(cbWide);
+
+        new AlertDialog.Builder(ctx)
+                .setTitle(String.format(Locale.US, "Program CH%02d", channel.channelId + 1))
+                .setView(layout)
+                .setPositiveButton("Save", (dialog, which) -> {
+                    String name = editName.getText().toString().trim();
+                    String rxStr = editRx.getText().toString().trim();
+                    String txStr = editTx.getText().toString().trim();
+                    String txToneStr = editTxTone.getText().toString().trim();
+                    String rxToneStr = editRxTone.getText().toString().trim();
+                    String sqStr = editSquelch.getText().toString().trim();
+
+                    double rx;
+                    double tx;
+                    try {
+                        rx = Double.parseDouble(rxStr);
+                        tx = Double.parseDouble(txStr);
+                    } catch (Exception e) {
+                        Toast.makeText(ctx, "Invalid RX/TX frequency.", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+
+                    Object txTone = parseToneInput(txToneStr);
+                    Object rxTone = parseToneInput(rxToneStr);
+                    if (!txToneStr.isEmpty() && txTone == null) {
+                        Toast.makeText(ctx, "Invalid TX tone format.", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    if (!rxToneStr.isEmpty() && rxTone == null) {
+                        Toast.makeText(ctx, "Invalid RX tone format.", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+
+                    int sq = -1;
+                    if (!sqStr.isEmpty()) {
+                        try {
+                            sq = Integer.parseInt(sqStr);
+                        } catch (Exception e) {
+                            Toast.makeText(ctx, "Invalid squelch value.", Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        if (sq < 0 || sq > 9) {
+                            Toast.makeText(ctx, "Squelch must be 0-9.", Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                    }
+
+                    UVProRadioControlManager.ManualChannelSpec spec =
+                            new UVProRadioControlManager.ManualChannelSpec(
+                                    name,
+                                    rx,
+                                    tx,
+                                    txTone,
+                                    rxTone,
+                                    cbScan.isChecked(),
+                                    cbMute.isChecked(),
+                                    cbHighPower.isChecked(),
+                                    cbWide.isChecked(),
+                                    sq
+                            );
+
+                    appendLog(String.format(Locale.US, "Programming CH%02d...", channel.channelId + 1));
+                    new Thread(() -> {
+                        UVProRadioControlManager.ProgramResult result =
+                                radioControlManager.programManualChannel(channel.channelId, spec);
+                        getMapView().post(() -> {
+                            appendLog(result.message);
+                            Toast.makeText(ctx, result.message,
+                                    result.success ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG).show();
+                            refreshChannelGridAsync();
+                        });
+                    }, "uvpro-program-manual-channel").start();
+                })
+                .setNegativeButton("Cancel", (DialogInterface dialog, int which) -> { })
+                .show();
+    }
+
+    private Object parseToneInput(String value) {
+        if (value == null) {
+            return null;
+        }
+        String t = value.trim();
+        if (t.isEmpty() || "none".equalsIgnoreCase(t)) {
+            return null;
+        }
+        if (t.startsWith("D") || t.startsWith("d")) {
+            try {
+                return Integer.parseInt(t.substring(1).replaceAll("[^0-9]", ""));
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        try {
+            return Double.parseDouble(t.replaceAll("[^0-9.]", ""));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private void loadSelectedRepeaterToRadio() {

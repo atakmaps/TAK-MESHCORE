@@ -24,7 +24,9 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
     private static final int BASIC_GROUP = 2;
     private static final int CMD_READ_SETTINGS = 10;
     private static final int CMD_WRITE_SETTINGS = 11;
+    private static final int CMD_READ_RF_CH = 13;
     private static final int CMD_WRITE_RF_CH = 14;
+    private static final int CMD_GET_HT_STATUS = 20;
     private static final int STATUS_SUCCESS = 0;
 
     private static final Pattern TX_FREQ_PATTERN =
@@ -57,6 +59,77 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
         public ProgramResult(boolean success, String message) {
             this.success = success;
             this.message = message;
+        }
+    }
+
+    public static class ChannelSummary {
+        public final int channelId;
+        public final String name;
+        public final double rxFreqMHz;
+        public final double txFreqMHz;
+        public final boolean scanEnabled;
+        public final boolean muted;
+
+        public ChannelSummary(int channelId, String name, double rxFreqMHz, double txFreqMHz,
+                              boolean scanEnabled, boolean muted) {
+            this.channelId = channelId;
+            this.name = name;
+            this.rxFreqMHz = rxFreqMHz;
+            this.txFreqMHz = txFreqMHz;
+            this.scanEnabled = scanEnabled;
+            this.muted = muted;
+        }
+    }
+
+    public static class RadioControlSnapshot {
+        public final int channelA;
+        public final int channelB;
+        public final boolean dualWatchEnabled;
+        public final int currentChannelId;
+        public final ChannelSummary[] channels;
+
+        public RadioControlSnapshot(int channelA, int channelB, boolean dualWatchEnabled,
+                                    int currentChannelId, ChannelSummary[] channels) {
+            this.channelA = channelA;
+            this.channelB = channelB;
+            this.dualWatchEnabled = dualWatchEnabled;
+            this.currentChannelId = currentChannelId;
+            this.channels = channels;
+        }
+    }
+
+    public static class ManualChannelSpec {
+        public final String name;
+        public final double rxFreqMHz;
+        public final double txFreqMHz;
+        public final Object txTone;
+        public final Object rxTone;
+        public final boolean scanEnabled;
+        public final boolean muted;
+        public final boolean highPower;
+        public final boolean wideBandwidth;
+        public final int squelchLevel; // -1 keep current, otherwise 0..9
+
+        public ManualChannelSpec(String name,
+                                 double rxFreqMHz,
+                                 double txFreqMHz,
+                                 Object txTone,
+                                 Object rxTone,
+                                 boolean scanEnabled,
+                                 boolean muted,
+                                 boolean highPower,
+                                 boolean wideBandwidth,
+                                 int squelchLevel) {
+            this.name = name;
+            this.rxFreqMHz = rxFreqMHz;
+            this.txFreqMHz = txFreqMHz;
+            this.txTone = txTone;
+            this.rxTone = rxTone;
+            this.scanEnabled = scanEnabled;
+            this.muted = muted;
+            this.highPower = highPower;
+            this.wideBandwidth = wideBandwidth;
+            this.squelchLevel = squelchLevel;
         }
     }
 
@@ -106,6 +179,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
     private PendingRequest pending;
     private RepeaterSpec selectedRepeater;
     private SelectionListener selectionListener;
+    private Integer storedChannelAForVfoBTx;
 
     public UVProRadioControlManager(BtConnectionManager btManager) {
         this.btManager = btManager;
@@ -206,6 +280,249 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                     + " to channel " + (channelId + 1) + " and tuned radio.");
         } catch (Exception e) {
             Log.e(TAG, "programSelectedRepeaterAndTune failed", e);
+            return new ProgramResult(false, "Programming error: " + e.getMessage());
+        }
+    }
+
+    public RadioControlSnapshot readSnapshot(int maxChannels) {
+        if (!btManager.isConnected()) {
+            return null;
+        }
+        try {
+            CommandReply readSettings = sendCommandSync(
+                    BASIC_GROUP, CMD_READ_SETTINGS, new byte[0], 2500);
+            if (readSettings == null || readSettings.status != STATUS_SUCCESS
+                    || readSettings.payload == null || readSettings.payload.length < 12) {
+                return null;
+            }
+
+            SettingsState settingsState = SettingsState.parse(readSettings.payload);
+            if (settingsState == null) {
+                return null;
+            }
+
+            int currentChannel = settingsState.channelA;
+            CommandReply htStatusReply = sendCommandSync(
+                    BASIC_GROUP, CMD_GET_HT_STATUS, new byte[0], 2500);
+            if (htStatusReply != null && htStatusReply.status == STATUS_SUCCESS
+                    && htStatusReply.payload != null && htStatusReply.payload.length >= 2) {
+                currentChannel = parseCurrentChannelIdFromHtStatus(htStatusReply.payload);
+            }
+
+            int count = Math.max(1, Math.min(30, maxChannels));
+            ChannelSummary[] channels = new ChannelSummary[count];
+            for (int i = 0; i < count; i++) {
+                CommandReply channelReply = sendCommandSync(
+                        BASIC_GROUP, CMD_READ_RF_CH, new byte[]{(byte) i}, 2500);
+                if (channelReply == null || channelReply.status != STATUS_SUCCESS
+                        || channelReply.payload == null || channelReply.payload.length < 20) {
+                    channels[i] = new ChannelSummary(i, "", 0.0, 0.0, false, false);
+                    continue;
+                }
+                channels[i] = parseChannelSummary(channelReply.payload, i);
+            }
+
+            return new RadioControlSnapshot(
+                    settingsState.channelA,
+                    settingsState.channelB,
+                    settingsState.doubleChannel == 1,
+                    currentChannel,
+                    channels
+            );
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+    }
+
+    public ProgramResult setDualWatchEnabled(boolean enabled) {
+        if (!btManager.isConnected()) {
+            return new ProgramResult(false, "Radio not connected.");
+        }
+        try {
+            CommandReply readSettings = sendCommandSync(
+                    BASIC_GROUP, CMD_READ_SETTINGS, new byte[0], 2500);
+            if (readSettings == null || readSettings.status != STATUS_SUCCESS
+                    || readSettings.payload == null || readSettings.payload.length < 12) {
+                return new ProgramResult(false, "Could not read radio settings.");
+            }
+            byte[] modified = modifySettingsRaw(
+                    readSettings.payload, null, null, enabled ? 1 : 0, null, null);
+            if (modified == null) {
+                return new ProgramResult(false, "Could not build dual-watch settings.");
+            }
+            CommandReply writeSettings = sendCommandSync(
+                    BASIC_GROUP, CMD_WRITE_SETTINGS, modified, 2500);
+            if (writeSettings == null) {
+                return new ProgramResult(false, "No response writing settings.");
+            }
+            if (writeSettings.status != STATUS_SUCCESS) {
+                return new ProgramResult(false, "Dual-watch update failed.");
+            }
+            return new ProgramResult(true, enabled ? "Dual watch enabled." : "Dual watch disabled.");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new ProgramResult(false, "Interrupted while updating dual watch.");
+        }
+    }
+
+    public ProgramResult setWatchChannel(int channelId, boolean targetVfoB) {
+        if (!btManager.isConnected()) {
+            return new ProgramResult(false, "Radio not connected.");
+        }
+        if (channelId < 0 || channelId > 255) {
+            return new ProgramResult(false, "Invalid channel.");
+        }
+        try {
+            CommandReply readSettings = sendCommandSync(
+                    BASIC_GROUP, CMD_READ_SETTINGS, new byte[0], 2500);
+            if (readSettings == null || readSettings.status != STATUS_SUCCESS
+                    || readSettings.payload == null || readSettings.payload.length < 12) {
+                return new ProgramResult(false, "Could not read radio settings.");
+            }
+            Integer newA = targetVfoB ? null : channelId;
+            Integer newB = targetVfoB ? channelId : null;
+            byte[] modified = modifySettingsRaw(readSettings.payload, newA, newB, null, null, null);
+            if (modified == null) {
+                return new ProgramResult(false, "Could not build channel settings.");
+            }
+            CommandReply writeSettings = sendCommandSync(
+                    BASIC_GROUP, CMD_WRITE_SETTINGS, modified, 2500);
+            if (writeSettings == null) {
+                return new ProgramResult(false, "No response writing channel settings.");
+            }
+            if (writeSettings.status != STATUS_SUCCESS) {
+                return new ProgramResult(false, "Failed to update channel selection.");
+            }
+            return new ProgramResult(true,
+                    "Set " + (targetVfoB ? "VFO-B" : "VFO-A") + " to channel " + (channelId + 1) + ".");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new ProgramResult(false, "Interrupted while setting channel.");
+        }
+    }
+
+    public ProgramResult setActiveVfo(boolean useVfoB) {
+        if (!btManager.isConnected()) {
+            return new ProgramResult(false, "Radio not connected.");
+        }
+        try {
+            CommandReply readSettings = sendCommandSync(
+                    BASIC_GROUP, CMD_READ_SETTINGS, new byte[0], 2500);
+            if (readSettings == null || readSettings.status != STATUS_SUCCESS
+                    || readSettings.payload == null || readSettings.payload.length < 12) {
+                return new ProgramResult(false, "Could not read radio settings.");
+            }
+            SettingsState state = SettingsState.parse(readSettings.payload);
+            if (state == null) {
+                return new ProgramResult(false, "Could not parse radio settings.");
+            }
+            int vfoX = useVfoB ? 2 : 1;
+            Integer newChannelA = null;
+            if (useVfoB) {
+                if (storedChannelAForVfoBTx == null) {
+                    storedChannelAForVfoBTx = state.channelA;
+                }
+                // UV-PRO TX path follows channel A; mirror B into A so TX uses B selection.
+                newChannelA = state.channelB;
+            } else if (storedChannelAForVfoBTx != null) {
+                newChannelA = storedChannelAForVfoBTx;
+                storedChannelAForVfoBTx = null;
+            }
+            byte[] modified = modifySettingsRaw(readSettings.payload, newChannelA, null, null, null, vfoX);
+            if (modified == null) {
+                return new ProgramResult(false, "Could not build active VFO settings.");
+            }
+            CommandReply writeSettings = sendCommandSync(
+                    BASIC_GROUP, CMD_WRITE_SETTINGS, modified, 2500);
+            if (writeSettings == null) {
+                return new ProgramResult(false, "No response writing active VFO.");
+            }
+            if (writeSettings.status != STATUS_SUCCESS) {
+                return new ProgramResult(false, "Failed to switch active VFO.");
+            }
+            if (useVfoB) {
+                return new ProgramResult(true, "Active VFO set to B (TX now follows B channel).");
+            } else {
+                return new ProgramResult(true, "Active VFO set to A.");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new ProgramResult(false, "Interrupted while switching active VFO.");
+        }
+    }
+
+    public ProgramResult programManualChannel(int channelId, ManualChannelSpec spec) {
+        if (!btManager.isConnected()) {
+            return new ProgramResult(false, "Radio not connected.");
+        }
+        if (spec == null) {
+            return new ProgramResult(false, "Channel parameters are missing.");
+        }
+        if (channelId < 0 || channelId > 255) {
+            return new ProgramResult(false, "Invalid channel.");
+        }
+        if (spec.rxFreqMHz <= 0.0 || spec.txFreqMHz <= 0.0) {
+            return new ProgramResult(false, "RX/TX frequency must be > 0.");
+        }
+        try {
+            RadioChannel channel = new RadioChannel(
+                    channelId,
+                    0, // FM
+                    spec.txFreqMHz,
+                    0, // FM
+                    spec.rxFreqMHz,
+                    spec.txTone,
+                    spec.rxTone,
+                    spec.scanEnabled,
+                    spec.highPower,
+                    false, // talk-around
+                    spec.wideBandwidth ? 1 : 0,
+                    false, // pre/de-emphasis bypass
+                    false, // sign
+                    !spec.highPower, // med power when not high
+                    false, // tx disable
+                    false, // fixed freq
+                    false, // fixed bandwidth
+                    false, // fixed tx power
+                    spec.muted,
+                    sanitizeName(spec.name)
+            );
+
+            CommandReply writeChannel = sendCommandSync(
+                    BASIC_GROUP, CMD_WRITE_RF_CH, channel.toBytes(), 2500);
+            if (writeChannel == null) {
+                return new ProgramResult(false, "No response writing channel.");
+            }
+            if (writeChannel.status != STATUS_SUCCESS) {
+                return new ProgramResult(false, "Write channel failed.");
+            }
+
+            if (spec.squelchLevel >= 0) {
+                CommandReply readSettings = sendCommandSync(
+                        BASIC_GROUP, CMD_READ_SETTINGS, new byte[0], 2500);
+                if (readSettings == null || readSettings.status != STATUS_SUCCESS
+                        || readSettings.payload == null || readSettings.payload.length < 12) {
+                    return new ProgramResult(false, "Channel saved, but failed to read settings for squelch.");
+                }
+                int clamped = Math.max(0, Math.min(9, spec.squelchLevel));
+                byte[] modified = modifySettingsRaw(
+                        readSettings.payload, null, null, null, clamped, null);
+                if (modified == null) {
+                    return new ProgramResult(false, "Channel saved, but failed to build squelch update.");
+                }
+                CommandReply writeSettings = sendCommandSync(
+                        BASIC_GROUP, CMD_WRITE_SETTINGS, modified, 2500);
+                if (writeSettings == null || writeSettings.status != STATUS_SUCCESS) {
+                    return new ProgramResult(false, "Channel saved, but failed to apply squelch.");
+                }
+            }
+
+            return new ProgramResult(true, "Channel " + (channelId + 1) + " saved.");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new ProgramResult(false, "Interrupted while programming channel.");
+        } catch (Exception e) {
             return new ProgramResult(false, "Programming error: " + e.getMessage());
         }
     }
@@ -542,6 +859,22 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
     }
 
     private static byte[] modifyChannelInRawSettings(byte[] rawSettings, int channelId, int dualWatchMode) {
+        Integer newA = null;
+        Integer newB = null;
+        if (dualWatchMode == 2) {
+            newB = channelId;
+        } else {
+            newA = channelId;
+        }
+        return modifySettingsRaw(rawSettings, newA, newB, null, null, null);
+    }
+
+    private static byte[] modifySettingsRaw(byte[] rawSettings,
+                                            Integer newChannelA,
+                                            Integer newChannelB,
+                                            Integer newDoubleChannel,
+                                            Integer newSquelch,
+                                            Integer newVfoX) {
         try {
             if (rawSettings.length < 12) {
                 return null;
@@ -589,26 +922,21 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             boolean chDataLock = reader.readBool();
             reader.skipBits(3);
 
-            int newChannelALower = channelALower;
-            int newChannelAUpper = channelAUpper;
-            int newChannelBLower = channelBLower;
-            int newChannelBUpper = channelBUpper;
-
-            if (dualWatchMode == 2) {
-                newChannelBLower = channelId & 0x0F;
-                newChannelBUpper = (channelId >> 4) & 0x0F;
-            } else {
-                newChannelALower = channelId & 0x0F;
-                newChannelAUpper = (channelId >> 4) & 0x0F;
-            }
+            int currentA = (channelAUpper << 4) | channelALower;
+            int currentB = (channelBUpper << 4) | channelBLower;
+            int nextA = newChannelA != null ? newChannelA : currentA;
+            int nextB = newChannelB != null ? newChannelB : currentB;
+            int nextDouble = newDoubleChannel != null ? newDoubleChannel : doubleChannel;
+            int nextSquelch = newSquelch != null ? newSquelch : squelchLevel;
+            int nextVfoX = newVfoX != null ? newVfoX : vfoX;
 
             BitWriter writer = new BitWriter(12);
-            writer.writeInt(newChannelALower, 4);
-            writer.writeInt(newChannelBLower, 4);
+            writer.writeInt(nextA & 0x0F, 4);
+            writer.writeInt(nextB & 0x0F, 4);
             writer.writeBool(scan);
             writer.writeInt(aghfpCallMode, 1);
-            writer.writeInt(doubleChannel, 2);
-            writer.writeInt(squelchLevel, 4);
+            writer.writeInt(nextDouble, 2);
+            writer.writeInt(nextSquelch, 4);
             writer.writeBool(tailElim);
             writer.writeBool(autoRelayEn);
             writer.writeBool(autoPowerOn);
@@ -631,10 +959,10 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             writer.writeBool(leadingSyncBitEn);
             writer.writeBool(pairingAtPowerOn);
             writer.writeInt(screenTimeout, 5);
-            writer.writeInt(vfoX, 2);
+            writer.writeInt(nextVfoX, 2);
             writer.writeBool(imperialUnit);
-            writer.writeInt(newChannelAUpper, 4);
-            writer.writeInt(newChannelBUpper, 4);
+            writer.writeInt((nextA >> 4) & 0x0F, 4);
+            writer.writeInt((nextB >> 4) & 0x0F, 4);
             writer.writeInt(wxMode, 2);
             writer.writeInt(noaaCh, 4);
             writer.writeInt(vfolTxPowerX, 2);
@@ -651,6 +979,109 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
         } catch (Exception e) {
             Log.e(TAG, "Failed to modify settings bytes", e);
             return null;
+        }
+    }
+
+    private static int parseCurrentChannelIdFromHtStatus(byte[] payload) {
+        int currChIdLower = (payload[1] >> 4) & 0x0F;
+        int currChannelIdUpper = 0;
+        if (payload.length >= 4) {
+            currChannelIdUpper = (payload[3] & 0x3C) >> 2;
+        }
+        return (currChannelIdUpper << 4) + currChIdLower;
+    }
+
+    private static ChannelSummary parseChannelSummary(byte[] payload, int fallbackChannelId) {
+        int channelId = payload[0] & 0xFF;
+        if (channelId <= 0 && fallbackChannelId >= 0) {
+            channelId = fallbackChannelId;
+        }
+        int txFreqHz = ((payload[1] & 0x3F) << 24)
+                | ((payload[2] & 0xFF) << 16)
+                | ((payload[3] & 0xFF) << 8)
+                | (payload[4] & 0xFF);
+        int rxFreqHz = ((payload[5] & 0x3F) << 24)
+                | ((payload[6] & 0xFF) << 16)
+                | ((payload[7] & 0xFF) << 8)
+                | (payload[8] & 0xFF);
+        boolean scanEnabled = (payload[13] & 0x80) != 0;
+        boolean muted = (payload[14] & 0x10) != 0;
+        String name = decodeChannelName(payload);
+        return new ChannelSummary(
+                channelId,
+                name,
+                rxFreqHz <= 0 ? 0.0 : (rxFreqHz / 1_000_000.0),
+                txFreqHz <= 0 ? 0.0 : (txFreqHz / 1_000_000.0),
+                scanEnabled,
+                muted
+        );
+    }
+
+    private static String decodeChannelName(byte[] payload) {
+        int nameStart = 15;
+        if (payload.length <= nameStart) {
+            return "";
+        }
+        int nameEnd = Math.min(payload.length, nameStart + 10);
+        String raw = new String(Arrays.copyOfRange(payload, nameStart, nameEnd),
+                StandardCharsets.UTF_8);
+        int nullPos = raw.indexOf('\0');
+        if (nullPos >= 0) {
+            raw = raw.substring(0, nullPos);
+        }
+        return raw.trim();
+    }
+
+    private static class SettingsState {
+        int channelA;
+        int channelB;
+        int doubleChannel;
+
+        static SettingsState parse(byte[] rawSettings) {
+            if (rawSettings == null || rawSettings.length < 12) {
+                return null;
+            }
+            try {
+                SettingsState state = new SettingsState();
+                BitReader reader = new BitReader(rawSettings);
+                int channelALower = reader.readInt(4);
+                int channelBLower = reader.readInt(4);
+                reader.readBool();
+                reader.readInt(1);
+                state.doubleChannel = reader.readInt(2);
+                reader.readInt(4);
+                reader.readBool();
+                reader.readBool();
+                reader.readBool();
+                reader.readBool();
+                reader.readInt(3);
+                reader.readInt(4);
+                reader.readInt(5);
+                reader.readInt(2);
+                reader.readInt(3);
+                reader.readBool();
+                reader.readBool();
+                reader.readBool();
+                reader.readInt(3);
+                reader.readInt(5);
+                reader.readInt(2);
+                reader.readInt(4);
+                reader.readInt(6);
+                reader.readBool();
+                reader.readBool();
+                reader.readBool();
+                reader.readBool();
+                reader.readInt(5);
+                reader.readInt(2);
+                reader.readBool();
+                int channelAUpper = reader.readInt(4);
+                int channelBUpper = reader.readInt(4);
+                state.channelA = (channelAUpper << 4) | channelALower;
+                state.channelB = (channelBUpper << 4) | channelBLower;
+                return state;
+            } catch (Exception e) {
+                return null;
+            }
         }
     }
 
