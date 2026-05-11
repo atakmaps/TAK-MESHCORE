@@ -18,6 +18,10 @@ for off-grid team communication via UV-PRO radios.
 3. Build: `./gradlew assembleCivDebug`
 4. Install the APK alongside ATAK-CIV on your device
 
+### Merges, update-server TLS, and TPC zips
+
+Branches that touch plugin startup or **`UVProMapComponent`** can break **HTTPS trust** for the plugin repo (`atakmaps.com`) without compile errors. **`UVProLifecycle`** must still run early trust setup. See **[AGENTS.md](AGENTS.md)** sections **“Merging branches (do not break update-server TLS)”** and **“TPC submission zips”** before merging or cutting a TPC submission.
+
 ### Code Style
 
 - Java 17 language level

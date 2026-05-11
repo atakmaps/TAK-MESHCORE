@@ -149,6 +149,38 @@ adb -s SERIAL shell pm list users
 adb -s SERIAL logcat -v time "*:S" UVPro.Router:D UVPro.ChatBridge:D UVPro.CotBridge:D BTRelay.Handler:I ChatManagerMapComponent:D
 ```
 
+### Merging branches (do not break update-server TLS)
+
+The plugin **auto-configures** ATAK’s **HTTPS plugin repo** (`atakmaps.com`) and **imports trust** via **reflection** on ATAK internals. It is **not** fire-and-forget: a bad merge can restore **`getCACerts … 0 certs`**, **`CentralTrustManager … blocked`**, and **`Socket is closed`** on repo sync.
+
+**High-risk files (review conflicts carefully; prefer `main` unless intentionally replacing trust logic):**
+
+| Area | Files / assets |
+|------|----------------|
+| Trust + prefs + reflection | `UVProMapComponent.java` — `configureUpdateServerStatic`, `installUpdateServerTruststoreCompat`, `bindUpdateServerCaToHost`, `registerUpdateServerCA`, `reloadCertificateManagerFromDatabase`, deferred sync |
+| Early hook | `UVProLifecycle.java` — must keep **`UVProMapComponent.applyUpdateServerTrustEarly`** (or an equivalent early trust path) |
+| Bundled trust material | `app/src/main/assets/atakmaps-ca.p12`, `app/src/main/assets/isrg-root-x1.pem` |
+| PKCS#12 unlock (not a Java literal) | `app/src/main/res/values/strings.xml` — **`uvpro_trust_bundle_p12_key`** (Base64) |
+
+**Do not:**
+
+- Remove or bypass the **`configureUpdateServerStatic` → import → reload → register CA → schedule sync** chain for “cleanup.”
+- Delay trust setup until **after** ATAK has already started **TakHttp** repo sync (race condition).
+- Rename ATAK **SharedPreferences** keys in that flow without verifying behavior on **ATAK-CIV 5.5.1**.
+- Point the **quick-launcher** tool at full-color **`ic_uvpro`** without understanding ATAK toolbar **tint** (use **`ic_uvpro_toolbar`** via **`UVProTool.toolbarIcon`**).
+
+**R8 / ProGuard:** Root `app/proguard-gradle.txt` applies **`-applymapping`** from ATAK’s mapping and keeps **`com.uvpro.plugin.**`**. Do not shrink or repackage in ways that break reflection entry points.
+
+**After a merge:** `./gradlew assembleCivRelease`, install on a device with **`pm clear com.atakmap.app.civ`** (and fresh **`/sdcard/atak`** / **`/sdcard/ATAK`** if testing a true clean slate), then check logcat for **`UVPro`**, **`getCACerts for atakmaps.com`**, and TAK Package Management **green sync**.
+
+### TPC submission zips
+
+- **Version:** Set **`ext.PLUGIN_VERSION`** in **root `build.gradle`** only. **`versionCode`** is derived in **`app/build.gradle`** from that string.
+- **Packaging:** Run **`./tools/package-submission.sh`** from the repo root. It reads the version from `build.gradle` and writes **`UV-PRO-<version>-ATAK-5.5.1-source.zip`** (and manifest) under **`Plugins/TAK Submissions/`** by default.
+- **`git archive`:** Only **committed** files are included. Uncommitted work is **not** in the zip.
+- **Vendored takdev:** The archive is expected to include **`gradle/takdev/atak-gradle-takdev.jar`** so TPC can build without Artifactory init scripts.
+- **Local APK beside zip:** Run **`./gradlew assembleCivRelease`** before `package-submission.sh` if you want the unsigned civ release APK copied next to the zip. **Field releases** should use the **TPC-signed** APK returned from the portal.
+
 ### Notes
 
 - The Gradle wrapper downloads Gradle 8.13 automatically on first run — no separate Gradle install needed.
