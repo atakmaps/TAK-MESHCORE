@@ -424,6 +424,241 @@ try {
     }
 
     /**
+     * True if values of type {@code actualArg} can be passed to a formal parameter of type {@code formal}.
+     */
+    private static boolean isActualAssignableToFormal(Class<?> formal, Class<?> actualArg) {
+        if (formal.isAssignableFrom(actualArg)) {
+            return true;
+        }
+        if (formal == boolean.class && actualArg == Boolean.class) {
+            return true;
+        }
+        if (formal == Boolean.class && actualArg == boolean.class) {
+            return true;
+        }
+        if (formal.isPrimitive()) {
+            Class<?> box = boxPrimitive(formal);
+            return box != null && formal == unboxWrapper(actualArg);
+        }
+        return false;
+    }
+
+    private static Class<?> boxPrimitive(Class<?> prim) {
+        if (prim == int.class) return Integer.class;
+        if (prim == boolean.class) return Boolean.class;
+        if (prim == long.class) return Long.class;
+        if (prim == byte.class) return Byte.class;
+        if (prim == short.class) return Short.class;
+        if (prim == char.class) return Character.class;
+        if (prim == float.class) return Float.class;
+        if (prim == double.class) return Double.class;
+        return null;
+    }
+
+    private static Class<?> unboxWrapper(Class<?> c) {
+        if (c == Integer.class) return int.class;
+        if (c == Boolean.class) return boolean.class;
+        if (c == Long.class) return long.class;
+        if (c == Byte.class) return byte.class;
+        if (c == Short.class) return short.class;
+        if (c == Character.class) return char.class;
+        if (c == Float.class) return float.class;
+        if (c == Double.class) return double.class;
+        return null;
+    }
+
+    /** Formal parameter types must accept the given actual argument types (invoke side). */
+    private static boolean paramsAcceptActuals(Class<?>[] formals, Class<?>[] actuals) {
+        if (formals.length != actuals.length) {
+            return false;
+        }
+        for (int i = 0; i < formals.length; i++) {
+            if (actuals[i] == null) {
+                if (formals[i].isPrimitive()) {
+                    return false;
+                }
+                continue;
+            }
+            if (!isActualAssignableToFormal(formals[i], actuals[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Find a static method declared on {@code startClass} or its superclasses whose formal parameters
+     * accept {@code actualParamTypes}. Prefer a method whose erased name matches {@code preferredName}
+     * when multiple candidates exist.
+     *
+     * @param returnFilter if non-null, only methods whose return type is assignable to this type
+     *                     (e.g. {@code byte[].class} for importers) are considered for unnamed fallbacks.
+     */
+    private static java.lang.reflect.Method findStaticMethodByActualParams(
+            Class<?> startClass, Class<?>[] actualParamTypes, String preferredName,
+            Class<?> returnFilter) {
+        java.lang.reflect.Method preferred = null;
+        java.lang.reflect.Method any = null;
+        java.lang.reflect.Method returnFiltered = null;
+        for (Class<?> c = startClass; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+                if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
+                    continue;
+                }
+                if (!paramsAcceptActuals(m.getParameterTypes(), actualParamTypes)) {
+                    continue;
+                }
+                m.setAccessible(true);
+                if (preferredName != null && preferredName.equals(m.getName())) {
+                    return m;
+                }
+                if (returnFilter != null && returnFilter.isAssignableFrom(m.getReturnType())) {
+                    if (returnFiltered == null) {
+                        returnFiltered = m;
+                    }
+                }
+                if (any == null) {
+                    any = m;
+                }
+                if (preferred == null && preferredName != null && m.getName().toLowerCase()
+                        .contains(preferredName.toLowerCase())) {
+                    preferred = m;
+                }
+            }
+        }
+        if (preferred != null) {
+            return preferred;
+        }
+        if (returnFiltered != null) {
+            return returnFiltered;
+        }
+        return any;
+    }
+
+    private static java.lang.reflect.Method findStaticMethodByActualParams(
+            Class<?> startClass, Class<?>[] actualParamTypes, String preferredName) {
+        return findStaticMethodByActualParams(startClass, actualParamTypes, preferredName, null);
+    }
+
+    private static java.lang.reflect.Method findInstanceMethodByActualParams(
+            Class<?> startClass, Class<?>[] actualParamTypes, String preferredName,
+            Class<?> returnFilter) {
+        java.lang.reflect.Method preferred = null;
+        java.lang.reflect.Method any = null;
+        java.lang.reflect.Method returnFiltered = null;
+        for (Class<?> c = startClass; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+                if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
+                    continue;
+                }
+                if (!paramsAcceptActuals(m.getParameterTypes(), actualParamTypes)) {
+                    continue;
+                }
+                m.setAccessible(true);
+                if (preferredName != null && preferredName.equals(m.getName())) {
+                    return m;
+                }
+                if (returnFilter != null && returnFilter.isAssignableFrom(m.getReturnType())) {
+                    if (returnFiltered == null) {
+                        returnFiltered = m;
+                    }
+                }
+                if (any == null) {
+                    any = m;
+                }
+                if (preferred == null && preferredName != null && m.getName().toLowerCase()
+                        .contains(preferredName.toLowerCase())) {
+                    preferred = m;
+                }
+            }
+        }
+        if (preferred != null) {
+            return preferred;
+        }
+        if (returnFiltered != null) {
+            return returnFiltered;
+        }
+        return any;
+    }
+
+    private static java.lang.reflect.Method findInstanceVoidNoArg(
+            Class<?> cls, String preferredName) {
+        java.lang.reflect.Method named = null;
+        int voidNoArg = 0;
+        java.lang.reflect.Method lone = null;
+        for (java.lang.reflect.Method m : cls.getDeclaredMethods()) {
+            if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
+                continue;
+            }
+            if (m.getParameterTypes().length != 0) {
+                continue;
+            }
+            if (m.getReturnType() != void.class) {
+                continue;
+            }
+            String n = m.getName();
+            if ("wait".equals(n) || "notify".equals(n) || "notifyAll".equals(n)) {
+                continue;
+            }
+            m.setAccessible(true);
+            if (preferredName != null && preferredName.equals(n)) {
+                return m;
+            }
+            voidNoArg++;
+            lone = m;
+            if (preferredName != null && n.toLowerCase().contains(preferredName.toLowerCase())) {
+                named = m;
+            }
+        }
+        if (named != null) {
+            return named;
+        }
+        if (preferredName != null) {
+            return null;
+        }
+        return voidNoArg == 1 ? lone : null;
+    }
+
+    /**
+     * Resolve {@code AtakCertificateDatabaseBase.saveCertificatePassword}-style credential persistence
+     * when the method is renamed by R8/ProGuard.
+     */
+    private static java.lang.reflect.Method findStaticSaveCredentialThreeStrings(Class<?> base) {
+        Class<?>[] three = new Class[]{String.class, String.class, String.class};
+        String saveCred = atkReflectSaveCertCred();
+        java.lang.reflect.Method m = findStaticMethodByActualParams(base, three, saveCred);
+        if (m != null) {
+            return m;
+        }
+        java.lang.reflect.Method match = null;
+        int hits = 0;
+        for (Class<?> c = base; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (java.lang.reflect.Method x : c.getDeclaredMethods()) {
+                if (!java.lang.reflect.Modifier.isStatic(x.getModifiers())) {
+                    continue;
+                }
+                if (!paramsAcceptActuals(x.getParameterTypes(), three)) {
+                    continue;
+                }
+                if (x.getReturnType() != void.class && x.getReturnType() != boolean.class) {
+                    continue;
+                }
+                String n = x.getName().toLowerCase();
+                if (!n.contains("save") || (!n.contains("password") && !n.contains("cert"))) {
+                    continue;
+                }
+                hits++;
+                match = x;
+            }
+        }
+        if (hits != 1) {
+            return null;
+        }
+        match.setAccessible(true);
+        return match;
+    }
+
+    /**
      * {@link com.atakmap.net.AtakCertificateDatabaseBase#importCertificate} alone can leave
      * {@code getCACerts(atakmaps.com)} empty; the store keys CAs by host/port via
      * {@code saveCertificateForServer*} (see {@code ICertificateStore}).
@@ -436,14 +671,25 @@ try {
         try {
             byte[] der = caCert.getEncoded();
             Class<?> base = Class.forName("com.atakmap.net.AtakCertificateDatabaseBase");
-            java.lang.reflect.Method saveHost = base.getMethod(
-                    "saveCertificateForServer", String.class, String.class, byte[].class);
+            Class<?>[] three = new Class[]{String.class, String.class, byte[].class};
+            java.lang.reflect.Method saveHost = findStaticMethodByActualParams(base, three,
+                    "saveCertificateForServer");
+            if (saveHost == null) {
+                Log.w(TAG, "bindUpdateServerCaToHost: no static method matching (String,String,byte[])");
+                return;
+            }
             saveHost.invoke(null, typeKey, "atakmaps.com", der);
-            java.lang.reflect.Method savePort = base.getMethod(
-                    "saveCertificateForServerAndPort", String.class, String.class, int.class, byte[].class);
-            savePort.invoke(null, typeKey, "atakmaps.com", 443, der);
-            savePort.invoke(null, typeKey, "atakmaps.com", 8443, der);
-            Log.i(TAG, "bindUpdateServerCaToHost: typeKey=" + typeKey + " host=atakmaps.com derBytes=" + der.length);
+            Class<?>[] four = new Class[]{String.class, String.class, int.class, byte[].class};
+            java.lang.reflect.Method savePort = findStaticMethodByActualParams(base, four,
+                    "saveCertificateForServerAndPort");
+            if (savePort != null) {
+                savePort.invoke(null, typeKey, "atakmaps.com", 443, der);
+                savePort.invoke(null, typeKey, "atakmaps.com", 8443, der);
+            } else {
+                Log.w(TAG, "bindUpdateServerCaToHost: saveCertificateForServerAndPort not found");
+            }
+            Log.i(TAG, "bindUpdateServerCaToHost: used " + saveHost.getName()
+                    + " typeKey=" + typeKey + " host=atakmaps.com derBytes=" + der.length);
         } catch (Exception e) {
             Log.w(TAG, "bindUpdateServerCaToHost failed: " + e.getMessage(), e);
         }
@@ -490,9 +736,26 @@ try {
 
             Class<?> dbClass = Class.forName("com.atakmap.net.AtakCertificateDatabase");
             String typeKey = resolveUpdateServerTypeKey();
-            java.lang.reflect.Method importCert = dbClass.getMethod(
-                    "importCertificate", String.class, String.class, String.class, boolean.class);
-            Object imported = importCert.invoke(null, p12.getAbsolutePath(), "", typeKey, false);
+            Class<?>[] importActuals = new Class[]{
+                    String.class, String.class, String.class, boolean.class
+            };
+            java.lang.reflect.Method importCert = findStaticMethodByActualParams(
+                    dbClass, importActuals, "importCertificate", byte[].class);
+            Object imported = null;
+            if (importCert != null) {
+                imported = importCert.invoke(null, p12.getAbsolutePath(), "", typeKey, false);
+            } else {
+                Class<?>[] importFileActuals = new Class[]{
+                        java.io.File.class, String.class, String.class, boolean.class
+                };
+                java.lang.reflect.Method importFile = findStaticMethodByActualParams(
+                        dbClass, importFileActuals, "importCertificate", byte[].class);
+                if (importFile != null) {
+                    imported = importFile.invoke(null, p12, "", typeKey, false);
+                } else {
+                    Log.w(TAG, "installUpdateServerTruststoreCompat: no importCertificate-like static method");
+                }
+            }
             int outLen = (imported instanceof byte[]) ? ((byte[]) imported).length : -1;
             Log.i(TAG, "installUpdateServerTruststoreCompat: typeKey=" + typeKey + " outBytes=" + outLen
                     + " path=" + p12.getAbsolutePath());
@@ -500,15 +763,17 @@ try {
             if (imported instanceof byte[] && ((byte[]) imported).length > 0) {
                 String p12Key = trustBundleP12KeyMaterial(pluginCtx);
                 Class<?> base = Class.forName("com.atakmap.net.AtakCertificateDatabaseBase");
-                String saveCred = atkReflectSaveCertCred();
-                java.lang.reflect.Method savePw = base.getMethod(
-                        saveCred, String.class, String.class, String.class);
+                java.lang.reflect.Method savePw = findStaticSaveCredentialThreeStrings(base);
                 String credKey = atkPrefsUpdateServerCaCredKey();
-                savePw.invoke(null, p12Key, credKey, null);
-                android.preference.PreferenceManager.getDefaultSharedPreferences(atakCtx).edit()
-                        .putString(credKey, p12Key)
-                        .apply();
-                Log.i(TAG, "Update-server CA PKCS#12 unlock credential stored; trust DB + prefs aligned");
+                if (savePw == null) {
+                    Log.w(TAG, "installUpdateServerTruststoreCompat: saveCertificatePassword-like not found");
+                } else {
+                    savePw.invoke(null, p12Key, credKey, null);
+                    android.preference.PreferenceManager.getDefaultSharedPreferences(atakCtx).edit()
+                            .putString(credKey, p12Key)
+                            .apply();
+                    Log.i(TAG, "Update-server CA PKCS#12 unlock credential stored; trust DB + prefs aligned");
+                }
             }
 
             java.security.cert.X509Certificate fromP12 = loadCertificateFromPkcs12(
@@ -534,7 +799,22 @@ try {
                     "https://atakmaps.com/plugins/product.infz"
             }) {
                 try {
-                    cls.getMethod("invalidate", String.class).invoke(null, hostKey);
+                    java.lang.reflect.Method inv = null;
+                    try {
+                        inv = cls.getMethod("invalidate", String.class);
+                    } catch (NoSuchMethodException ignored) {
+                    }
+                    if (inv == null) {
+                        inv = findStaticMethodByActualParams(
+                                cls, new Class[]{String.class}, "invalidate", void.class);
+                    }
+                    if (inv == null) {
+                        Log.d(TAG, "CertificateManager.invalidate(" + hostKey + ") skipped: no static method");
+                    } else {
+                        inv.setAccessible(true);
+                        inv.invoke(null, hostKey);
+                        Log.d(TAG, "CertificateManager.invalidate(" + hostKey + ") via " + inv.getName());
+                    }
                 } catch (Exception e) {
                     Log.d(TAG, "CertificateManager.invalidate(" + hostKey + ") skipped: " + e.getMessage());
                 }
@@ -549,8 +829,20 @@ try {
                 Log.w(TAG, "reloadCertificateManagerFromDatabase: CertificateManager null");
                 return;
             }
-            cls.getMethod("refresh").invoke(cm);
-            Log.i(TAG, "CertificateManager refreshed after update-server DB import");
+            java.lang.reflect.Method refresh = null;
+            try {
+                refresh = cls.getMethod("refresh");
+            } catch (NoSuchMethodException ignored) {
+            }
+            if (refresh == null) {
+                refresh = findInstanceVoidNoArg(cls, "refresh");
+            }
+            if (refresh == null) {
+                Log.w(TAG, "reloadCertificateManagerFromDatabase: refresh() not found");
+                return;
+            }
+            refresh.invoke(cm);
+            Log.i(TAG, "CertificateManager refreshed after update-server DB import via " + refresh.getName());
         } catch (Exception e) {
             Log.w(TAG, "reloadCertificateManagerFromDatabase failed: " + e.getMessage());
         }
@@ -608,9 +900,26 @@ try {
             if (cm == null) {
                 return;
             }
-            cls.getMethod("addCertificate", java.security.cert.X509Certificate.class).invoke(cm, caCert);
+            java.lang.reflect.Method add = null;
+            try {
+                add = cls.getMethod("addCertificate", java.security.cert.X509Certificate.class);
+            } catch (NoSuchMethodException ignored) {
+            }
+            if (add == null) {
+                add = findInstanceMethodByActualParams(
+                        cls,
+                        new Class[]{java.security.cert.X509Certificate.class},
+                        "addCertificate",
+                        void.class);
+            }
+            if (add == null) {
+                Log.w(TAG, "addOfficialCertificateManagerCa: addCertificate(X509) not found");
+                return;
+            }
+            add.setAccessible(true);
+            add.invoke(cm, caCert);
             clearSocketFactoriesCache(cls);
-            Log.i(TAG, "CertificateManager.addCertificate (public API)");
+            Log.i(TAG, "CertificateManager.addCertificate via " + add.getName());
         } catch (Exception e) {
             Log.w(TAG, "addOfficialCertificateManagerCa: " + e.getMessage());
         }
