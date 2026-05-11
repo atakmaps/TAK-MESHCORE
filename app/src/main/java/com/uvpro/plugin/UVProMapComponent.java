@@ -266,10 +266,7 @@ try {
                         "UV-PRO Settings",
                         "UV-PRO radio bridge configuration",
                         "uvproPreference",
-                        context.getResources().getDrawable(
-                                context.getResources().getIdentifier(
-                                        "ic_uvpro", "drawable",
-                                        context.getPackageName()), null),
+                        toolbarPreferenceIcon(context),
                         new SettingsFragment(context)));
 
         // Start background services
@@ -381,6 +378,13 @@ try {
             return;
         }
         configureUpdateServerStatic(pluginContext, host);
+    }
+
+    /** Stroke-only toolbar glyph; full-color {@code ic_uvpro} becomes a flat disc under ATAK tint. */
+    private static android.graphics.drawable.Drawable toolbarPreferenceIcon(Context context) {
+        android.graphics.drawable.Drawable d = context.getResources()
+                .getDrawable(R.drawable.ic_uvpro_toolbar, context.getTheme());
+        return d != null ? d.mutate() : null;
     }
 
     private static Context tryResolveHostAtakContext(Context pluginContext) {
