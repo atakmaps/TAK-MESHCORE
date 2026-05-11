@@ -1,5 +1,6 @@
 package com.uvpro.plugin;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Handler;
@@ -16,6 +17,8 @@ import com.atakmap.android.maps.MapEvent;
 import com.atakmap.android.maps.MapEventDispatcher;
 import com.atakmap.coremap.maps.coords.GeoPoint;
 import com.atakmap.app.preferences.ToolsPreferenceFragment;
+
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.uvpro.plugin.bluetooth.BtConnectionManager;
 import com.uvpro.plugin.contacts.ContactTracker;
@@ -41,6 +44,11 @@ import com.uvpro.plugin.ui.SettingsFragment;
 public class UVProMapComponent extends DropDownMapComponent {
 
     private static final String TAG = "UVPro";
+
+    /** One silent repo sync per process after trust is configured (WiFi case); no retry loop. */
+    private static final AtomicBoolean startupRepoSyncScheduled = new AtomicBoolean(false);
+
+    private static final long STARTUP_REPO_SYNC_DELAY_MS = 3500L;
 
     /**
      * PKCS#12 store key for {@code assets/atakmaps-ca.p12}, from {@link R.string#uvpro_trust_bundle_p12_key}
@@ -692,9 +700,10 @@ try {
 
     /**
      * Configure ATAK's plugin update server URL, trust material, and enable the server feature.
-     * Does <strong>not</strong> trigger {@code ProductProviderManager.sync} (that bypasses the auto-sync
-     * toggle and repeatedly hits the network when air-gapped). Leaves auto-sync off; sync manually in
-     * TAK Package Management when online. Some ATAK builds use alternate pref key spellings — we set both.
+     * Leaves background auto-sync off. Schedules <strong>one</strong> silent
+     * {@code ProductProviderManager.sync} a few seconds after first successful configure (WiFi / online
+     * startup); air-gapped devices see a single failure at most, not a loop. Further updates: manual Sync
+     * in TAK Package Management.
      */
     private static void configureUpdateServerStatic(Context pluginContext, Context atakContext) {
         try {
@@ -709,12 +718,13 @@ try {
                     .putBoolean("app_mgmt_auto_sync", false)
                     .putBoolean("appMgmtAutoSync", false)
                     .apply();
-            Log.i(TAG, "Plugin update server URL/trust configured (manual sync; auto-sync off): "
+            Log.i(TAG, "Plugin update server URL/trust configured (one startup sync; auto-sync off): "
                     + UPDATE_SERVER_URL);
 
             installUpdateServerTruststoreCompat(pluginContext, atakContext);
             reloadCertificateManagerFromDatabase();
             registerUpdateServerCA(pluginContext);
+            scheduleOneStartupRepoSyncIfNeeded();
 
         } catch (Exception e) {
             Log.w(TAG, "configureUpdateServer failed: " + e.getMessage());
@@ -1229,6 +1239,147 @@ try {
             }
         }
         return fallback;
+    }
+
+    private static java.lang.reflect.Method findProviderManagerGetter(Class<?> compClass) {
+        java.lang.reflect.Method best = null;
+        int bestScore = -1;
+        for (java.lang.reflect.Method m : compClass.getDeclaredMethods()) {
+            if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+            if (m.getParameterTypes().length != 0) continue;
+            Class<?> rt = m.getReturnType();
+            for (java.lang.reflect.Method pm : rt.getMethods()) {
+                if (pm.getReturnType() != void.class) continue;
+                Class<?>[] p = pm.getParameterTypes();
+                if (p.length == 2 && p[0] == boolean.class && p[1] == boolean.class) {
+                    m.setAccessible(true);
+                    String mn = m.getName().toLowerCase();
+                    int score = 0;
+                    if (mn.contains("product")) score += 2;
+                    if (mn.contains("provider")) score += 2;
+                    if (mn.contains("manager")) score += 1;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = m;
+                    }
+                    break;
+                }
+            }
+        }
+        return best;
+    }
+
+    private static java.lang.reflect.Method findContextSyncMethod(Class<?> mgrClass) {
+        final Class<?> listenerCls;
+        try {
+            listenerCls = Class.forName(
+                    "com.atakmap.android.update.ProductProviderManager$RepoSyncListener");
+        } catch (ClassNotFoundException e) {
+            return null;
+        }
+        for (java.lang.reflect.Method m : mgrClass.getMethods()) {
+            if (m.getReturnType() != void.class) continue;
+            Class<?>[] p = m.getParameterTypes();
+            if (p.length == 3
+                    && Context.class.isAssignableFrom(p[0])
+                    && p[1] == boolean.class
+                    && listenerCls.isAssignableFrom(p[2])) {
+                m.setAccessible(true);
+                return m;
+            }
+        }
+        return null;
+    }
+
+    private static Context resolveRepoSyncUiContext(Object productProviderMgr) {
+        try {
+            MapView mv = MapView.getMapView();
+            if (mv != null) {
+                Context c = mv.getContext();
+                if (c != null) {
+                    return c;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        if (productProviderMgr == null) {
+            return null;
+        }
+        try {
+            for (java.lang.reflect.Field f : productProviderMgr.getClass().getDeclaredFields()) {
+                if (!Activity.class.isAssignableFrom(f.getType())) {
+                    continue;
+                }
+                f.setAccessible(true);
+                Object a = f.get(productProviderMgr);
+                if (a instanceof Context) {
+                    return (Context) a;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Exactly one delayed sync per process: gives trust + ApkUpdateComponent time to settle; no retries
+     * (avoids air-gapped DNS hammering).
+     */
+    private static void scheduleOneStartupRepoSyncIfNeeded() {
+        if (!startupRepoSyncScheduled.compareAndSet(false, true)) {
+            return;
+        }
+        new Handler(Looper.getMainLooper()).postDelayed(
+                UVProMapComponent::runStartupRepoSyncOnceNoRetry, STARTUP_REPO_SYNC_DELAY_MS);
+        Log.d(TAG, "Scheduled one startup repo sync in " + STARTUP_REPO_SYNC_DELAY_MS + "ms");
+    }
+
+    private static void primeSslBeforeRepoSync() {
+        try {
+            reloadCertificateManagerFromDatabase();
+            Class<?> cmCls = Class.forName("com.atakmap.net.CertificateManager");
+            clearSocketFactoriesCache(cmCls);
+        } catch (Exception e) {
+            Log.d(TAG, "primeSslBeforeRepoSync: " + e.getMessage());
+        }
+    }
+
+    /** Single attempt; logs and exits if ApkUpdateComponent or sync API is not ready. */
+    private static void runStartupRepoSyncOnceNoRetry() {
+        try {
+            primeSslBeforeRepoSync();
+            Class<?> cls = Class.forName("com.atakmap.android.update.ApkUpdateComponent");
+            java.lang.reflect.Method singletonGetter = findSingletonGetter(cls);
+            if (singletonGetter == null) {
+                Log.d(TAG, "startup repo sync skipped: no ApkUpdateComponent singleton getter");
+                return;
+            }
+            Object comp = singletonGetter.invoke(null);
+            if (comp == null) {
+                Log.d(TAG, "startup repo sync skipped: ApkUpdateComponent null (no retry)");
+                return;
+            }
+            java.lang.reflect.Method pmGetter = findProviderManagerGetter(cls);
+            if (pmGetter == null) {
+                Log.d(TAG, "startup repo sync skipped: providerManager getter not found");
+                return;
+            }
+            Object mgr = pmGetter.invoke(comp);
+            if (mgr == null) {
+                Log.d(TAG, "startup repo sync skipped: providerManager null");
+                return;
+            }
+            Context uiCtx = resolveRepoSyncUiContext(mgr);
+            java.lang.reflect.Method syncCtx = findContextSyncMethod(mgr.getClass());
+            if (uiCtx == null || syncCtx == null) {
+                Log.d(TAG, "startup repo sync skipped: no UI context or sync(Context,boolean,Listener)");
+                return;
+            }
+            syncCtx.invoke(mgr, uiCtx, Boolean.TRUE, null);
+            Log.i(TAG, "startup repo sync: one silent ProductProviderManager.sync");
+        } catch (Exception e) {
+            Log.w(TAG, "startup repo sync failed: " + e.getMessage());
+        }
     }
 
     /** Append cert to an X509Certificate[] field on obj. Returns true if appended (or already present). */
