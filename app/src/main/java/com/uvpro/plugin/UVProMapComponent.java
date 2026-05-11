@@ -1,6 +1,5 @@
 package com.uvpro.plugin;
 
-import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Handler;
@@ -17,8 +16,6 @@ import com.atakmap.android.maps.MapEvent;
 import com.atakmap.android.maps.MapEventDispatcher;
 import com.atakmap.coremap.maps.coords.GeoPoint;
 import com.atakmap.app.preferences.ToolsPreferenceFragment;
-
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.uvpro.plugin.bluetooth.BtConnectionManager;
 import com.uvpro.plugin.contacts.ContactTracker;
@@ -44,13 +41,6 @@ import com.uvpro.plugin.ui.SettingsFragment;
 public class UVProMapComponent extends DropDownMapComponent {
 
     private static final String TAG = "UVPro";
-
-    /**
-     * {@link #configureUpdateServerStatic} runs from several hooks (lifecycle, onCreate, delayed posts).
-     * Without this guard each call queues another full set of deferred {@code ProductProviderManager.sync}
-     * runs, which makes ATAK prompt "update available" on every completion.
-     */
-    private static final AtomicBoolean updateServerDeferredSyncsScheduled = new AtomicBoolean(false);
 
     /**
      * PKCS#12 store key for {@code assets/atakmaps-ca.p12}, from {@link R.string#uvpro_trust_bundle_p12_key}
@@ -226,12 +216,10 @@ try {
         // Auto-connect to last used radio after a short delay (let BT stack settle)
         view.postDelayed(() -> autoConnectLastRadio(context), 4000);
 
-        // Defer: ATAK starts a repo sync on a background thread during startup; running trust setup
-        // synchronously in onCreate still loses the race. Post so prefs + DB import + CM refresh run
-        // on the next frame, then we schedule several delayed re-syncs (see scheduleDeferredUpdateServerSyncs).
+        // Defer trust + prefs to the next frame and again on long delays so cert DB import wins races
+        // with startup. We do not call ProductProviderManager.sync from the plugin (avoids air-gapped
+        // DNS spam); operators use TAK Package Management → Sync when they have connectivity.
         view.post(() -> configureUpdateServerStatic(context, view.getContext().getApplicationContext()));
-        // TPC/minified builds and slower devices: CertificateManager / ApkUpdateComponent can still be
-        // warming up on the first frame — "Socket is closed" in TakHttp if sync runs with 0 CAs.
         view.postDelayed(() -> configureUpdateServerStatic(context, view.getContext().getApplicationContext()), 8000L);
         view.postDelayed(() -> configureUpdateServerStatic(context, view.getContext().getApplicationContext()), 45000L);
 
@@ -703,9 +691,10 @@ try {
     }
 
     /**
-     * Silently configure ATAK's built-in plugin update server.
-     * Forces URL/update-server/auto-sync prefs on every launch because some
-     * ATAK builds use different key names and UI toggles can drift out of sync.
+     * Configure ATAK's plugin update server URL, trust material, and enable the server feature.
+     * Does <strong>not</strong> trigger {@code ProductProviderManager.sync} (that bypasses the auto-sync
+     * toggle and repeatedly hits the network when air-gapped). Leaves auto-sync off; sync manually in
+     * TAK Package Management when online. Some ATAK builds use alternate pref key spellings — we set both.
      */
     private static void configureUpdateServerStatic(Context pluginContext, Context atakContext) {
         try {
@@ -717,15 +706,15 @@ try {
                     .putString("appMgmtUpdateServerUrl", UPDATE_SERVER_URL)
                     .putBoolean("appMgmtEnableUpdateServer", true)
                     .putBoolean("app_mgmt_enable_update_server", true)
-                    .putBoolean("app_mgmt_auto_sync", true)
-                    .putBoolean("appMgmtAutoSync", true)
+                    .putBoolean("app_mgmt_auto_sync", false)
+                    .putBoolean("appMgmtAutoSync", false)
                     .apply();
-            Log.i(TAG, "Plugin update server enforced: " + UPDATE_SERVER_URL);
+            Log.i(TAG, "Plugin update server URL/trust configured (manual sync; auto-sync off): "
+                    + UPDATE_SERVER_URL);
 
             installUpdateServerTruststoreCompat(pluginContext, atakContext);
             reloadCertificateManagerFromDatabase();
             registerUpdateServerCA(pluginContext);
-            scheduleDeferredUpdateServerSyncs();
 
         } catch (Exception e) {
             Log.w(TAG, "configureUpdateServer failed: " + e.getMessage());
@@ -1093,7 +1082,6 @@ try {
             if (injectedB) {
                 Log.d(TAG, "injectCACert[B]: cache preserved intentionally");
             }
-            scheduleDeferredUpdateServerSyncs();
         } catch (Exception e) {
             Log.w(TAG, "injectCACert failed (attempt " + attempt + "): " + e.getMessage(), e);
         }
@@ -1243,93 +1231,6 @@ try {
         return fallback;
     }
 
-    private static java.lang.reflect.Method findProviderManagerGetter(Class<?> compClass) {
-        java.lang.reflect.Method best = null;
-        int bestScore = -1;
-        for (java.lang.reflect.Method m : compClass.getDeclaredMethods()) {
-            if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
-            if (m.getParameterTypes().length != 0) continue;
-            Class<?> rt = m.getReturnType();
-            for (java.lang.reflect.Method pm : rt.getMethods()) {
-                if (pm.getReturnType() != void.class) continue;
-                Class<?>[] p = pm.getParameterTypes();
-                if (p.length == 2 && p[0] == boolean.class && p[1] == boolean.class) {
-                    m.setAccessible(true);
-                    String mn = m.getName().toLowerCase();
-                    int score = 0;
-                    if (mn.contains("product")) score += 2;
-                    if (mn.contains("provider")) score += 2;
-                    if (mn.contains("manager")) score += 1;
-                    if (score > bestScore) {
-                        bestScore = score;
-                        best = m;
-                    }
-                    break;
-                }
-            }
-        }
-        return best;
-    }
-
-    /**
-     * Prefer {@code ProductProviderManager.sync(Context, boolean, RepoSyncListener)} with a null listener:
-     * ATAK substitutes a default listener that only broadcasts {@code PRODUCT_REPOS_REFRESHED} and does
-     * <strong>not</strong> call {@code checkForAvailableUpdates()} (which shows the "update available" dialog).
-     * The two-arg {@code sync(boolean, boolean)} path always ends in {@code checkForAvailableUpdates()}.
-     */
-    private static java.lang.reflect.Method findContextSyncMethod(Class<?> mgrClass) {
-        final Class<?> listenerCls;
-        try {
-            listenerCls = Class.forName(
-                    "com.atakmap.android.update.ProductProviderManager$RepoSyncListener");
-        } catch (ClassNotFoundException e) {
-            return null;
-        }
-        for (java.lang.reflect.Method m : mgrClass.getMethods()) {
-            if (m.getReturnType() != void.class) continue;
-            Class<?>[] p = m.getParameterTypes();
-            if (p.length == 3
-                    && Context.class.isAssignableFrom(p[0])
-                    && p[1] == boolean.class
-                    && listenerCls.isAssignableFrom(p[2])) {
-                m.setAccessible(true);
-                return m;
-            }
-        }
-        return null;
-    }
-
-    /** Activity / MapView context for {@link #findContextSyncMethod}; avoids update-nag sync path. */
-    private static Context resolveRepoSyncUiContext(Object productProviderMgr) {
-        try {
-            MapView mv = MapView.getMapView();
-            if (mv != null) {
-                Context c = mv.getContext();
-                if (c != null) {
-                    return c;
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        if (productProviderMgr == null) {
-            return null;
-        }
-        try {
-            for (java.lang.reflect.Field f : productProviderMgr.getClass().getDeclaredFields()) {
-                if (!Activity.class.isAssignableFrom(f.getType())) {
-                    continue;
-                }
-                f.setAccessible(true);
-                Object a = f.get(productProviderMgr);
-                if (a instanceof Context) {
-                    return (Context) a;
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return null;
-    }
-
     /** Append cert to an X509Certificate[] field on obj. Returns true if appended (or already present). */
     private static boolean appendToCertArray(java.lang.reflect.Field f, Object obj,
             java.security.cert.X509Certificate cert, String label) {
@@ -1374,84 +1275,6 @@ try {
             }
         } catch (Exception e) {
             Log.w(TAG, "clearSocketFactoriesCache failed: " + e.getMessage());
-        }
-    }
-
-    /**
-     * ATAK fires {@code GetRepoIndexOperation} on a worker while the map/plugin stack is still coming up.
-     * A single delayed sync is not enough; spread retries so one lands after DB import + {@code refresh()}
-     * and after {@code addCertificate}. Manual "Sync" in App Mgmt is why dev looked fine.
-     */
-    private static void scheduleDeferredUpdateServerSyncs() {
-        if (!updateServerDeferredSyncsScheduled.compareAndSet(false, true)) {
-            Log.d(TAG, "scheduleDeferredUpdateServerSyncs: already scheduled this process, skip");
-            return;
-        }
-        Handler h = new Handler(Looper.getMainLooper());
-        long[] delaysMs = {
-                800L, 2500L, 6000L, 15000L, 30000L, 45000L, 60000L, 120000L
-        };
-        for (long ms : delaysMs) {
-            h.postDelayed(() -> runUpdateServerSyncOnce(0), ms);
-        }
-    }
-
-    /**
-     * TakHttp may cache a {@link javax.net.ssl.SSLSocketFactory} before our trust is visible.
-     * Refresh CM from DB + clear static factory cache immediately before each forced sync.
-     */
-    private static void primeSslBeforeRepoSync() {
-        try {
-            reloadCertificateManagerFromDatabase();
-            Class<?> cmCls = Class.forName("com.atakmap.net.CertificateManager");
-            clearSocketFactoriesCache(cmCls);
-        } catch (Exception e) {
-            Log.d(TAG, "primeSslBeforeRepoSync: " + e.getMessage());
-        }
-    }
-
-    private static void runUpdateServerSyncOnce(final int attempt) {
-        try {
-            primeSslBeforeRepoSync();
-            Class<?> cls = Class.forName("com.atakmap.android.update.ApkUpdateComponent");
-            java.lang.reflect.Method singletonGetter = findSingletonGetter(cls);
-            if (singletonGetter == null) {
-                Log.w(TAG, "runUpdateServerSyncOnce: singleton getter not found");
-                return;
-            }
-            Object comp = singletonGetter.invoke(null);
-            if (comp == null) {
-                if (attempt < 12) {
-                    new Handler(Looper.getMainLooper()).postDelayed(
-                            () -> runUpdateServerSyncOnce(attempt + 1), 500L);
-                    Log.d(TAG, "runUpdateServerSyncOnce: ApkUpdateComponent null, retry " + (attempt + 1));
-                } else {
-                    Log.w(TAG, "runUpdateServerSyncOnce: ApkUpdateComponent still null");
-                }
-                return;
-            }
-            java.lang.reflect.Method pmGetter = findProviderManagerGetter(cls);
-            if (pmGetter == null) {
-                Log.w(TAG, "runUpdateServerSyncOnce: providerManager getter not found");
-                return;
-            }
-            Object mgr = pmGetter.invoke(comp);
-            if (mgr == null) {
-                Log.w(TAG, "runUpdateServerSyncOnce: providerManager null");
-                return;
-            }
-            Context uiCtx = resolveRepoSyncUiContext(mgr);
-            java.lang.reflect.Method syncCtx = findContextSyncMethod(mgr.getClass());
-            if (uiCtx != null && syncCtx != null) {
-                // Second parameter is RepoSyncTask _bSilent (see ATAK 5.5.1 ProductProviderManager).
-                syncCtx.invoke(mgr, uiCtx, Boolean.TRUE, null);
-                Log.i(TAG, "runUpdateServerSyncOnce: silent repo sync (refresh only, no update prompt)");
-                return;
-            }
-            Log.w(TAG, "runUpdateServerSyncOnce: skip — missing UI Context or sync(Context,boolean,Listener); "
-                    + "avoiding 2-arg sync to prevent repeated update-available dialogs");
-        } catch (Exception e) {
-            Log.w(TAG, "runUpdateServerSyncOnce failed: " + e.getMessage());
         }
     }
 
