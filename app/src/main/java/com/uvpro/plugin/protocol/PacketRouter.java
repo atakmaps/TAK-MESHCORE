@@ -18,6 +18,10 @@ import com.uvpro.plugin.contacts.ContactTracker;
 import com.uvpro.plugin.crypto.EncryptionManager;
 import com.uvpro.plugin.protocol.PacketFragmenter;
 
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+
 /**
  * Routes incoming packets to the appropriate handler based on their type.
  *
@@ -39,6 +43,8 @@ import com.uvpro.plugin.protocol.PacketFragmenter;
 public class PacketRouter {
 
     private static final String TAG = "UVPro.Router";
+    private static final List<String> APRS_TEAM_POOL = Arrays.asList(
+            "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Magenta", "White", "Cyan");
 
     private final CotBridge cotBridge;
     private final ChatBridge chatBridge;
@@ -225,9 +231,10 @@ public class PacketRouter {
                     ": " + pos.latitude + ", " + pos.longitude);
             contactTracker.updateContact(callsign, pos.latitude,
                     pos.longitude, pos.altitude, pos.speed, pos.course, -1);
+            String aprsTeam = resolveSharedAprsTeamExcludingLocal();
             cotBridge.injectPositionCot(callsign, pos.latitude,
                     pos.longitude, pos.altitude, pos.speed, pos.course,
-                    null);
+                    aprsTeam);
             return;
         }
 
@@ -242,6 +249,29 @@ public class PacketRouter {
         }
 
         Log.d(TAG, "Unhandled APRS packet from " + callsign + ": " + info);
+    }
+
+    private String resolveSharedAprsTeamExcludingLocal() {
+        String localTeam = null;
+        try {
+            localTeam = com.atakmap.android.chat.ChatManagerMapComponent.getTeamName();
+        } catch (Exception ignored) {
+        }
+        String normalizedLocal = localTeam == null
+                ? ""
+                : localTeam.trim().toLowerCase(Locale.US);
+        // Use one shared APRS color for all APRS beacons, but never the local user's team color.
+        for (String preferred : Arrays.asList("Yellow", "Orange", "Magenta", "White", "Blue")) {
+            if (!preferred.toLowerCase(Locale.US).equals(normalizedLocal)) {
+                return preferred;
+            }
+        }
+        for (String team : APRS_TEAM_POOL) {
+            if (!team.toLowerCase(Locale.US).equals(normalizedLocal)) {
+                return team;
+            }
+        }
+        return "Cyan";
     }
 
     /**

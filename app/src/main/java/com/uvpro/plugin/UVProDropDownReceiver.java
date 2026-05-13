@@ -1,12 +1,15 @@
 package com.uvpro.plugin;
 
 import android.app.AlertDialog;
+import android.animation.ArgbEvaluator;
+import android.animation.ValueAnimator;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.drawable.GradientDrawable;
 import android.preference.PreferenceManager;
 import android.util.Log;
 import android.text.InputType;
@@ -71,6 +74,15 @@ public class UVProDropDownReceiver extends DropDownReceiver
 
     private static final String TAG = "UVPro.UI";
     private static final int MAX_LOG_LINES = 50;
+    private static final int COLOR_A_ACTIVE = 0xFF00897B;       // Teal
+    private static final int COLOR_A_SUBDUED = 0xFF2E6B63;      // Teal (subdued)
+    private static final int COLOR_B_ACTIVE = 0xFF4CAF50;       // Bright Green
+    private static final int COLOR_B_SUBDUED = 0xFF2E7D32;      // Green (subdued)
+    private static final int COLOR_DIGITAL_ACTIVE = 0xFF005A8D; // Blue
+    private static final int COLOR_DIGITAL_SUBDUED = 0xFF2A5674; // Blue (subdued)
+    private static final int TARGET_A = 0;
+    private static final int TARGET_B = 1;
+    private static final int TARGET_DIGITAL = 2;
 
     private final Context pluginContext;
     private final BtConnectionManager btManager;
@@ -98,11 +110,10 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private Button btnDisconnect;
     private Button btnLoadSelectedRepeater;
     private Button btnRefreshChannels;
-    private Button btnChannelTarget;
-    private Button btnTuneANow;
-    private Button btnTuneBNow;
+    private Button btnVfoA;
+    private Button btnVfoB;
+    private Button btnDigital;
     private TextView selectedRepeaterText;
-    private TextView dualWatchStateText;
     private GridLayout channelsGrid;
     private Switch switchDualWatch;
 
@@ -136,7 +147,18 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private int txCount = 0;
     private int rxCount = 0;
     private UVProRadioControlManager radioControlManager;
-    private boolean channelTargetVfoB = false;
+    private boolean activeVfoB = false;
+    private boolean channelTargetDigital = false;
+    private int selectedTarget = TARGET_A;
+    private boolean txVfoB = false;
+    private int lastChannelA = -1;
+    private int lastChannelB = -1;
+    private int lastDigitalChannel = -1;
+    private boolean lastDualWatchEnabled = false;
+    private boolean lastHasRxFocus = false;
+    private ValueAnimator activeVfoPulseAnimator;
+    private Button pulsingVfoButton;
+    private GradientDrawable pulsingVfoDrawable;
 
     public UVProDropDownReceiver(MapView mapView,
                                      Context pluginContext,
@@ -259,11 +281,10 @@ public class UVProDropDownReceiver extends DropDownReceiver
         btnDisconnect = rootView.findViewById(getId("btn_disconnect"));
         btnLoadSelectedRepeater = rootView.findViewById(getId("btn_load_selected_repeater"));
         btnRefreshChannels = rootView.findViewById(getId("btn_refresh_channels"));
-        btnChannelTarget = rootView.findViewById(getId("btn_channel_target"));
-        btnTuneANow = rootView.findViewById(getId("btn_tune_a_now"));
-        btnTuneBNow = rootView.findViewById(getId("btn_tune_b_now"));
+        btnVfoA = rootView.findViewById(getId("btn_vfo_a"));
+        btnVfoB = rootView.findViewById(getId("btn_vfo_b"));
+        btnDigital = rootView.findViewById(getId("btn_digital"));
         selectedRepeaterText = rootView.findViewById(getId("text_selected_repeater"));
-        dualWatchStateText = rootView.findViewById(getId("text_dual_watch_state"));
         channelsGrid = rootView.findViewById(getId("grid_channels"));
         switchDualWatch = rootView.findViewById(getId("switch_dual_watch"));
 
@@ -373,14 +394,6 @@ public class UVProDropDownReceiver extends DropDownReceiver
             btnRefreshChannels.setOnClickListener(v -> refreshChannelGridAsync());
         }
 
-        if (btnChannelTarget != null) {
-            btnChannelTarget.setOnClickListener(v -> {
-                channelTargetVfoB = !channelTargetVfoB;
-                updateChannelTargetButton();
-            });
-            updateChannelTargetButton();
-        }
-
         if (switchDualWatch != null) {
             switchDualWatch.setOnCheckedChangeListener((buttonView, isChecked) -> {
                 if (!buttonView.isPressed()) {
@@ -388,13 +401,45 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 }
                 applyDualWatch(isChecked);
             });
+            switchDualWatch.setText("");
         }
 
-        if (btnTuneANow != null) {
-            btnTuneANow.setOnClickListener(v -> setActiveVfo(false));
+        if (btnVfoA != null) {
+            btnVfoA.setOnClickListener(v -> {
+                channelTargetDigital = false;
+                selectedTarget = TARGET_A;
+                activeVfoB = false;
+                updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
+                        lastDualWatchEnabled, txVfoB, lastHasRxFocus);
+            });
+            btnVfoA.setOnLongClickListener(v -> {
+                applyTxSelection(false);
+                return true;
+            });
         }
-        if (btnTuneBNow != null) {
-            btnTuneBNow.setOnClickListener(v -> setActiveVfo(true));
+        if (btnVfoB != null) {
+            btnVfoB.setOnClickListener(v -> {
+                channelTargetDigital = false;
+                selectedTarget = TARGET_B;
+                activeVfoB = true;
+                updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
+                        lastDualWatchEnabled, txVfoB, lastHasRxFocus);
+            });
+            btnVfoB.setOnLongClickListener(v -> {
+                if (btnVfoB.getVisibility() != View.VISIBLE) {
+                    return true;
+                }
+                applyTxSelection(true);
+                return true;
+            });
+        }
+        if (btnDigital != null) {
+            btnDigital.setOnClickListener(v -> {
+                channelTargetDigital = true;
+                selectedTarget = TARGET_DIGITAL;
+                updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
+                        lastDualWatchEnabled, txVfoB, lastHasRxFocus);
+            });
         }
     }
 
@@ -417,15 +462,18 @@ public class UVProDropDownReceiver extends DropDownReceiver
         String target = BluetoothDeviceRegistry.getConnectTargetAddress(ctx);
         BtDeviceRecord targetRecord =
                 (target != null && !target.isEmpty()) ? BluetoothDeviceRegistry.find(ctx, target) : null;
-        boolean connectMode = targetRecord != null;
+        boolean connectMode = target != null && !target.isEmpty();
 
         if (connectMode) {
             try {
-                BluetoothDevice device = adapter.getRemoteDevice(targetRecord.address);
-                appendLog("Connecting to " + BluetoothDeviceRegistry.getDisplayTitle(targetRecord) + "...");
+                BluetoothDevice device = adapter.getRemoteDevice(target);
+                String display = targetRecord != null
+                        ? BluetoothDeviceRegistry.getDisplayTitle(targetRecord)
+                        : target;
+                appendLog("Connecting to " + display + "...");
                 btManager.connect(device);
             } catch (Exception e) {
-                appendLog("Favorite radio no longer available, switching to scan");
+                appendLog("Saved radio no longer available, switching to scan");
                 BluetoothDeviceRegistry.setConnectTargetAddress(ctx, "");
                 refreshFavoriteStrip();
                 updateScanButtonText();
@@ -450,13 +498,6 @@ public class UVProDropDownReceiver extends DropDownReceiver
         if (btnScan == null) return;
         Context ctx = getMapView().getContext();
         String tgt = BluetoothDeviceRegistry.getConnectTargetAddress(ctx);
-        BluetoothDeviceRegistry.BtDeviceRecord rec =
-                (tgt != null && !tgt.isEmpty()) ? BluetoothDeviceRegistry.find(ctx, tgt) : null;
-        if (tgt != null && !tgt.isEmpty() && rec == null) {
-            // Stale connect target with no registry record: revert to scan mode.
-            BluetoothDeviceRegistry.setConnectTargetAddress(ctx, "");
-            tgt = null;
-        }
         if (!btManager.isConnected() && tgt != null && !tgt.isEmpty()) {
             btnScan.setText("CONNECT");
         } else {
@@ -547,6 +588,11 @@ public class UVProDropDownReceiver extends DropDownReceiver
             updateConnectionUI(true, finalDisplay);
             appendLog("Connected to " + finalDisplay);
             refreshFavoriteStrip();
+            updateScanButtonText();
+            // Auto-populate channel grid immediately after radio connect.
+            refreshChannelGridAsync();
+            // Follow-up read: some radios return channel/settings a moment later.
+            getMapView().postDelayed(this::refreshChannelGridAsync, 900L);
         });
         AtakBroadcast.getInstance().sendBroadcast(
                 new Intent(UVProMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
@@ -784,42 +830,51 @@ public class UVProDropDownReceiver extends DropDownReceiver
         channelsGrid.removeAllViews();
 
         if (snapshot == null) {
-            if (dualWatchStateText != null) {
-                dualWatchStateText.setText(btManager.isConnected()
-                        ? "Unable to read radio channels."
-                        : "Connect radio to read channels.");
-            }
             if (switchDualWatch != null) {
                 switchDualWatch.setChecked(false);
                 switchDualWatch.setEnabled(false);
+                switchDualWatch.setText("");
             }
-            if (btnChannelTarget != null) {
-                btnChannelTarget.setEnabled(false);
-            }
+            lastChannelA = -1;
+            lastChannelB = -1;
+            lastDigitalChannel = -1;
+            lastDualWatchEnabled = false;
+            lastHasRxFocus = false;
+            channelTargetDigital = false;
+            selectedTarget = TARGET_A;
+            activeVfoB = false;
+            txVfoB = false;
+            updateVfoButtons(-1, -1, -1, false, false, false);
             return;
         }
 
         if (switchDualWatch != null) {
             switchDualWatch.setEnabled(true);
             switchDualWatch.setChecked(snapshot.dualWatchEnabled);
+            switchDualWatch.setText("");
         }
 
-        if (dualWatchStateText != null) {
-            dualWatchStateText.setText(String.format(
-                    Locale.US,
-                    "A: CH%02d  B: CH%02d  Active: CH%02d",
-                    snapshot.channelA + 1,
-                    snapshot.channelB + 1,
-                    snapshot.currentChannelId + 1));
+        txVfoB = snapshot.dualWatchEnabled && snapshot.activeVfoB;
+        if (!snapshot.dualWatchEnabled && selectedTarget == TARGET_B) {
+            selectedTarget = TARGET_A;
+            channelTargetDigital = false;
+            activeVfoB = false;
+        } else if (selectedTarget == TARGET_A) {
+            activeVfoB = false;
+            channelTargetDigital = false;
+        } else if (selectedTarget == TARGET_B) {
+            activeVfoB = true;
+            channelTargetDigital = false;
+        } else {
+            channelTargetDigital = true;
         }
-
-        if (!snapshot.dualWatchEnabled) {
-            channelTargetVfoB = false;
-        }
-        if (btnChannelTarget != null) {
-            btnChannelTarget.setEnabled(snapshot.dualWatchEnabled);
-        }
-        updateChannelTargetButton();
+        lastChannelA = snapshot.channelA;
+        lastChannelB = snapshot.channelB;
+        lastDigitalChannel = snapshot.digitalChannelId;
+        lastDualWatchEnabled = snapshot.dualWatchEnabled;
+        lastHasRxFocus = snapshot.currentChannelId >= 0;
+        updateVfoButtons(snapshot.channelA, snapshot.channelB, snapshot.digitalChannelId,
+                snapshot.dualWatchEnabled, txVfoB, snapshot.currentChannelId >= 0);
 
         for (UVProRadioControlManager.ChannelSummary channel : snapshot.channels) {
             if (channel == null) {
@@ -844,20 +899,38 @@ public class UVProDropDownReceiver extends DropDownReceiver
                     name,
                     channel.rxFreqMHz));
 
+            boolean activeDigital = selectedTarget == TARGET_DIGITAL;
+            boolean activeA = selectedTarget == TARGET_A;
+            boolean activeB = selectedTarget == TARGET_B && snapshot.dualWatchEnabled;
+            boolean isA = channel.channelId == snapshot.channelA;
+            // Always show B assignment in the grid (active or subdued),
+            // even if B isn't currently the selected control target.
+            boolean isB = channel.channelId == snapshot.channelB;
+            boolean isDigital = snapshot.digitalChannelId >= 0
+                    && channel.channelId == snapshot.digitalChannelId;
+
             int bgColor = 0xFF3D3D3D;
-            if (channel.channelId == snapshot.currentChannelId) {
-                bgColor = 0xFF005A8D; // Active now
+            // Keep B assignment always visible in green tones.
+            if (isB) {
+                bgColor = activeB ? COLOR_B_ACTIVE : COLOR_B_SUBDUED;
             }
-            if (channel.channelId == snapshot.channelA) {
-                bgColor = 0xFF00695C; // VFO A
+            if (isA) {
+                bgColor = activeA ? COLOR_A_ACTIVE : COLOR_A_SUBDUED;
             }
-            if (snapshot.dualWatchEnabled && channel.channelId == snapshot.channelB) {
-                bgColor = 0xFF6A1B9A; // VFO B
+            if (isDigital) {
+                bgColor = activeDigital ? COLOR_DIGITAL_ACTIVE : COLOR_DIGITAL_SUBDUED;
             }
-            if (channel.channelId == snapshot.currentChannelId
-                    && (channel.channelId == snapshot.channelA
-                    || (snapshot.dualWatchEnabled && channel.channelId == snapshot.channelB))) {
-                bgColor = 0xFF2E7D32; // Active and assigned
+            // If multiple roles map to same channel, keep selected active role dominant,
+            // but preserve B (green) when no active override is selected.
+            if (isB && !activeA && !activeDigital) {
+                bgColor = activeB ? COLOR_B_ACTIVE : COLOR_B_SUBDUED;
+            } else if (isA && activeA) {
+                bgColor = COLOR_A_ACTIVE;
+            } else if (isB) {
+                // Keep B assignment green even when Digital shares same slot.
+                bgColor = COLOR_B_ACTIVE;
+            } else if (isDigital && activeDigital) {
+                bgColor = COLOR_DIGITAL_ACTIVE;
             }
 
             chip.setBackgroundColor(bgColor);
@@ -901,7 +974,24 @@ public class UVProDropDownReceiver extends DropDownReceiver
         if (radioControlManager == null) {
             return;
         }
-        boolean targetB = channelTargetVfoB;
+        if (channelTargetDigital) {
+            appendLog(String.format(Locale.US,
+                    "Setting Digital to CH%02d...", channelId + 1));
+            new Thread(() -> {
+                UVProRadioControlManager.ProgramResult result =
+                        radioControlManager.setDigitalChannel(channelId);
+                getMapView().post(() -> {
+                    appendLog(result.message);
+                    if (!result.success) {
+                        Toast.makeText(getMapView().getContext(),
+                                result.message, Toast.LENGTH_LONG).show();
+                    }
+                    refreshChannelGridAsync();
+                });
+            }, "uvpro-set-digital-channel").start();
+            return;
+        }
+        boolean targetB = activeVfoB;
         appendLog(String.format(Locale.US,
                 "Setting %s to CH%02d...",
                 targetB ? "VFO-B" : "VFO-A",
@@ -924,6 +1014,9 @@ public class UVProDropDownReceiver extends DropDownReceiver
         if (radioControlManager == null) {
             return;
         }
+        if (useVfoB && btnVfoB != null && btnVfoB.getVisibility() != View.VISIBLE) {
+            return;
+        }
         appendLog(useVfoB ? "Switching active side to VFO-B..." : "Switching active side to VFO-A...");
         new Thread(() -> {
             UVProRadioControlManager.ProgramResult result = radioControlManager.setActiveVfo(useVfoB);
@@ -938,11 +1031,137 @@ public class UVProDropDownReceiver extends DropDownReceiver
         }, "uvpro-set-active-vfo").start();
     }
 
-    private void updateChannelTargetButton() {
-        if (btnChannelTarget == null) {
+    private void applyTxSelection(boolean useVfoB) {
+        if (useVfoB && (!lastDualWatchEnabled || (btnVfoB != null && btnVfoB.getVisibility() != View.VISIBLE))) {
             return;
         }
-        btnChannelTarget.setText(channelTargetVfoB ? "Target: B" : "Target: A");
+        channelTargetDigital = false;
+        selectedTarget = useVfoB ? TARGET_B : TARGET_A;
+        activeVfoB = useVfoB;
+        setActiveVfo(useVfoB);
+    }
+
+    private void updateVfoButtons(int channelA, int channelB, int digitalChannel,
+                                  boolean dualWatchEnabled, boolean txOnB,
+                                  boolean hasRxFocus) {
+        if (btnVfoA == null) {
+            return;
+        }
+        final int subduedStroke = 0x55777777;
+        final boolean activeDigital = selectedTarget == TARGET_DIGITAL;
+        boolean activeA = selectedTarget == TARGET_A;
+        boolean activeB = selectedTarget == TARGET_B;
+        if (!dualWatchEnabled && activeB) {
+            activeB = false;
+            activeA = true;
+        }
+
+        String aText = channelA >= 0
+                ? String.format(Locale.US, "A: CH%02d", channelA + 1)
+                : "A: CH--";
+        if (!dualWatchEnabled || !txOnB) {
+            aText = aText + " -TX";
+        }
+        btnVfoA.setText(aText);
+        GradientDrawable aBg = buildVfoButtonBackground(
+                activeA ? COLOR_A_ACTIVE : COLOR_A_SUBDUED,
+                activeA ? 0x99FFFFFF : subduedStroke,
+                activeA ? 2 : 1);
+        btnVfoA.setBackground(aBg);
+        btnVfoA.setTextColor(0xFFFFFFFF);
+        btnVfoA.setAlpha(activeA ? 1.0f : 0.72f);
+        Button activeButton = activeA ? btnVfoA : null;
+        GradientDrawable activeDrawable = activeA ? aBg : null;
+
+        if (btnVfoB != null) {
+            if (dualWatchEnabled) {
+                btnVfoB.setVisibility(View.VISIBLE);
+                String bText = channelB >= 0
+                        ? String.format(Locale.US, "B: CH%02d", channelB + 1)
+                        : "B: CH--";
+                if (txOnB) {
+                    bText = bText + " -TX";
+                }
+                btnVfoB.setText(bText);
+                GradientDrawable bBg = buildVfoButtonBackground(
+                        activeB ? COLOR_B_ACTIVE : COLOR_B_SUBDUED,
+                        activeB ? 0x99FFFFFF : subduedStroke,
+                        activeB ? 2 : 1);
+                btnVfoB.setBackground(bBg);
+                btnVfoB.setTextColor(0xFFFFFFFF);
+                btnVfoB.setAlpha(activeB ? 1.0f : 0.72f);
+                if (activeB) {
+                    activeButton = btnVfoB;
+                    activeDrawable = bBg;
+                }
+            } else {
+                btnVfoB.setVisibility(View.GONE);
+            }
+        }
+        if (btnDigital != null) {
+            String dText = digitalChannel >= 0
+                    ? String.format(Locale.US, "Digital CH%02d", digitalChannel + 1)
+                    : "Digital";
+            btnDigital.setText(dText);
+            GradientDrawable dBg = buildVfoButtonBackground(
+                    activeDigital ? COLOR_DIGITAL_ACTIVE : COLOR_DIGITAL_SUBDUED,
+                    activeDigital ? 0xFFFFFFFF : subduedStroke,
+                    activeDigital ? 2 : 1);
+            btnDigital.setBackground(dBg);
+            btnDigital.setTextColor(0xFFFFFFFF);
+            btnDigital.setAlpha(activeDigital ? 1.0f : 0.72f);
+        }
+        // Pulse only applies to the currently active VFO button, never Digital.
+        updateActiveVfoPulse(activeButton, activeDrawable, hasRxFocus && !activeDigital);
+    }
+
+    private GradientDrawable buildVfoButtonBackground(int fillColor, int strokeColor, int strokeDp) {
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.RECTANGLE);
+        d.setCornerRadius(dip(getMapView().getContext(), 6));
+        d.setColor(fillColor);
+        d.setStroke(dip(getMapView().getContext(), strokeDp), strokeColor);
+        return d;
+    }
+
+    private void updateActiveVfoPulse(Button activeButton,
+                                      GradientDrawable activeDrawable,
+                                      boolean shouldPulse) {
+        if (!shouldPulse || activeButton == null || activeDrawable == null) {
+            stopActiveVfoPulse();
+            return;
+        }
+        if (activeVfoPulseAnimator != null && pulsingVfoButton == activeButton
+                && activeVfoPulseAnimator.isRunning()) {
+            return;
+        }
+        stopActiveVfoPulse();
+        pulsingVfoButton = activeButton;
+        pulsingVfoDrawable = activeDrawable;
+        activeVfoPulseAnimator = ValueAnimator.ofObject(
+                new ArgbEvaluator(),
+                0x55FFFFFF,
+                0xCC7FE57F);
+        activeVfoPulseAnimator.setDuration(900L);
+        activeVfoPulseAnimator.setRepeatMode(ValueAnimator.REVERSE);
+        activeVfoPulseAnimator.setRepeatCount(ValueAnimator.INFINITE);
+        activeVfoPulseAnimator.addUpdateListener(animation -> {
+            if (pulsingVfoDrawable == null) {
+                return;
+            }
+            int color = (Integer) animation.getAnimatedValue();
+            pulsingVfoDrawable.setStroke(dip(getMapView().getContext(), 2), color);
+        });
+        activeVfoPulseAnimator.start();
+    }
+
+    private void stopActiveVfoPulse() {
+        if (activeVfoPulseAnimator != null) {
+            activeVfoPulseAnimator.cancel();
+            activeVfoPulseAnimator = null;
+        }
+        pulsingVfoButton = null;
+        pulsingVfoDrawable = null;
     }
 
     private void showChannelProgramDialog(UVProRadioControlManager.ChannelSummary channel) {
@@ -981,11 +1200,19 @@ public class UVProDropDownReceiver extends DropDownReceiver
         EditText editTxTone = new EditText(ctx);
         editTxTone.setHint("TX Tone (blank, 100.0, D023)");
         editTxTone.setSingleLine(true);
+        String txToneText = formatToneForInput(channel.txTone);
+        if (!txToneText.isEmpty()) {
+            editTxTone.setText(txToneText);
+        }
         layout.addView(editTxTone);
 
         EditText editRxTone = new EditText(ctx);
         editRxTone.setHint("RX Tone (blank, 100.0, D023)");
         editRxTone.setSingleLine(true);
+        String rxToneText = formatToneForInput(channel.rxTone);
+        if (!rxToneText.isEmpty()) {
+            editRxTone.setText(rxToneText);
+        }
         layout.addView(editRxTone);
 
         EditText editSquelch = new EditText(ctx);
@@ -1109,6 +1336,23 @@ public class UVProDropDownReceiver extends DropDownReceiver
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private String formatToneForInput(Object tone) {
+        if (tone == null) {
+            return "";
+        }
+        if (tone instanceof Double) {
+            return String.format(Locale.US, "%.1f", (Double) tone);
+        }
+        if (tone instanceof Integer) {
+            int v = (Integer) tone;
+            if (v > 0 && v < 1000) {
+                return String.format(Locale.US, "D%03d", v);
+            }
+            return String.valueOf(v);
+        }
+        return String.valueOf(tone);
     }
 
     private void loadSelectedRepeaterToRadio() {
@@ -1470,18 +1714,27 @@ public class UVProDropDownReceiver extends DropDownReceiver
     public void onDropDownSelectionRemoved() { }
 
     @Override
-    public void onDropDownClose() { }
+    public void onDropDownClose() {
+        stopActiveVfoPulse();
+    }
 
     @Override
     public void onDropDownSizeChanged(double width, double height) { }
 
     @Override
-    public void onDropDownVisible(boolean visible) { }
+    public void onDropDownVisible(boolean visible) {
+        if (!visible) {
+            stopActiveVfoPulse();
+        } else {
+            refreshChannelGridAsync();
+        }
+    }
 
     @Override
     public void disposeImpl() {
         // Unregister listeners
         btManager.removeListener(this);
         contactTracker.setListener(null);
+        stopActiveVfoPulse();
     }
 }

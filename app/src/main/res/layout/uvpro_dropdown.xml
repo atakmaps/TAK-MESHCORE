@@ -285,6 +285,7 @@
                 android:layout_marginTop="4dp"
                 android:text="Manage Smart Beacon Settings"
                 android:textSize="12sp"
+                android:textColor="#FFFFFFFF"
                 android:minHeight="40dp"
                 android:backgroundTint="#FF455A64" />
 
@@ -322,6 +323,7 @@
                 android:layout_marginTop="8dp"
                 android:text="Manage Beacon Settings"
                 android:textSize="12sp"
+                android:textColor="#FFFFFFFF"
                 android:minHeight="40dp"
                 android:backgroundTint="#FF455A64" />
         </LinearLayout>
@@ -367,6 +369,7 @@
                 android:layout_height="40dp"
                 android:text="Load Selected Repeater"
                 android:textSize="11sp"
+                android:textColor="#FFFFFFFF"
                 android:enabled="false"
                 android:layout_marginBottom="6dp"
                 android:backgroundTint="#FF607D8B" />
@@ -505,18 +508,12 @@
                     android:id="@+id/switch_dual_watch"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:checked="false" />
+                    android:checked="false"
+                    android:showText="false"
+                    android:textColor="#FFFFFFFF"
+                    android:switchMinWidth="56dp"
+                    android:contentDescription="Dual watch radio switch" />
             </LinearLayout>
-
-            <TextView
-                android:id="@+id/text_dual_watch_state"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="A: --  B: --  Active: --"
-                android:textColor="#FFAAAAAA"
-                android:textSize="11sp"
-                android:paddingTop="2dp"
-                android:paddingBottom="6dp" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -526,23 +523,21 @@
 
                 <Button
                     android:id="@+id/btn_refresh_channels"
-                    android:layout_width="0dp"
+                    android:layout_width="match_parent"
                     android:layout_height="40dp"
-                    android:layout_weight="1"
                     android:text="Refresh Grid"
                     android:textSize="11sp"
-                    android:layout_marginEnd="4dp"
+                    android:textColor="#FFFFFFFF"
                     android:backgroundTint="#FF455A64" />
-
-                <Button
-                    android:id="@+id/btn_channel_target"
-                    android:layout_width="0dp"
-                    android:layout_height="40dp"
-                    android:layout_weight="1"
-                    android:text="Target: A"
-                    android:textSize="11sp"
-                    android:backgroundTint="#FF607D8B" />
             </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Long press for TX"
+                android:textColor="#FFFFFFFF"
+                android:textSize="11sp"
+                android:paddingBottom="4dp" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -551,23 +546,37 @@
                 android:paddingBottom="8dp">
 
                 <Button
-                    android:id="@+id/btn_tune_a_now"
+                    android:id="@+id/btn_vfo_a"
                     android:layout_width="0dp"
                     android:layout_height="40dp"
                     android:layout_weight="1"
-                    android:text="Tune A Now"
+                    android:text="A: CH--"
                     android:textSize="11sp"
+                    android:textColor="#FFFFFFFF"
                     android:layout_marginEnd="4dp"
                     android:backgroundTint="#FF00695C" />
 
                 <Button
-                    android:id="@+id/btn_tune_b_now"
+                    android:id="@+id/btn_vfo_b"
                     android:layout_width="0dp"
                     android:layout_height="40dp"
                     android:layout_weight="1"
-                    android:text="Tune B Now"
+                    android:text="B: CH--"
                     android:textSize="11sp"
-                    android:backgroundTint="#FF6A1B9A" />
+                    android:textColor="#FFFFFFFF"
+                    android:layout_marginEnd="4dp"
+                    android:backgroundTint="#FF2E7D32"
+                    android:visibility="gone" />
+
+                <Button
+                    android:id="@+id/btn_digital"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:text="Digital"
+                    android:textSize="11sp"
+                    android:textColor="#FFFFFFFF"
+                    android:backgroundTint="#FF005A8D" />
             </LinearLayout>
 
             <GridLayout
@@ -608,6 +617,7 @@
                     android:layout_weight="1"
                     android:text="Send Beacon"
                     android:textSize="11sp"
+                    android:textColor="#FFFFFFFF"
                     android:layout_marginEnd="4dp"
                     android:backgroundTint="#FF455A64" />
 
@@ -618,6 +628,7 @@
                     android:layout_weight="1"
                     android:text="Send Ping"
                     android:textSize="11sp"
+                    android:textColor="#FFFFFFFF"
                     android:layout_marginEnd="4dp"
                     android:backgroundTint="#FF455A64" />
 
@@ -628,6 +639,7 @@
                     android:layout_weight="1"
                     android:text="Settings"
                     android:textSize="11sp"
+                    android:textColor="#FFFFFFFF"
                     android:backgroundTint="#FF455A64" />
             </LinearLayout>
         </LinearLayout>

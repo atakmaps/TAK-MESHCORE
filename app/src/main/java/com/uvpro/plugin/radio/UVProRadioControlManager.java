@@ -67,15 +67,20 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
         public final String name;
         public final double rxFreqMHz;
         public final double txFreqMHz;
+        public final Object txTone;
+        public final Object rxTone;
         public final boolean scanEnabled;
         public final boolean muted;
 
         public ChannelSummary(int channelId, String name, double rxFreqMHz, double txFreqMHz,
+                              Object txTone, Object rxTone,
                               boolean scanEnabled, boolean muted) {
             this.channelId = channelId;
             this.name = name;
             this.rxFreqMHz = rxFreqMHz;
             this.txFreqMHz = txFreqMHz;
+            this.txTone = txTone;
+            this.rxTone = rxTone;
             this.scanEnabled = scanEnabled;
             this.muted = muted;
         }
@@ -85,14 +90,22 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
         public final int channelA;
         public final int channelB;
         public final boolean dualWatchEnabled;
+        public final boolean activeVfoB;
+        public final int txChannelId;
+        public final int digitalChannelId;
         public final int currentChannelId;
         public final ChannelSummary[] channels;
 
         public RadioControlSnapshot(int channelA, int channelB, boolean dualWatchEnabled,
+                                    boolean activeVfoB,
+                                    int txChannelId, int digitalChannelId,
                                     int currentChannelId, ChannelSummary[] channels) {
             this.channelA = channelA;
             this.channelB = channelB;
             this.dualWatchEnabled = dualWatchEnabled;
+            this.activeVfoB = activeVfoB;
+            this.txChannelId = txChannelId;
+            this.digitalChannelId = digitalChannelId;
             this.currentChannelId = currentChannelId;
             this.channels = channels;
         }
@@ -301,12 +314,19 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                 return null;
             }
 
+            int txChannel = settingsState.vfoX == 2
+                    ? settingsState.channelB
+                    : settingsState.channelA;
             int currentChannel = settingsState.channelA;
             CommandReply htStatusReply = sendCommandSync(
                     BASIC_GROUP, CMD_GET_HT_STATUS, new byte[0], 2500);
             if (htStatusReply != null && htStatusReply.status == STATUS_SUCCESS
                     && htStatusReply.payload != null && htStatusReply.payload.length >= 2) {
-                currentChannel = parseCurrentChannelIdFromHtStatus(htStatusReply.payload);
+                int parsedCurrent = parseCurrentChannelIdFromHtStatus(htStatusReply.payload);
+                // Guard against occasional bogus HT status bits that point outside channel range.
+                if (parsedCurrent >= 0 && parsedCurrent < 255) {
+                    currentChannel = parsedCurrent;
+                }
             }
 
             int count = Math.max(1, Math.min(30, maxChannels));
@@ -316,16 +336,29 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                         BASIC_GROUP, CMD_READ_RF_CH, new byte[]{(byte) i}, 2500);
                 if (channelReply == null || channelReply.status != STATUS_SUCCESS
                         || channelReply.payload == null || channelReply.payload.length < 20) {
-                    channels[i] = new ChannelSummary(i, "", 0.0, 0.0, false, false);
+                    channels[i] = new ChannelSummary(i, "", 0.0, 0.0,
+                            null, null, false, false);
                     continue;
                 }
                 channels[i] = parseChannelSummary(channelReply.payload, i);
             }
 
+            int channelA = normalizeToGridChannel(settingsState.channelA, count);
+            int channelB = normalizeToGridChannel(settingsState.channelB, count);
+            txChannel = normalizeToGridChannel(txChannel, count);
+            if (txChannel < 0) {
+                txChannel = channelA;
+            }
+            int digitalChannel = normalizeDigitalChannel(settingsState.autoShareLocCh, count);
+            currentChannel = normalizeToGridChannel(currentChannel, count);
+
             return new RadioControlSnapshot(
-                    settingsState.channelA,
-                    settingsState.channelB,
+                    channelA,
+                    channelB,
                     settingsState.doubleChannel == 1,
+                    settingsState.vfoX == 2,
+                    txChannel,
+                    digitalChannel,
                     currentChannel,
                     channels
             );
@@ -347,7 +380,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                 return new ProgramResult(false, "Could not read radio settings.");
             }
             byte[] modified = modifySettingsRaw(
-                    readSettings.payload, null, null, enabled ? 1 : 0, null, null);
+                    readSettings.payload, null, null, enabled ? 1 : 0, null, null, null);
             if (modified == null) {
                 return new ProgramResult(false, "Could not build dual-watch settings.");
             }
@@ -382,7 +415,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             }
             Integer newA = targetVfoB ? null : channelId;
             Integer newB = targetVfoB ? channelId : null;
-            byte[] modified = modifySettingsRaw(readSettings.payload, newA, newB, null, null, null);
+            byte[] modified = modifySettingsRaw(readSettings.payload, newA, newB, null, null, null, null);
             if (modified == null) {
                 return new ProgramResult(false, "Could not build channel settings.");
             }
@@ -429,7 +462,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                 newChannelA = storedChannelAForVfoBTx;
                 storedChannelAForVfoBTx = null;
             }
-            byte[] modified = modifySettingsRaw(readSettings.payload, newChannelA, null, null, null, vfoX);
+            byte[] modified = modifySettingsRaw(readSettings.payload, newChannelA, null, null, null, null, vfoX);
             if (modified == null) {
                 return new ProgramResult(false, "Could not build active VFO settings.");
             }
@@ -507,7 +540,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                 }
                 int clamped = Math.max(0, Math.min(9, spec.squelchLevel));
                 byte[] modified = modifySettingsRaw(
-                        readSettings.payload, null, null, null, clamped, null);
+                        readSettings.payload, null, null, null, clamped, null, null);
                 if (modified == null) {
                     return new ProgramResult(false, "Channel saved, but failed to build squelch update.");
                 }
@@ -524,6 +557,42 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             return new ProgramResult(false, "Interrupted while programming channel.");
         } catch (Exception e) {
             return new ProgramResult(false, "Programming error: " + e.getMessage());
+        }
+    }
+
+    public ProgramResult setDigitalChannel(int channelId) {
+        if (!btManager.isConnected()) {
+            return new ProgramResult(false, "Radio not connected.");
+        }
+        if (channelId < 0 || channelId >= 30) {
+            return new ProgramResult(false, "Invalid digital channel.");
+        }
+        try {
+            CommandReply readSettings = sendCommandSync(
+                    BASIC_GROUP, CMD_READ_SETTINGS, new byte[0], 2500);
+            if (readSettings == null || readSettings.status != STATUS_SUCCESS
+                    || readSettings.payload == null || readSettings.payload.length < 12) {
+                return new ProgramResult(false, "Could not read radio settings.");
+            }
+            // Digital channel field behaves as channel-numbered (1..30) on these radios.
+            int encodedDigitalChannel = channelId + 1;
+            byte[] modified = modifySettingsRaw(
+                    readSettings.payload, null, null, null, null, encodedDigitalChannel, null);
+            if (modified == null) {
+                return new ProgramResult(false, "Could not build digital channel settings.");
+            }
+            CommandReply writeSettings = sendCommandSync(
+                    BASIC_GROUP, CMD_WRITE_SETTINGS, modified, 2500);
+            if (writeSettings == null) {
+                return new ProgramResult(false, "No response writing digital channel.");
+            }
+            if (writeSettings.status != STATUS_SUCCESS) {
+                return new ProgramResult(false, "Failed to update digital channel.");
+            }
+            return new ProgramResult(true, "Digital channel set to CH" + String.format(Locale.US, "%02d", channelId + 1) + ".");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new ProgramResult(false, "Interrupted while setting digital channel.");
         }
     }
 
@@ -866,7 +935,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
         } else {
             newA = channelId;
         }
-        return modifySettingsRaw(rawSettings, newA, newB, null, null, null);
+        return modifySettingsRaw(rawSettings, newA, newB, null, null, null, null);
     }
 
     private static byte[] modifySettingsRaw(byte[] rawSettings,
@@ -874,6 +943,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                                             Integer newChannelB,
                                             Integer newDoubleChannel,
                                             Integer newSquelch,
+                                            Integer newDigitalChannel,
                                             Integer newVfoX) {
         try {
             if (rawSettings.length < 12) {
@@ -928,6 +998,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             int nextB = newChannelB != null ? newChannelB : currentB;
             int nextDouble = newDoubleChannel != null ? newDoubleChannel : doubleChannel;
             int nextSquelch = newSquelch != null ? newSquelch : squelchLevel;
+            int nextDigitalChannel = newDigitalChannel != null ? newDigitalChannel : autoShareLocCh;
             int nextVfoX = newVfoX != null ? newVfoX : vfoX;
 
             BitWriter writer = new BitWriter(12);
@@ -950,7 +1021,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             writer.writeBool(disTone);
             writer.writeBool(powerSavingMode);
             writer.writeInt(autoPowerOff, 3);
-            writer.writeInt(autoShareLocCh, 5);
+            writer.writeInt(nextDigitalChannel, 5);
             writer.writeInt(hmSpeaker, 2);
             writer.writeInt(positioningSystem, 4);
             writer.writeInt(timeOffset, 6);
@@ -992,10 +1063,8 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
     }
 
     private static ChannelSummary parseChannelSummary(byte[] payload, int fallbackChannelId) {
-        int channelId = payload[0] & 0xFF;
-        if (channelId <= 0 && fallbackChannelId >= 0) {
-            channelId = fallbackChannelId;
-        }
+        // Keep the UI slot order deterministic: slot index drives channel identity.
+        int channelId = Math.max(0, fallbackChannelId);
         int txFreqHz = ((payload[1] & 0x3F) << 24)
                 | ((payload[2] & 0xFF) << 16)
                 | ((payload[3] & 0xFF) << 8)
@@ -1006,15 +1075,58 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                 | (payload[8] & 0xFF);
         boolean scanEnabled = (payload[13] & 0x80) != 0;
         boolean muted = (payload[14] & 0x10) != 0;
+        int txToneRaw = ((payload[9] & 0xFF) << 8) | (payload[10] & 0xFF);
+        int rxToneRaw = ((payload[11] & 0xFF) << 8) | (payload[12] & 0xFF);
         String name = decodeChannelName(payload);
         return new ChannelSummary(
                 channelId,
                 name,
                 rxFreqHz <= 0 ? 0.0 : (rxFreqHz / 1_000_000.0),
                 txFreqHz <= 0 ? 0.0 : (txFreqHz / 1_000_000.0),
+                decodeTone(txToneRaw),
+                decodeTone(rxToneRaw),
                 scanEnabled,
                 muted
         );
+    }
+
+    private static Object decodeTone(int raw) {
+        if (raw <= 0) {
+            return null;
+        }
+        // CTCSS values are typically encoded as frequency * 100 (e.g. 100.0 -> 10000).
+        // Small values are treated as DCS integer codes.
+        if (raw >= 6700) {
+            return raw / 100.0;
+        }
+        return raw;
+    }
+
+    /**
+     * Radios/firmware can report channel ids as 0-based or 1-based.
+     * Normalize to 0-based grid index [0, count-1], or -1 if invalid.
+     */
+    private static int normalizeToGridChannel(int raw, int count) {
+        if (raw >= 0 && raw < count) {
+            return raw; // already 0-based
+        }
+        if (raw >= 1 && raw <= count) {
+            return raw - 1; // 1-based -> 0-based
+        }
+        return -1;
+    }
+
+    /**
+     * Digital channel field uses 1..N in practice; normalize explicitly.
+     */
+    private static int normalizeDigitalChannel(int raw, int count) {
+        if (raw >= 1 && raw <= count) {
+            return raw - 1;
+        }
+        if (raw >= 0 && raw < count) {
+            return raw;
+        }
+        return -1;
     }
 
     private static String decodeChannelName(byte[] payload) {
@@ -1036,6 +1148,8 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
         int channelA;
         int channelB;
         int doubleChannel;
+        int autoShareLocCh;
+        int vfoX;
 
         static SettingsState parse(byte[] rawSettings) {
             if (rawSettings == null || rawSettings.length < 12) {
@@ -1063,7 +1177,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                 reader.readBool();
                 reader.readBool();
                 reader.readInt(3);
-                reader.readInt(5);
+                state.autoShareLocCh = reader.readInt(5);
                 reader.readInt(2);
                 reader.readInt(4);
                 reader.readInt(6);
@@ -1072,7 +1186,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                 reader.readBool();
                 reader.readBool();
                 reader.readInt(5);
-                reader.readInt(2);
+                state.vfoX = reader.readInt(2);
                 reader.readBool();
                 int channelAUpper = reader.readInt(4);
                 int channelBUpper = reader.readInt(4);

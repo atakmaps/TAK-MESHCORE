@@ -82,6 +82,9 @@ public final class BluetoothDeviceRegistry {
             found.lastSystemName = nm != null ? nm.trim() : null;
             trimOverflow(list);
             saveAll(context, list);
+            // Persist this as the direct-connect target so "connect last radio"
+            // works across ATAK/plugin restarts.
+            setConnectTargetAddress(context, addr);
         }
     }
 
