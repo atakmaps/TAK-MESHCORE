@@ -199,7 +199,11 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
     private final BtConnectionManager btManager;
     private final Object pendingLock = new Object();
     private final Object wireLock = new Object();
+    private final Object commandLock = new Object();
+    private final Object snapshotCacheLock = new Object();
     private final ByteArrayOutputStream receiveBuffer = new ByteArrayOutputStream();
+    private final ChannelSummary[] cachedChannels = new ChannelSummary[30];
+    private int cachedChannelCount = 30;
 
     private PendingRequest pending;
     private RepeaterSpec selectedRepeater;
@@ -362,6 +366,9 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
 
             int count = Math.max(1, Math.min(30, maxChannels));
             ChannelSummary[] channels = new ChannelSummary[count];
+            synchronized (snapshotCacheLock) {
+                cachedChannelCount = count;
+            }
             for (int i = 0; i < count; i++) {
                 CommandReply channelReply = sendCommandSync(
                         BASIC_GROUP, CMD_READ_RF_CH, new byte[]{(byte) i}, 2500);
@@ -372,6 +379,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                     continue;
                 }
                 channels[i] = parseChannelSummary(channelReply.payload, i);
+                cacheChannelSummary(channels[i]);
             }
 
             int channelA = normalizeToGridChannel(settingsState.channelA, count);
@@ -385,6 +393,99 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
 
             Log.d(TAG, "snapshot settings: dual=" + dualWatchEnabled
                     + " doubleChannelRaw=" + settingsState.doubleChannel
+                    + " vfoX=" + settingsState.vfoX
+                    + " htChannelType=" + htChannelType
+                    + " activeVfoB=" + activeVfoB
+                    + " chA=" + channelA
+                    + " chB=" + channelB
+                    + " tx=" + txChannel
+                    + " digital=" + digitalChannel
+                    + " current=" + currentChannel);
+
+            return new RadioControlSnapshot(
+                    channelA,
+                    channelB,
+                    dualWatchEnabled,
+                    activeVfoB,
+                    txChannel,
+                    digitalChannel,
+                    currentChannel,
+                    channels
+            );
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+    }
+
+    public RadioControlSnapshot readSnapshotFast(int maxChannels) {
+        if (!btManager.isConnected()) {
+            notificationRegistrationOk = false;
+            return null;
+        }
+        maybeRegisterForStatusEvents();
+        try {
+            CommandReply readSettings = sendCommandSync(
+                    BASIC_GROUP, CMD_READ_SETTINGS, new byte[0], 2500);
+            if (readSettings == null || readSettings.status != STATUS_SUCCESS
+                    || readSettings.payload == null || readSettings.payload.length < 12) {
+                return null;
+            }
+
+            SettingsState settingsState = SettingsState.parse(readSettings.payload);
+            if (settingsState == null) {
+                return null;
+            }
+
+            boolean dualWatchEnabled = settingsState.doubleChannel != 0;
+            int htChannelType = -1;
+            boolean activeVfoB = settingsState.vfoX == 2;
+            int txChannel = activeVfoB
+                    ? settingsState.channelB
+                    : settingsState.channelA;
+            int currentChannel = settingsState.channelA;
+            CommandReply htStatusReply = sendCommandSync(
+                    BASIC_GROUP, CMD_GET_HT_STATUS, new byte[0], 2500);
+            if (htStatusReply != null && htStatusReply.status == STATUS_SUCCESS
+                    && htStatusReply.payload != null && htStatusReply.payload.length >= 2) {
+                int parsedCurrent = parseCurrentChannelIdFromHtStatus(htStatusReply.payload);
+                htChannelType = parseChannelTypeFromHtStatus(htStatusReply.payload);
+                if (htChannelType == 1) {
+                    activeVfoB = false;
+                } else if (htChannelType == 2) {
+                    activeVfoB = true;
+                }
+                txChannel = activeVfoB ? settingsState.channelB : settingsState.channelA;
+                if (parsedCurrent >= 0 && parsedCurrent < 255) {
+                    currentChannel = parsedCurrent;
+                }
+            }
+
+            int count = Math.max(1, Math.min(30, maxChannels));
+            int channelA = normalizeToGridChannel(settingsState.channelA, count);
+            int channelB = normalizeToGridChannel(settingsState.channelB, count);
+            txChannel = normalizeToGridChannel(txChannel, count);
+            if (txChannel < 0) {
+                txChannel = channelA;
+            }
+            int digitalChannel = normalizeDigitalChannel(settingsState.autoShareLocCh, count);
+            currentChannel = normalizeToGridChannel(currentChannel, count);
+
+            // Update only relevant channels for fast event-driven refreshes.
+            ensureChannelCached(channelA, count);
+            ensureChannelCached(channelB, count);
+            ensureChannelCached(digitalChannel, count);
+            ensureChannelCached(currentChannel, count);
+
+            ChannelSummary[] channels = snapshotChannelsFromCache(count);
+            for (int i = 0; i < channels.length; i++) {
+                if (channels[i] == null) {
+                    channels[i] = new ChannelSummary(i, "", 0.0, 0.0,
+                            null, null, false, false);
+                }
+            }
+
+            Log.d(TAG, "snapshot fast: dual=" + dualWatchEnabled
                     + " vfoX=" + settingsState.vfoX
                     + " htChannelType=" + htChannelType
                     + " activeVfoB=" + activeVfoB
@@ -745,6 +846,44 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
         }
     }
 
+    private void ensureChannelCached(int channelId, int count) throws InterruptedException {
+        if (channelId < 0 || channelId >= count) {
+            return;
+        }
+        synchronized (snapshotCacheLock) {
+            cachedChannelCount = count;
+            if (cachedChannels[channelId] != null) {
+                return;
+            }
+        }
+        CommandReply channelReply = sendCommandSync(
+                BASIC_GROUP, CMD_READ_RF_CH, new byte[]{(byte) channelId}, 2500);
+        if (channelReply == null || channelReply.status != STATUS_SUCCESS
+                || channelReply.payload == null || channelReply.payload.length < 20) {
+            return;
+        }
+        ChannelSummary parsed = parseChannelSummary(channelReply.payload, channelId);
+        cacheChannelSummary(parsed);
+    }
+
+    private ChannelSummary[] snapshotChannelsFromCache(int count) {
+        ChannelSummary[] channels = new ChannelSummary[count];
+        synchronized (snapshotCacheLock) {
+            cachedChannelCount = count;
+            System.arraycopy(cachedChannels, 0, channels, 0, Math.min(count, cachedChannels.length));
+        }
+        return channels;
+    }
+
+    private void cacheChannelSummary(ChannelSummary summary) {
+        if (summary == null || summary.channelId < 0 || summary.channelId >= cachedChannels.length) {
+            return;
+        }
+        synchronized (snapshotCacheLock) {
+            cachedChannels[summary.channelId] = summary;
+        }
+    }
+
     @Override
     public boolean onRawBytes(byte[] data) {
         if (data == null || data.length < 2) {
@@ -840,29 +979,31 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
 
     private CommandReply sendCommandSync(int commandGroup, int command, byte[] body, long timeoutMs)
             throws InterruptedException {
-        PendingRequest req = new PendingRequest();
-        req.group = commandGroup;
-        req.command = command;
+        synchronized (commandLock) {
+            PendingRequest req = new PendingRequest();
+            req.group = commandGroup;
+            req.command = command;
 
-        synchronized (pendingLock) {
-            pending = req;
-        }
-
-        byte[] commandBytes = createRadioCommand(commandGroup, command, body);
-        if (!btManager.sendRawBytes(commandBytes)) {
             synchronized (pendingLock) {
-                pending = null;
+                pending = req;
             }
-            return null;
-        }
 
-        boolean ok = req.latch.await(timeoutMs, TimeUnit.MILLISECONDS);
-        synchronized (pendingLock) {
-            if (pending == req) {
-                pending = null;
+            byte[] commandBytes = createRadioCommand(commandGroup, command, body);
+            if (!btManager.sendRawBytes(commandBytes)) {
+                synchronized (pendingLock) {
+                    pending = null;
+                }
+                return null;
             }
+
+            boolean ok = req.latch.await(timeoutMs, TimeUnit.MILLISECONDS);
+            synchronized (pendingLock) {
+                if (pending == req) {
+                    pending = null;
+                }
+            }
+            return ok ? req.reply : null;
         }
-        return ok ? req.reply : null;
     }
 
     private void maybeRegisterForStatusEvents() {

@@ -94,8 +94,6 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private static final int TARGET_A = 0;
     private static final int TARGET_B = 1;
     private static final int TARGET_DIGITAL = 2;
-    private static final long STATUS_POLL_INTERVAL_MS = 5000L;
-    private static final long STATUS_POLL_QUIET_MS = 1200L;
 
     private final Context pluginContext;
     private final BtConnectionManager btManager;
@@ -176,24 +174,8 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private GradientDrawable pulsingVfoDrawable;
     private final AtomicBoolean snapshotReadInFlight = new AtomicBoolean(false);
     private final AtomicBoolean snapshotRefreshPending = new AtomicBoolean(false);
-    private boolean statusPollingEnabled = false;
-    private final Runnable statusPollRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (!statusPollingEnabled) {
-                return;
-            }
-            try {
-                if (btManager.isConnected()
-                        && !snapshotReadInFlight.get()
-                        && !btManager.hasRecentIo(STATUS_POLL_QUIET_MS)) {
-                    refreshChannelGridAsync();
-                }
-            } finally {
-                scheduleNextStatusPoll();
-            }
-        }
-    };
+    private final AtomicBoolean snapshotFullRefreshPending = new AtomicBoolean(false);
+    private UVProRadioControlManager.RadioControlSnapshot lastSnapshot;
 
     public UVProDropDownReceiver(MapView mapView,
                                      Context pluginContext,
@@ -288,7 +270,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         refreshFavoriteStrip();
         updateScanButtonText();
         updateSelectedRepeaterUi();
-        refreshChannelGridAsync();
+        refreshChannelGridFullAsync();
         refreshLogView();
         appendLog("UV-PRO ready");
         return rootView;
@@ -430,7 +412,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         }
 
         if (btnRefreshChannels != null) {
-            btnRefreshChannels.setOnClickListener(v -> refreshChannelGridAsync());
+            btnRefreshChannels.setOnClickListener(v -> refreshChannelGridFullAsync());
         }
 
         if (switchDualWatch != null) {
@@ -451,7 +433,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 activeVfoB = false;
                 updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
                         lastDualWatchEnabled, txVfoB, lastHasRxFocus);
-                refreshChannelGridAsync();
+                rerenderGridFromLastSnapshot();
             });
             btnVfoA.setOnLongClickListener(v -> {
                 applyTxSelection(false);
@@ -466,7 +448,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 activeVfoB = true;
                 updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
                         lastDualWatchEnabled, txVfoB, lastHasRxFocus);
-                refreshChannelGridAsync();
+                rerenderGridFromLastSnapshot();
             });
             btnVfoB.setOnLongClickListener(v -> {
                 if (btnVfoB.getVisibility() != View.VISIBLE) {
@@ -649,7 +631,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
             refreshFavoriteStrip();
             updateScanButtonText();
             // Auto-populate channel grid immediately after radio connect.
-            refreshChannelGridAsync();
+            refreshChannelGridFullAsync();
             // Follow-up read: some radios return channel/settings a moment later.
             getMapView().postDelayed(this::refreshChannelGridAsync, 900L);
         });
@@ -660,7 +642,6 @@ public class UVProDropDownReceiver extends DropDownReceiver
     @Override
     public void onDisconnected(String reason) {
         getMapView().post(() -> {
-            stopStatusPolling();
             updateConnectionUI(false, null);
             appendLog("Disconnected: " + reason);
         });
@@ -746,7 +727,9 @@ public class UVProDropDownReceiver extends DropDownReceiver
         if (btnDisconnect != null) btnDisconnect.setEnabled(connected);
         refreshFavoriteStrip();
         updateScanButtonText();
-        refreshChannelGridAsync();
+        if (!connected) {
+            renderChannelGrid(null);
+        }
     }
 
     private void updateContactCount() {
@@ -873,27 +856,50 @@ public class UVProDropDownReceiver extends DropDownReceiver
     }
 
     private void refreshChannelGridAsync() {
+        refreshChannelGridAsync(false);
+    }
+
+    private void refreshChannelGridFullAsync() {
+        refreshChannelGridAsync(true);
+    }
+
+    private void refreshChannelGridAsync(boolean fullSnapshot) {
         if (radioControlManager == null || channelsGrid == null) {
             return;
         }
         if (!snapshotReadInFlight.compareAndSet(false, true)) {
             snapshotRefreshPending.set(true);
+            if (fullSnapshot) {
+                snapshotFullRefreshPending.set(true);
+            }
             return;
         }
         new Thread(() -> {
             UVProRadioControlManager.RadioControlSnapshot snapshot =
-                    radioControlManager.readSnapshot(30);
+                    fullSnapshot
+                            ? radioControlManager.readSnapshot(30)
+                            : radioControlManager.readSnapshotFast(30);
             getMapView().post(() -> {
                 try {
                     renderChannelGrid(snapshot);
                 } finally {
                     snapshotReadInFlight.set(false);
                     if (snapshotRefreshPending.compareAndSet(true, false)) {
-                        refreshChannelGridAsync();
+                        boolean runFull = snapshotFullRefreshPending.getAndSet(false);
+                        refreshChannelGridAsync(runFull);
                     }
                 }
             });
         }, "uvpro-read-channels").start();
+    }
+
+    private void rerenderGridFromLastSnapshot() {
+        if (lastSnapshot != null) {
+            renderChannelGrid(lastSnapshot);
+            return;
+        }
+        updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
+                lastDualWatchEnabled, txVfoB, lastHasRxFocus);
     }
 
     private void renderChannelGrid(UVProRadioControlManager.RadioControlSnapshot snapshot) {
@@ -916,6 +922,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 switchDualWatch.setEnabled(false);
                 switchDualWatch.setText("");
             }
+            lastSnapshot = null;
             lastChannelA = -1;
             lastChannelB = -1;
             lastDigitalChannel = -1;
@@ -932,6 +939,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
             updateVfoButtons(-1, -1, -1, false, false, false);
             return;
         }
+        lastSnapshot = snapshot;
 
         if (switchDualWatch != null) {
             switchDualWatch.setEnabled(true);
@@ -1067,7 +1075,15 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 Toast.makeText(getMapView().getContext(),
                         result.message,
                         result.success ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG).show();
-                refreshChannelGridAsync();
+                if (result.success) {
+                    lastDualWatchEnabled = enabled;
+                    if (!enabled && selectedTarget == TARGET_B) {
+                        selectedTarget = TARGET_A;
+                        activeVfoB = false;
+                        lastAnalogTarget = TARGET_A;
+                    }
+                    rerenderGridFromLastSnapshot();
+                }
             });
         }, "uvpro-dual-watch").start();
     }
@@ -1085,15 +1101,16 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 getMapView().post(() -> {
                     appendLog(result.message);
                     if (result.success) {
+                        lastDigitalChannel = channelId;
                         if (switchDigitalEdit != null) {
                             switchDigitalEdit.setChecked(false);
                         }
                         restoreAnalogEditTarget();
+                        rerenderGridFromLastSnapshot();
                     } else {
                         Toast.makeText(getMapView().getContext(),
                                 result.message, Toast.LENGTH_LONG).show();
                     }
-                    refreshChannelGridAsync();
                 });
             }, "uvpro-set-digital-channel").start();
             return;
@@ -1108,11 +1125,17 @@ public class UVProDropDownReceiver extends DropDownReceiver
                     radioControlManager.setWatchChannel(channelId, targetB);
             getMapView().post(() -> {
                 appendLog(result.message);
-                if (!result.success) {
+                if (result.success) {
+                    if (targetB) {
+                        lastChannelB = channelId;
+                    } else {
+                        lastChannelA = channelId;
+                    }
+                    rerenderGridFromLastSnapshot();
+                } else {
                     Toast.makeText(getMapView().getContext(),
                             result.message, Toast.LENGTH_LONG).show();
                 }
-                refreshChannelGridAsync();
             });
         }, "uvpro-set-channel").start();
     }
@@ -1129,11 +1152,13 @@ public class UVProDropDownReceiver extends DropDownReceiver
             UVProRadioControlManager.ProgramResult result = radioControlManager.setActiveVfo(useVfoB);
             getMapView().post(() -> {
                 appendLog(result.message);
-                if (!result.success) {
+                if (result.success) {
+                    txVfoB = useVfoB;
+                    rerenderGridFromLastSnapshot();
+                } else {
                     Toast.makeText(getMapView().getContext(),
                             result.message, Toast.LENGTH_LONG).show();
                 }
-                refreshChannelGridAsync();
             });
         }, "uvpro-set-active-vfo").start();
     }
@@ -1340,28 +1365,6 @@ public class UVProDropDownReceiver extends DropDownReceiver
         }
     }
 
-    private void startStatusPolling() {
-        if (statusPollingEnabled) {
-            return;
-        }
-        statusPollingEnabled = true;
-        getMapView().removeCallbacks(statusPollRunnable);
-        getMapView().postDelayed(statusPollRunnable, STATUS_POLL_INTERVAL_MS);
-    }
-
-    private void stopStatusPolling() {
-        statusPollingEnabled = false;
-        getMapView().removeCallbacks(statusPollRunnable);
-    }
-
-    private void scheduleNextStatusPoll() {
-        if (!statusPollingEnabled) {
-            return;
-        }
-        getMapView().removeCallbacks(statusPollRunnable);
-        getMapView().postDelayed(statusPollRunnable, STATUS_POLL_INTERVAL_MS);
-    }
-
     private GradientDrawable buildVfoButtonBackground(int fillColor, int strokeColor, int strokeDp) {
         GradientDrawable d = new GradientDrawable();
         d.setShape(GradientDrawable.RECTANGLE);
@@ -1555,7 +1558,9 @@ public class UVProDropDownReceiver extends DropDownReceiver
                             appendLog(result.message);
                             Toast.makeText(ctx, result.message,
                                     result.success ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG).show();
-                            refreshChannelGridAsync();
+                            if (result.success) {
+                                refreshChannelGridAsync();
+                            }
                         });
                     }, "uvpro-program-manual-channel").start();
                 })
@@ -1962,7 +1967,6 @@ public class UVProDropDownReceiver extends DropDownReceiver
 
     @Override
     public void onDropDownClose() {
-        stopStatusPolling();
         stopActiveVfoPulse();
     }
 
@@ -1972,10 +1976,9 @@ public class UVProDropDownReceiver extends DropDownReceiver
     @Override
     public void onDropDownVisible(boolean visible) {
         if (!visible) {
-            stopStatusPolling();
             stopActiveVfoPulse();
         } else {
-            refreshChannelGridAsync();
+            refreshChannelGridFullAsync();
         }
     }
 
@@ -1984,7 +1987,6 @@ public class UVProDropDownReceiver extends DropDownReceiver
         // Unregister listeners
         btManager.removeListener(this);
         contactTracker.setListener(null);
-        stopStatusPolling();
         stopActiveVfoPulse();
     }
 }
