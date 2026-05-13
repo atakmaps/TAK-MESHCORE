@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages Bluetooth SPP connections to BTECH UV-PRO radios.
@@ -66,6 +67,7 @@ public class BtConnectionManager {
     private final AtomicBoolean connected = new AtomicBoolean(false);
     private final AtomicBoolean shouldReconnect = new AtomicBoolean(true);
     private final AtomicBoolean connecting = new AtomicBoolean(false);
+    private final AtomicLong lastIoActivityMs = new AtomicLong(0L);
     private int reconnectAttempts = 0;
     private static final int MAX_RECONNECT_ATTEMPTS = 5;
 
@@ -283,6 +285,7 @@ public class BtConnectionManager {
                 connected.set(true);
                 connecting.set(false);
                 reconnectAttempts = 0;
+                markIoActivity();
 
                 // Reset decoder state from any previous partial frames
                 kissDecoder.reset();
@@ -383,6 +386,7 @@ public class BtConnectionManager {
             java.util.Arrays.fill(kissFrame, (byte) 0);
             outputStream.write(wireBytes);
             outputStream.flush();
+            markIoActivity();
             Log.d(TAG, "Sent KISS frame: " + wireBytes.length + " bytes");
             return true;
         } catch (IOException e) {
@@ -403,6 +407,7 @@ public class BtConnectionManager {
         try {
             outputStream.write(data);
             outputStream.flush();
+            markIoActivity();
             Log.d(TAG, "Sent raw bytes: " + data.length + " bytes");
             return true;
         } catch (IOException e) {
@@ -424,6 +429,7 @@ public class BtConnectionManager {
                 try {
                     int bytesRead = inputStream.read(buffer);
                     if (bytesRead > 0) {
+                        markIoActivity();
                         byte[] data = new byte[bytesRead];
                         System.arraycopy(buffer, 0, data, 0, bytesRead);
                         java.util.Arrays.fill(buffer, (byte) 0);
@@ -536,6 +542,19 @@ public class BtConnectionManager {
         return connecting.get();
     }
 
+    public long getLastIoActivityMs() {
+        return lastIoActivityMs.get();
+    }
+
+    public boolean hasRecentIo(long withinMs) {
+        long last = lastIoActivityMs.get();
+        if (last <= 0L) {
+            return false;
+        }
+        long window = Math.max(0L, withinMs);
+        return (System.currentTimeMillis() - last) <= window;
+    }
+
     public String getConnectedDeviceName() {
         if (!connected.get()) return null;
         if (lastDevice != null) {
@@ -581,5 +600,9 @@ public class BtConnectionManager {
 
     private void notifyScanComplete() {
         for (ConnectionListener l : listeners) l.onScanComplete();
+    }
+
+    private void markIoActivity() {
+        lastIoActivityMs.set(System.currentTimeMillis());
     }
 }

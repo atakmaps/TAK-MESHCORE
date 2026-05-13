@@ -27,6 +27,14 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
     private static final int CMD_READ_RF_CH = 13;
     private static final int CMD_WRITE_RF_CH = 14;
     private static final int CMD_GET_HT_STATUS = 20;
+    private static final int CMD_REGISTER_NOTIFICATION = 6;
+    private static final int CMD_EVENT_NOTIFICATION = 9;
+    private static final int EVENT_HT_STATUS_CHANGED = 1;
+    private static final int EVENT_HT_CH_CHANGED = 5;
+    private static final int EVENT_HT_SETTINGS_CHANGED = 6;
+    private static final int EVENT_RADIO_STATUS_CHANGED = 8;
+    private static final int EVENT_USER_ACTION = 9;
+    private static final int EVENT_SYSTEM_EVENT = 10;
     private static final int STATUS_SUCCESS = 0;
 
     private static final Pattern TX_FREQ_PATTERN =
@@ -50,6 +58,10 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
 
     public interface SelectionListener {
         void onRepeaterSelected(RepeaterSpec spec);
+    }
+
+    public interface RadioEventListener {
+        void onRadioEvent(int eventType);
     }
 
     public static class ProgramResult {
@@ -192,7 +204,9 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
     private PendingRequest pending;
     private RepeaterSpec selectedRepeater;
     private SelectionListener selectionListener;
-    private Integer storedChannelAForVfoBTx;
+    private RadioEventListener radioEventListener;
+    private boolean notificationRegistrationOk = false;
+    private long lastNotificationRegisterAttemptMs = 0L;
 
     public UVProRadioControlManager(BtConnectionManager btManager) {
         this.btManager = btManager;
@@ -204,6 +218,7 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
 
     public void stop() {
         btManager.removeRawDataListener(this);
+        notificationRegistrationOk = false;
         synchronized (pendingLock) {
             if (pending != null) {
                 pending.latch.countDown();
@@ -214,6 +229,10 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
 
     public void setSelectionListener(SelectionListener listener) {
         this.selectionListener = listener;
+    }
+
+    public void setRadioEventListener(RadioEventListener listener) {
+        this.radioEventListener = listener;
     }
 
     public RepeaterSpec getSelectedRepeater() {
@@ -299,8 +318,10 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
 
     public RadioControlSnapshot readSnapshot(int maxChannels) {
         if (!btManager.isConnected()) {
+            notificationRegistrationOk = false;
             return null;
         }
+        maybeRegisterForStatusEvents();
         try {
             CommandReply readSettings = sendCommandSync(
                     BASIC_GROUP, CMD_READ_SETTINGS, new byte[0], 2500);
@@ -314,7 +335,10 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
                 return null;
             }
 
-            int txChannel = settingsState.vfoX == 2
+            boolean dualWatchEnabled = settingsState.doubleChannel != 0;
+            int htChannelType = -1;
+            boolean activeVfoB = settingsState.vfoX == 2;
+            int txChannel = activeVfoB
                     ? settingsState.channelB
                     : settingsState.channelA;
             int currentChannel = settingsState.channelA;
@@ -323,6 +347,13 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             if (htStatusReply != null && htStatusReply.status == STATUS_SUCCESS
                     && htStatusReply.payload != null && htStatusReply.payload.length >= 2) {
                 int parsedCurrent = parseCurrentChannelIdFromHtStatus(htStatusReply.payload);
+                htChannelType = parseChannelTypeFromHtStatus(htStatusReply.payload);
+                if (htChannelType == 1) {
+                    activeVfoB = false;
+                } else if (htChannelType == 2) {
+                    activeVfoB = true;
+                }
+                txChannel = activeVfoB ? settingsState.channelB : settingsState.channelA;
                 // Guard against occasional bogus HT status bits that point outside channel range.
                 if (parsedCurrent >= 0 && parsedCurrent < 255) {
                     currentChannel = parsedCurrent;
@@ -352,11 +383,22 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             int digitalChannel = normalizeDigitalChannel(settingsState.autoShareLocCh, count);
             currentChannel = normalizeToGridChannel(currentChannel, count);
 
+            Log.d(TAG, "snapshot settings: dual=" + dualWatchEnabled
+                    + " doubleChannelRaw=" + settingsState.doubleChannel
+                    + " vfoX=" + settingsState.vfoX
+                    + " htChannelType=" + htChannelType
+                    + " activeVfoB=" + activeVfoB
+                    + " chA=" + channelA
+                    + " chB=" + channelB
+                    + " tx=" + txChannel
+                    + " digital=" + digitalChannel
+                    + " current=" + currentChannel);
+
             return new RadioControlSnapshot(
                     channelA,
                     channelB,
-                    settingsState.doubleChannel == 1,
-                    settingsState.vfoX == 2,
+                    dualWatchEnabled,
+                    activeVfoB,
                     txChannel,
                     digitalChannel,
                     currentChannel,
@@ -421,10 +463,20 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             }
             CommandReply writeSettings = sendCommandSync(
                     BASIC_GROUP, CMD_WRITE_SETTINGS, modified, 2500);
-            if (writeSettings == null) {
-                return new ProgramResult(false, "No response writing channel settings.");
-            }
-            if (writeSettings.status != STATUS_SUCCESS) {
+            boolean acked = writeSettings != null && writeSettings.status == STATUS_SUCCESS;
+            if (!acked) {
+                // Firmware sometimes applies settings but drops WRITE_SETTINGS ACKs.
+                SettingsState observed = readSettingsStateForVerify();
+                if (observed != null) {
+                    int observedChannel = targetVfoB ? observed.channelB : observed.channelA;
+                    if (channelIdMatches(observedChannel, channelId)) {
+                        return new ProgramResult(true,
+                                "Set " + (targetVfoB ? "VFO-B" : "VFO-A") + " to channel " + (channelId + 1) + ".");
+                    }
+                }
+                if (writeSettings == null) {
+                    return new ProgramResult(false, "No response writing channel settings.");
+                }
                 return new ProgramResult(false, "Failed to update channel selection.");
             }
             return new ProgramResult(true,
@@ -450,29 +502,42 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             if (state == null) {
                 return new ProgramResult(false, "Could not parse radio settings.");
             }
-            int vfoX = useVfoB ? 2 : 1;
-            Integer newChannelA = null;
-            if (useVfoB) {
-                if (storedChannelAForVfoBTx == null) {
-                    storedChannelAForVfoBTx = state.channelA;
+            // On these radios, dual-watch selector bits are what actually flips A/B TX side.
+            // 0 = off, 1 = A, 2 = B. Preserve off if dual-watch is currently disabled.
+            int desiredDoubleMode = (state.doubleChannel == 0) ? 0 : (useVfoB ? 2 : 1);
+            ProgramResult primary = writeActiveVfoDoubleMode(readSettings.payload, desiredDoubleMode);
+            if (!primary.success) {
+                Log.w(TAG, "setActiveVfo primary write did not ack: " + primary.message);
+            }
+            // Some radios apply TX side changes even when a WRITE_SETTINGS reply times out.
+            // Always verify real radio state before declaring failure.
+            Boolean observedAfterPrimaryWrite = queryActiveVfoBFromHtStatus();
+            if (observedAfterPrimaryWrite != null && observedAfterPrimaryWrite == useVfoB) {
+                return useVfoB
+                        ? new ProgramResult(true, "Active VFO set to B (TX now follows B channel).")
+                        : new ProgramResult(true, "Active VFO set to A.");
+            }
+            // Fallback for firmware variants that still key off vfoX.
+            Boolean observedAfterPrimary = queryActiveVfoBFromHtStatus();
+            if (observedAfterPrimary != null && observedAfterPrimary != useVfoB) {
+                int fallbackVfoX = useVfoB ? 1 : 0;
+                ProgramResult fallback = writeActiveVfoMode(readSettings.payload, fallbackVfoX);
+                if (fallback.success) {
+                    Boolean observedAfterFallback = queryActiveVfoBFromHtStatus();
+                    if (observedAfterFallback == null || observedAfterFallback == useVfoB) {
+                        Log.d(TAG, "setActiveVfo fallback encoding worked: vfoX=" + fallbackVfoX);
+                    } else {
+                        Log.w(TAG, "setActiveVfo fallback encoding did not change HT status side.");
+                    }
                 }
-                // UV-PRO TX path follows channel A; mirror B into A so TX uses B selection.
-                newChannelA = state.channelB;
-            } else if (storedChannelAForVfoBTx != null) {
-                newChannelA = storedChannelAForVfoBTx;
-                storedChannelAForVfoBTx = null;
             }
-            byte[] modified = modifySettingsRaw(readSettings.payload, newChannelA, null, null, null, null, vfoX);
-            if (modified == null) {
-                return new ProgramResult(false, "Could not build active VFO settings.");
+            Boolean observedFinal = queryActiveVfoBFromHtStatus();
+            if (observedFinal != null && observedFinal != useVfoB) {
+                return new ProgramResult(false, "Radio did not accept TX side change.");
             }
-            CommandReply writeSettings = sendCommandSync(
-                    BASIC_GROUP, CMD_WRITE_SETTINGS, modified, 2500);
-            if (writeSettings == null) {
-                return new ProgramResult(false, "No response writing active VFO.");
-            }
-            if (writeSettings.status != STATUS_SUCCESS) {
-                return new ProgramResult(false, "Failed to switch active VFO.");
+            if (observedFinal == null && !primary.success) {
+                // Surface a clearer message only when we have neither ack nor status confirmation.
+                return new ProgramResult(false, "No response setting VFO mode.");
             }
             if (useVfoB) {
                 return new ProgramResult(true, "Active VFO set to B (TX now follows B channel).");
@@ -483,6 +548,87 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             Thread.currentThread().interrupt();
             return new ProgramResult(false, "Interrupted while switching active VFO.");
         }
+    }
+
+    private ProgramResult writeActiveVfoMode(byte[] rawSettingsPayload, int vfoX) throws InterruptedException {
+        byte[] modified = modifySettingsRaw(rawSettingsPayload, null, null, null, null, null, vfoX);
+        if (modified == null) {
+            return new ProgramResult(false, "Could not build active VFO settings.");
+        }
+        CommandReply writeSettings = sendCommandSync(
+                BASIC_GROUP, CMD_WRITE_SETTINGS, modified, 2500);
+        if (writeSettings == null) {
+            return new ProgramResult(false, "No response writing active VFO.");
+        }
+        if (writeSettings.status != STATUS_SUCCESS) {
+            return new ProgramResult(false, "Failed to switch active VFO.");
+        }
+        return new ProgramResult(true, "ok");
+    }
+
+    private ProgramResult writeActiveVfoDoubleMode(byte[] rawSettingsPayload, int doubleMode)
+            throws InterruptedException {
+        byte[] modified = modifySettingsRaw(rawSettingsPayload, null, null, doubleMode, null, null, null);
+        if (modified == null) {
+            return new ProgramResult(false, "Could not build active VFO mode settings.");
+        }
+        CommandReply writeSettings = sendCommandSync(
+                BASIC_GROUP, CMD_WRITE_SETTINGS, modified, 2500);
+        if (writeSettings == null) {
+            return new ProgramResult(false, "No response writing active VFO mode.");
+        }
+        if (writeSettings.status != STATUS_SUCCESS) {
+            return new ProgramResult(false, "Failed to switch active VFO mode.");
+        }
+        return new ProgramResult(true, "ok");
+    }
+
+    private Boolean queryActiveVfoBFromHtStatus() throws InterruptedException {
+        CommandReply htStatusReply = sendCommandSync(
+                BASIC_GROUP, CMD_GET_HT_STATUS, new byte[0], 2500);
+        if (htStatusReply == null || htStatusReply.status != STATUS_SUCCESS
+                || htStatusReply.payload == null || htStatusReply.payload.length < 1) {
+            return null;
+        }
+        int channelType = parseChannelTypeFromHtStatus(htStatusReply.payload);
+        if (channelType == 2) {
+            return Boolean.TRUE;
+        }
+        if (channelType == 1) {
+            return Boolean.FALSE;
+        }
+        return null;
+    }
+
+    private SettingsState readSettingsStateForVerify() throws InterruptedException {
+        CommandReply verifySettings = sendCommandSync(
+                BASIC_GROUP, CMD_READ_SETTINGS, new byte[0], 2500);
+        if (verifySettings == null || verifySettings.status != STATUS_SUCCESS
+                || verifySettings.payload == null || verifySettings.payload.length < 12) {
+            return null;
+        }
+        return SettingsState.parse(verifySettings.payload);
+    }
+
+    private boolean channelIdMatches(int observedRaw, int expectedChannelId) {
+        return observedRaw == expectedChannelId || observedRaw == (expectedChannelId + 1);
+    }
+
+    private boolean isManualChannelWriteApplied(int channelId, ManualChannelSpec spec)
+            throws InterruptedException {
+        CommandReply readChannel = sendCommandSync(
+                BASIC_GROUP, CMD_READ_RF_CH, new byte[]{(byte) channelId}, 2500);
+        if (readChannel == null || readChannel.status != STATUS_SUCCESS
+                || readChannel.payload == null || readChannel.payload.length < 16) {
+            return false;
+        }
+        ChannelSummary observed = parseChannelSummary(readChannel.payload, channelId);
+        if (observed == null) {
+            return false;
+        }
+        // 100 Hz tolerance avoids false negatives from firmware-side rounding.
+        return Math.abs(observed.rxFreqMHz - spec.rxFreqMHz) <= 0.0001
+                && Math.abs(observed.txFreqMHz - spec.txFreqMHz) <= 0.0001;
     }
 
     public ProgramResult programManualChannel(int channelId, ManualChannelSpec spec) {
@@ -524,11 +670,14 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
 
             CommandReply writeChannel = sendCommandSync(
                     BASIC_GROUP, CMD_WRITE_RF_CH, channel.toBytes(), 2500);
-            if (writeChannel == null) {
-                return new ProgramResult(false, "No response writing channel.");
-            }
-            if (writeChannel.status != STATUS_SUCCESS) {
-                return new ProgramResult(false, "Write channel failed.");
+            boolean writeAcked = writeChannel != null && writeChannel.status == STATUS_SUCCESS;
+            if (!writeAcked) {
+                if (!isManualChannelWriteApplied(channelId, spec)) {
+                    if (writeChannel == null) {
+                        return new ProgramResult(false, "No response writing channel.");
+                    }
+                    return new ProgramResult(false, "Write channel failed.");
+                }
             }
 
             if (spec.squelchLevel >= 0) {
@@ -653,6 +802,18 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             return;
         }
         if (!pm.isReply) {
+            if (pm.commandGroup == BASIC_GROUP && pm.command == CMD_EVENT_NOTIFICATION
+                    && pm.bodyBytes.length > 0) {
+                int eventType = pm.bodyBytes[0] & 0xFF;
+                Log.d(TAG, "radio event notification: type=" + eventType);
+                RadioEventListener listener = radioEventListener;
+                if (listener != null) {
+                    try {
+                        listener.onRadioEvent(eventType);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
             return;
         }
         CommandReply reply = new CommandReply();
@@ -702,6 +863,43 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             }
         }
         return ok ? req.reply : null;
+    }
+
+    private void maybeRegisterForStatusEvents() {
+        if (notificationRegistrationOk) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if ((now - lastNotificationRegisterAttemptMs) < 2500L) {
+            return;
+        }
+        lastNotificationRegisterAttemptMs = now;
+        try {
+            if (!registerEvent(EVENT_HT_STATUS_CHANGED)) {
+                return;
+            }
+            if (!registerEvent(EVENT_HT_SETTINGS_CHANGED)) {
+                return;
+            }
+            if (!registerEvent(EVENT_HT_CH_CHANGED)) {
+                return;
+            }
+            registerEvent(EVENT_RADIO_STATUS_CHANGED);
+            registerEvent(EVENT_USER_ACTION);
+            registerEvent(EVENT_SYSTEM_EVENT);
+            notificationRegistrationOk = true;
+            Log.d(TAG, "registered radio event notifications");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private boolean registerEvent(int eventType) throws InterruptedException {
+        CommandReply reply = sendCommandSync(
+                BASIC_GROUP, CMD_REGISTER_NOTIFICATION, new byte[]{(byte) eventType}, 1200);
+        // REGISTER_NOTIFICATION can report non-zero-but-not-failure status on some firmware.
+        // Treat only explicit failure (0xFF) and null timeout as failure.
+        return reply != null && reply.status != 0xFF;
     }
 
     private RepeaterSpec parseRepeater(MapItem item) {
@@ -1060,6 +1258,17 @@ public class UVProRadioControlManager implements BtConnectionManager.RawDataList
             currChannelIdUpper = (payload[3] & 0x3C) >> 2;
         }
         return (currChannelIdUpper << 4) + currChIdLower;
+    }
+
+    /**
+     * HT status channel type bits:
+     * 0 = off/single, 1 = A, 2 = B (based on HTCommander reverse-engineering).
+     */
+    private static int parseChannelTypeFromHtStatus(byte[] payload) {
+        if (payload == null || payload.length < 1) {
+            return -1;
+        }
+        return (payload[0] & 0x0C) >> 2;
     }
 
     private static ChannelSummary parseChannelSummary(byte[] payload, int fallbackChannelId) {

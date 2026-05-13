@@ -9,8 +9,14 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.drawable.GradientDrawable;
 import android.preference.PreferenceManager;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.ReplacementSpan;
 import android.util.Log;
 import android.text.InputType;
 import android.text.method.ScrollingMovementMethod;
@@ -53,6 +59,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * UVPro Drop-Down UI Panel.
@@ -80,9 +87,15 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private static final int COLOR_B_SUBDUED = 0xFF2E7D32;      // Green (subdued)
     private static final int COLOR_DIGITAL_ACTIVE = 0xFF005A8D; // Blue
     private static final int COLOR_DIGITAL_SUBDUED = 0xFF2A5674; // Blue (subdued)
+    private static final int COLOR_EDIT_SELECTION_BORDER = 0xFFFF9800; // Bright orange
+    private static final int EDIT_SELECTION_STROKE_DP = 3;
+    private static final int COLOR_TX_HIGHLIGHT = 0xFFFF1744; // Bright red
+    private static final int COLOR_TX_STROKE = 0xFFFFFFFF; // White stroke
     private static final int TARGET_A = 0;
     private static final int TARGET_B = 1;
     private static final int TARGET_DIGITAL = 2;
+    private static final long STATUS_POLL_INTERVAL_MS = 5000L;
+    private static final long STATUS_POLL_QUIET_MS = 1200L;
 
     private final Context pluginContext;
     private final BtConnectionManager btManager;
@@ -116,6 +129,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private TextView selectedRepeaterText;
     private GridLayout channelsGrid;
     private Switch switchDualWatch;
+    private Switch switchDigitalEdit;
 
     private TextView favoritesLabel;
     private HorizontalScrollView favoritesScroll;
@@ -150,6 +164,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private boolean activeVfoB = false;
     private boolean channelTargetDigital = false;
     private int selectedTarget = TARGET_A;
+    private int lastAnalogTarget = TARGET_A;
     private boolean txVfoB = false;
     private int lastChannelA = -1;
     private int lastChannelB = -1;
@@ -159,6 +174,26 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private ValueAnimator activeVfoPulseAnimator;
     private Button pulsingVfoButton;
     private GradientDrawable pulsingVfoDrawable;
+    private final AtomicBoolean snapshotReadInFlight = new AtomicBoolean(false);
+    private final AtomicBoolean snapshotRefreshPending = new AtomicBoolean(false);
+    private boolean statusPollingEnabled = false;
+    private final Runnable statusPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!statusPollingEnabled) {
+                return;
+            }
+            try {
+                if (btManager.isConnected()
+                        && !snapshotReadInFlight.get()
+                        && !btManager.hasRecentIo(STATUS_POLL_QUIET_MS)) {
+                    refreshChannelGridAsync();
+                }
+            } finally {
+                scheduleNextStatusPoll();
+            }
+        }
+    };
 
     public UVProDropDownReceiver(MapView mapView,
                                      Context pluginContext,
@@ -187,6 +222,8 @@ public class UVProDropDownReceiver extends DropDownReceiver
         if (this.radioControlManager != null) {
             this.radioControlManager.setSelectionListener(spec ->
                     getMapView().post(this::updateSelectedRepeaterUi));
+            this.radioControlManager.setRadioEventListener(eventType ->
+                    getMapView().post(this::refreshChannelGridAsync));
         }
     }
 
@@ -247,6 +284,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         updateContactCount();
         // Now attach change listeners so user interactions are wired
         setupListeners();
+        updateDigitalEditGuardUi();
         refreshFavoriteStrip();
         updateScanButtonText();
         updateSelectedRepeaterUi();
@@ -287,6 +325,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         selectedRepeaterText = rootView.findViewById(getId("text_selected_repeater"));
         channelsGrid = rootView.findViewById(getId("grid_channels"));
         switchDualWatch = rootView.findViewById(getId("switch_dual_watch"));
+        switchDigitalEdit = rootView.findViewById(getId("switch_digital_edit"));
 
         favoritesLabel = rootView.findViewById(getId("favorites_label"));
         favoritesScroll = rootView.findViewById(getId("favorites_scroll"));
@@ -408,9 +447,11 @@ public class UVProDropDownReceiver extends DropDownReceiver
             btnVfoA.setOnClickListener(v -> {
                 channelTargetDigital = false;
                 selectedTarget = TARGET_A;
+                lastAnalogTarget = TARGET_A;
                 activeVfoB = false;
                 updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
                         lastDualWatchEnabled, txVfoB, lastHasRxFocus);
+                refreshChannelGridAsync();
             });
             btnVfoA.setOnLongClickListener(v -> {
                 applyTxSelection(false);
@@ -421,9 +462,11 @@ public class UVProDropDownReceiver extends DropDownReceiver
             btnVfoB.setOnClickListener(v -> {
                 channelTargetDigital = false;
                 selectedTarget = TARGET_B;
+                lastAnalogTarget = TARGET_B;
                 activeVfoB = true;
                 updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
                         lastDualWatchEnabled, txVfoB, lastHasRxFocus);
+                refreshChannelGridAsync();
             });
             btnVfoB.setOnLongClickListener(v -> {
                 if (btnVfoB.getVisibility() != View.VISIBLE) {
@@ -435,11 +478,27 @@ public class UVProDropDownReceiver extends DropDownReceiver
         }
         if (btnDigital != null) {
             btnDigital.setOnClickListener(v -> {
+                if (!isDigitalEditArmed()) {
+                    Toast.makeText(getMapView().getContext(),
+                            "Enable 'Slide to edit' first.",
+                            Toast.LENGTH_SHORT).show();
+                    return;
+                }
                 channelTargetDigital = true;
                 selectedTarget = TARGET_DIGITAL;
                 updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
                         lastDualWatchEnabled, txVfoB, lastHasRxFocus);
             });
+        }
+        if (switchDigitalEdit != null) {
+            switchDigitalEdit.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (!isChecked && selectedTarget == TARGET_DIGITAL) {
+                    restoreAnalogEditTarget();
+                }
+                updateDigitalEditGuardUi();
+            });
+            switchDigitalEdit.setText("");
+            switchDigitalEdit.setChecked(false);
         }
     }
 
@@ -601,6 +660,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
     @Override
     public void onDisconnected(String reason) {
         getMapView().post(() -> {
+            stopStatusPolling();
             updateConnectionUI(false, null);
             appendLog("Disconnected: " + reason);
         });
@@ -816,10 +876,23 @@ public class UVProDropDownReceiver extends DropDownReceiver
         if (radioControlManager == null || channelsGrid == null) {
             return;
         }
+        if (!snapshotReadInFlight.compareAndSet(false, true)) {
+            snapshotRefreshPending.set(true);
+            return;
+        }
         new Thread(() -> {
             UVProRadioControlManager.RadioControlSnapshot snapshot =
                     radioControlManager.readSnapshot(30);
-            getMapView().post(() -> renderChannelGrid(snapshot));
+            getMapView().post(() -> {
+                try {
+                    renderChannelGrid(snapshot);
+                } finally {
+                    snapshotReadInFlight.set(false);
+                    if (snapshotRefreshPending.compareAndSet(true, false)) {
+                        refreshChannelGridAsync();
+                    }
+                }
+            });
         }, "uvpro-read-channels").start();
     }
 
@@ -830,6 +903,14 @@ public class UVProDropDownReceiver extends DropDownReceiver
         channelsGrid.removeAllViews();
 
         if (snapshot == null) {
+            // Keep last known UI state on transient read failures while connected.
+            // This avoids false flips like "dual watch off" when a single poll misses.
+            if (btManager.isConnected()) {
+                updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
+                        lastDualWatchEnabled, txVfoB, lastHasRxFocus);
+                return;
+            }
+            // If actually disconnected, clear to baseline.
             if (switchDualWatch != null) {
                 switchDualWatch.setChecked(false);
                 switchDualWatch.setEnabled(false);
@@ -842,8 +923,12 @@ public class UVProDropDownReceiver extends DropDownReceiver
             lastHasRxFocus = false;
             channelTargetDigital = false;
             selectedTarget = TARGET_A;
+            lastAnalogTarget = TARGET_A;
             activeVfoB = false;
             txVfoB = false;
+            if (switchDigitalEdit != null) {
+                switchDigitalEdit.setChecked(false);
+            }
             updateVfoButtons(-1, -1, -1, false, false, false);
             return;
         }
@@ -859,14 +944,21 @@ public class UVProDropDownReceiver extends DropDownReceiver
             selectedTarget = TARGET_A;
             channelTargetDigital = false;
             activeVfoB = false;
+            lastAnalogTarget = TARGET_A;
         } else if (selectedTarget == TARGET_A) {
             activeVfoB = false;
             channelTargetDigital = false;
+            lastAnalogTarget = TARGET_A;
         } else if (selectedTarget == TARGET_B) {
             activeVfoB = true;
             channelTargetDigital = false;
+            lastAnalogTarget = TARGET_B;
         } else {
-            channelTargetDigital = true;
+            if (!isDigitalEditArmed()) {
+                restoreAnalogEditTarget();
+            } else {
+                channelTargetDigital = true;
+            }
         }
         lastChannelA = snapshot.channelA;
         lastChannelB = snapshot.channelB;
@@ -933,7 +1025,17 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 bgColor = COLOR_DIGITAL_ACTIVE;
             }
 
-            chip.setBackgroundColor(bgColor);
+            boolean isSelectedEditChannel =
+                    (selectedTarget == TARGET_A && isA)
+                            || (selectedTarget == TARGET_B && snapshot.dualWatchEnabled && isB);
+            GradientDrawable chipBg = new GradientDrawable();
+            chipBg.setShape(GradientDrawable.RECTANGLE);
+            chipBg.setCornerRadius(dip(getMapView().getContext(), 6));
+            chipBg.setColor(bgColor);
+            chipBg.setStroke(
+                    dip(getMapView().getContext(), isSelectedEditChannel ? EDIT_SELECTION_STROKE_DP : 1),
+                    isSelectedEditChannel ? COLOR_EDIT_SELECTION_BORDER : 0x55333333);
+            chip.setBackground(chipBg);
             chip.setTextColor(0xFFFFFFFF);
             chip.setOnClickListener(v -> applyChannelSelection(channel.channelId));
             chip.setOnLongClickListener(v -> {
@@ -982,7 +1084,12 @@ public class UVProDropDownReceiver extends DropDownReceiver
                         radioControlManager.setDigitalChannel(channelId);
                 getMapView().post(() -> {
                     appendLog(result.message);
-                    if (!result.success) {
+                    if (result.success) {
+                        if (switchDigitalEdit != null) {
+                            switchDigitalEdit.setChecked(false);
+                        }
+                        restoreAnalogEditTarget();
+                    } else {
                         Toast.makeText(getMapView().getContext(),
                                 result.message, Toast.LENGTH_LONG).show();
                     }
@@ -1037,6 +1144,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         }
         channelTargetDigital = false;
         selectedTarget = useVfoB ? TARGET_B : TARGET_A;
+        lastAnalogTarget = selectedTarget;
         activeVfoB = useVfoB;
         setActiveVfo(useVfoB);
     }
@@ -1057,17 +1165,15 @@ public class UVProDropDownReceiver extends DropDownReceiver
         }
 
         String aText = channelA >= 0
-                ? String.format(Locale.US, "A: CH%02d", channelA + 1)
-                : "A: CH--";
-        if (!dualWatchEnabled || !txOnB) {
-            aText = aText + " -TX";
-        }
-        btnVfoA.setText(aText);
+                ? String.format(Locale.US, "A: CH %02d", channelA + 1)
+                : "A: CH --";
+        btnVfoA.setText(buildVfoLabelWithTxHighlight(aText, !dualWatchEnabled || !txOnB));
         GradientDrawable aBg = buildVfoButtonBackground(
                 activeA ? COLOR_A_ACTIVE : COLOR_A_SUBDUED,
-                activeA ? 0x99FFFFFF : subduedStroke,
-                activeA ? 2 : 1);
+                activeA ? COLOR_EDIT_SELECTION_BORDER : subduedStroke,
+                activeA ? EDIT_SELECTION_STROKE_DP : 1);
         btnVfoA.setBackground(aBg);
+        btnVfoA.setBackgroundTintList(null);
         btnVfoA.setTextColor(0xFFFFFFFF);
         btnVfoA.setAlpha(activeA ? 1.0f : 0.72f);
         Button activeButton = activeA ? btnVfoA : null;
@@ -1077,17 +1183,15 @@ public class UVProDropDownReceiver extends DropDownReceiver
             if (dualWatchEnabled) {
                 btnVfoB.setVisibility(View.VISIBLE);
                 String bText = channelB >= 0
-                        ? String.format(Locale.US, "B: CH%02d", channelB + 1)
-                        : "B: CH--";
-                if (txOnB) {
-                    bText = bText + " -TX";
-                }
-                btnVfoB.setText(bText);
+                        ? String.format(Locale.US, "B: CH %02d", channelB + 1)
+                        : "B: CH --";
+                btnVfoB.setText(buildVfoLabelWithTxHighlight(bText, txOnB));
                 GradientDrawable bBg = buildVfoButtonBackground(
                         activeB ? COLOR_B_ACTIVE : COLOR_B_SUBDUED,
-                        activeB ? 0x99FFFFFF : subduedStroke,
-                        activeB ? 2 : 1);
+                        activeB ? COLOR_EDIT_SELECTION_BORDER : subduedStroke,
+                        activeB ? EDIT_SELECTION_STROKE_DP : 1);
                 btnVfoB.setBackground(bBg);
+                btnVfoB.setBackgroundTintList(null);
                 btnVfoB.setTextColor(0xFFFFFFFF);
                 btnVfoB.setAlpha(activeB ? 1.0f : 0.72f);
                 if (activeB) {
@@ -1099,20 +1203,163 @@ public class UVProDropDownReceiver extends DropDownReceiver
             }
         }
         if (btnDigital != null) {
+            boolean digitalArmed = isDigitalEditArmed();
             String dText = digitalChannel >= 0
-                    ? String.format(Locale.US, "Digital CH%02d", digitalChannel + 1)
+                    ? String.format(Locale.US, "Digital CH %02d", digitalChannel + 1)
                     : "Digital";
             btnDigital.setText(dText);
             GradientDrawable dBg = buildVfoButtonBackground(
-                    activeDigital ? COLOR_DIGITAL_ACTIVE : COLOR_DIGITAL_SUBDUED,
-                    activeDigital ? 0xFFFFFFFF : subduedStroke,
-                    activeDigital ? 2 : 1);
+                    (digitalArmed && activeDigital) ? COLOR_DIGITAL_ACTIVE : COLOR_DIGITAL_SUBDUED,
+                    (digitalArmed && activeDigital) ? COLOR_EDIT_SELECTION_BORDER : subduedStroke,
+                    (digitalArmed && activeDigital) ? EDIT_SELECTION_STROKE_DP : 1);
             btnDigital.setBackground(dBg);
+            btnDigital.setBackgroundTintList(null);
             btnDigital.setTextColor(0xFFFFFFFF);
-            btnDigital.setAlpha(activeDigital ? 1.0f : 0.72f);
+            btnDigital.setEnabled(digitalArmed);
+            btnDigital.setAlpha(digitalArmed ? (activeDigital ? 1.0f : 0.72f) : 0.45f);
         }
-        // Pulse only applies to the currently active VFO button, never Digital.
-        updateActiveVfoPulse(activeButton, activeDrawable, hasRxFocus && !activeDigital);
+        // Keep pulse visible on selected A/B edit target (never Digital),
+        // independent of RX-focus so operators always see active control focus.
+        updateActiveVfoPulse(activeButton, activeDrawable, !activeDigital);
+    }
+
+    private boolean isDigitalEditArmed() {
+        return switchDigitalEdit != null && switchDigitalEdit.isChecked();
+    }
+
+    private void restoreAnalogEditTarget() {
+        if (lastAnalogTarget == TARGET_B && lastDualWatchEnabled) {
+            selectedTarget = TARGET_B;
+            activeVfoB = true;
+        } else {
+            selectedTarget = TARGET_A;
+            activeVfoB = false;
+            lastAnalogTarget = TARGET_A;
+        }
+        channelTargetDigital = false;
+    }
+
+    private void updateDigitalEditGuardUi() {
+        if (btnDigital == null) {
+            return;
+        }
+        if (!isDigitalEditArmed() && selectedTarget == TARGET_DIGITAL) {
+            restoreAnalogEditTarget();
+        }
+        updateVfoButtons(lastChannelA, lastChannelB, lastDigitalChannel,
+                lastDualWatchEnabled, txVfoB, lastHasRxFocus);
+    }
+
+    private CharSequence buildVfoLabelWithTxHighlight(String base, boolean isTx) {
+        if (!isTx) {
+            return base;
+        }
+        final String suffix = " -TX";
+        SpannableStringBuilder sb = new SpannableStringBuilder(base).append(suffix);
+        int txStart = sb.length() - 2;
+        int txEnd = sb.length();
+        sb.setSpan(new TxBadgeSpan(),
+                txStart, txEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return sb;
+    }
+
+    private static class TxBadgeSpan extends ReplacementSpan {
+        private static final float TEXT_SCALE = 0.97f; // ~10% smaller than previous 1.08
+        private static final float H_PADDING_FACTOR = 0.216f;
+        private static final float V_PADDING_FACTOR = 0.108f;
+        private static final float LEADING_OFFSET_FACTOR = 0.30f; // visually ~2 spaces to the right
+        private static final float CORNER_RADIUS_FACTOR = 0.22f;
+        private static final float STROKE_WIDTH_FACTOR = 0.12f;
+
+        @Override
+        public int getSize(Paint paint, CharSequence text, int start, int end,
+                           Paint.FontMetricsInt fm) {
+            Paint p = new Paint(paint);
+            p.setTextSize(p.getTextSize() * TEXT_SCALE);
+            String tx = text.subSequence(start, end).toString();
+            float textW = p.measureText(tx);
+            float hPad = p.getTextSize() * H_PADDING_FACTOR;
+            float leadingOffset = p.getTextSize() * LEADING_OFFSET_FACTOR;
+            float totalW = leadingOffset + textW + (hPad * 2f);
+            if (fm != null) {
+                Paint.FontMetricsInt pfm = p.getFontMetricsInt();
+                int vPad = (int) (p.getTextSize() * V_PADDING_FACTOR);
+                fm.ascent = pfm.ascent - vPad;
+                fm.descent = pfm.descent + vPad;
+                fm.top = fm.ascent;
+                fm.bottom = fm.descent;
+            }
+            return (int) Math.ceil(totalW);
+        }
+
+        @Override
+        public void draw(Canvas canvas, CharSequence text, int start, int end,
+                         float x, int top, int y, int bottom, Paint paint) {
+            Paint p = new Paint(paint);
+            p.setAntiAlias(true);
+            p.setTextSize(p.getTextSize() * TEXT_SCALE);
+
+            String tx = text.subSequence(start, end).toString();
+            float textW = p.measureText(tx);
+            float hPad = p.getTextSize() * H_PADDING_FACTOR;
+            float vPad = p.getTextSize() * V_PADDING_FACTOR;
+            float leadingOffset = p.getTextSize() * LEADING_OFFSET_FACTOR;
+            float strokeW = Math.max(1f, p.getTextSize() * STROKE_WIDTH_FACTOR);
+
+            Paint.FontMetrics fm = p.getFontMetrics();
+            float txtAscent = y + fm.ascent;
+            float txtDescent = y + fm.descent;
+
+            float left = x + leadingOffset;
+            float right = left + textW + (hPad * 2f);
+            float boxTop = txtAscent - vPad;
+            float boxBottom = txtDescent + vPad;
+            float radius = p.getTextSize() * CORNER_RADIUS_FACTOR;
+
+            RectF box = new RectF(left, boxTop, right, boxBottom);
+
+            // Red box with white stroke.
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(COLOR_TX_HIGHLIGHT);
+            canvas.drawRoundRect(box, radius, radius, p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(strokeW);
+            p.setColor(COLOR_TX_STROKE);
+            canvas.drawRoundRect(box, radius, radius, p);
+
+            float txX = left + hPad;
+            // White stroke around text.
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(strokeW);
+            p.setColor(COLOR_TX_STROKE);
+            canvas.drawText(tx, txX, y, p);
+            // Red fill text.
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(COLOR_TX_HIGHLIGHT);
+            canvas.drawText(tx, txX, y, p);
+        }
+    }
+
+    private void startStatusPolling() {
+        if (statusPollingEnabled) {
+            return;
+        }
+        statusPollingEnabled = true;
+        getMapView().removeCallbacks(statusPollRunnable);
+        getMapView().postDelayed(statusPollRunnable, STATUS_POLL_INTERVAL_MS);
+    }
+
+    private void stopStatusPolling() {
+        statusPollingEnabled = false;
+        getMapView().removeCallbacks(statusPollRunnable);
+    }
+
+    private void scheduleNextStatusPoll() {
+        if (!statusPollingEnabled) {
+            return;
+        }
+        getMapView().removeCallbacks(statusPollRunnable);
+        getMapView().postDelayed(statusPollRunnable, STATUS_POLL_INTERVAL_MS);
     }
 
     private GradientDrawable buildVfoButtonBackground(int fillColor, int strokeColor, int strokeDp) {
@@ -1140,8 +1387,8 @@ public class UVProDropDownReceiver extends DropDownReceiver
         pulsingVfoDrawable = activeDrawable;
         activeVfoPulseAnimator = ValueAnimator.ofObject(
                 new ArgbEvaluator(),
-                0x55FFFFFF,
-                0xCC7FE57F);
+                0x66FF9800,
+                0xFFFFB74D);
         activeVfoPulseAnimator.setDuration(900L);
         activeVfoPulseAnimator.setRepeatMode(ValueAnimator.REVERSE);
         activeVfoPulseAnimator.setRepeatCount(ValueAnimator.INFINITE);
@@ -1150,7 +1397,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 return;
             }
             int color = (Integer) animation.getAnimatedValue();
-            pulsingVfoDrawable.setStroke(dip(getMapView().getContext(), 2), color);
+            pulsingVfoDrawable.setStroke(dip(getMapView().getContext(), EDIT_SELECTION_STROKE_DP), color);
         });
         activeVfoPulseAnimator.start();
     }
@@ -1715,6 +1962,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
 
     @Override
     public void onDropDownClose() {
+        stopStatusPolling();
         stopActiveVfoPulse();
     }
 
@@ -1724,6 +1972,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
     @Override
     public void onDropDownVisible(boolean visible) {
         if (!visible) {
+            stopStatusPolling();
             stopActiveVfoPulse();
         } else {
             refreshChannelGridAsync();
@@ -1735,6 +1984,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         // Unregister listeners
         btManager.removeListener(this);
         contactTracker.setListener(null);
+        stopStatusPolling();
         stopActiveVfoPulse();
     }
 }
