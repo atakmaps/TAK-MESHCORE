@@ -7,7 +7,8 @@ A free, open-source ATAK plugin that connects UV-PRO radios to the Android Team 
 | Feature | Status | Description |
 |---------|--------|-------------|
 | **Position Sharing (PLI)** | ✅ Working | Your ATAK position is beaconed over radio at a configurable interval. Incoming positions appear as contacts on the map. |
-| **Smart Beaconing** | ✅ Working | Dynamically adjusts beacon rate based on speed and heading change. Fast/turning = frequent beacons; slow/straight = less frequent. All six parameters configurable in Settings → Manage Smart Beacon Settings. |
+| **Smart Beaconing (APRS-style)** | ✅ Working | APRS-standard SmartBeaconing + corner pegging: speed-proportional rate, turn-threshold slope, and minimum turn time. Seven parameters configurable in Settings → Manage Smart Beacon Settings. |
+| **Dynamic CoT Stale Window** | ✅ Working | Contact `stale` timestamp now tracks current beacon policy (fixed interval or Smart Beacon profile) so receivers do not grey contacts prematurely. |
 | **Ping Reply** | ✅ Working | Automatically replies to incoming pings with your current GPS position. Toggle on/off in Settings. |
 | **Bluetooth Scan & Connect** | ✅ Working | Instant picker showing previously-connected radios with live green/gray availability dots. Auto-connects to last used radio on ATAK startup. |
 | **Radio Connection Status Overlay** | ✅ Working | Persistent icon in the lower-right ATAK map corner showing connection state. Green box = connected; dark box = disconnected. |
@@ -21,6 +22,7 @@ A free, open-source ATAK plugin that connects UV-PRO radios to the Android Team 
 | **Map Repeater Load/Tune (KML)** | ✅ Working | Tap a repeater placemark from imported KML, then use **Load Selected Repeater** to program channel 1 and tune the radio (TX/RX + CTCSS/DCS). |
 | **Bluetooth Auto-Reconnect** | ✅ Working | Three-strategy SPP connection with exponential backoff reconnect (up to 5 attempts). |
 | **Send Ping** | ✅ Working | Lightweight keepalive — lets other nodes know you're active even without GPS. |
+| **Radio Silence (TX Kill Switch)** | ✅ Working | Long-press control in the Radio panel that blocks all outbound TX while still receiving beacons/pings/chat/CoT. Long-press again to restore TX. |
 ## How It Works
 
 ```
@@ -202,6 +204,7 @@ Use the **official ProGuard apply-mapping** from the ATAK/takrepo pipeline when 
 | **AES-256-GCM switch** | Enable encryption (enter the shared secret first) |
 | **Send Beacon** | Immediately broadcast your current position |
 | **Send Ping** | Send a lightweight keepalive with your callsign |
+| **Long Press for Radio Silence** | Toggle TX block on/off (RX remains active). Active state is highlighted with an orange border. |
 | **Load Selected Repeater** | Program/tune selected KML repeater into radio channel 1 (includes TX/RX and CTCSS/DCS tone) |
 | **Settings** | Configure beacon interval, SA Relay, and other plugin options (team color is controlled by ATAK core settings) |
 
