@@ -19,10 +19,11 @@ A free, open-source ATAK plugin that connects UV-PRO radios to the Android Team 
 | **SA Relay (opt-in)** | ✅ Working | Network-to-radio bridge: broadcasts received SA over RF to radio-only users. Configurable in Settings. |
 | **AES-256 Encryption** | ✅ Working | Optional shared-secret AES-256-GCM for all radio traffic. All nodes must use the same secret. |
 | **Contact Tracking** | ✅ Working | Radios in range tracked as contacts with callsign, last-seen time, and position. |
-| **Map Repeater Load/Tune (KML)** | ✅ Working | Tap a repeater placemark from imported KML, then use **Load Selected Repeater** to program channel 1 and tune the radio (TX/RX + CTCSS/DCS). |
+| **Map Repeater Load/Tune (KML)** | ✅ Working | Tap a repeater placemark from imported KML, arm **Load Selected Repeater**, then tap a destination channel to program/tune it (TX/RX + CTCSS/DCS). |
 | **Bluetooth Auto-Reconnect** | ✅ Working | Three-strategy SPP connection with exponential backoff reconnect (up to 5 attempts). |
-| **Send Ping** | ✅ Working | Lightweight keepalive — lets other nodes know you're active even without GPS. |
+| **Ping Transport (internal)** | ✅ Working | Ping encode/send/receive logic is still supported internally, but the quick-action UI button is currently hidden. |
 | **Radio Silence (TX Kill Switch)** | ✅ Working | Long-press control in the Radio panel that blocks all outbound TX while still receiving beacons/pings/chat/CoT. Long-press again to restore TX. |
+| **RF -> TAK Uplink Relay** | ✅ Working | Optional uplink path: forward inbound RF CoT/chat from radio-only users to TAK network when SA Relay + uplink toggle are enabled. |
 ## How It Works
 
 ```
@@ -203,19 +204,17 @@ Use the **official ProGuard apply-mapping** from the ATAK/takrepo pipeline when 
 |---------|-------------|
 | **AES-256-GCM switch** | Enable encryption (enter the shared secret first) |
 | **Send Beacon** | Immediately broadcast your current position |
-| **Send Ping** | Send a lightweight keepalive with your callsign |
 | **Long Press for Radio Silence** | Toggle TX block on/off (RX remains active). Active state is highlighted with an orange border. |
-| **Load Selected Repeater** | Program/tune selected KML repeater into radio channel 1 (includes TX/RX and CTCSS/DCS tone) |
+| **Load Selected Repeater** | Arms repeater load mode (yellow border + `Select Channel` label), then writes/tunes selected repeater to the tapped channel |
 | **Settings** | Configure beacon interval, SA Relay, and other plugin options (team color is controlled by ATAK core settings) |
 
 ### Repeater workflow (KML)
 
 1. Import repeater KML into ATAK.
 2. Tap a repeater placemark on the map (must contain TX/RX and tone metadata).
-3. Open **UV-PRO** tool and confirm **Selected Repeater** is populated.
-4. Tap **Load Selected Repeater** to write/tune the radio.
-
-Current implementation writes/tunes **channel 1** by design for deterministic testing. Future updates may add channel selection.
+3. UV-PRO opens and updates **Selected Repeater**.
+4. Tap **Load Selected Repeater** (button arms and turns yellow with `Select Channel` text).
+5. Tap destination channel in **Channel Control** grid to program/tune that channel.
 
 ### Contact-centric routing (important)
 
