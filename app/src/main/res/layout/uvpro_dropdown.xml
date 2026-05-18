@@ -505,7 +505,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="40dp"
                     android:text="Load Selected Repeater"
-                    android:textSize="13sp"
+                    android:textSize="16sp"
                     android:textColor="#FFFFFFFF"
                     android:enabled="false"
                     android:backgroundTint="#FF607D8B" />

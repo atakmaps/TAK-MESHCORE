@@ -2,6 +2,7 @@ package com.uvpro.plugin;
 
 import android.app.AlertDialog;
 import android.animation.ArgbEvaluator;
+import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -180,6 +181,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private ValueAnimator activeVfoPulseAnimator;
     private Button pulsingVfoButton;
     private GradientDrawable pulsingVfoDrawable;
+    private ObjectAnimator repeaterLoadFocusAnimator;
     private final AtomicBoolean snapshotReadInFlight = new AtomicBoolean(false);
     private final AtomicBoolean snapshotRefreshPending = new AtomicBoolean(false);
     private final AtomicBoolean snapshotFullRefreshPending = new AtomicBoolean(false);
@@ -232,7 +234,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
                     false, this);
             if (pendingOpenToChannelControl) {
                 // Some ATAK builds do not reliably fire onDropDownVisible on first open.
-                scheduleScrollToChannelControlSection();
+                scheduleScrollToRepeaterLoadSection();
             }
         }
     }
@@ -1687,6 +1689,13 @@ public class UVProDropDownReceiver extends DropDownReceiver
                     "Radio control unavailable", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (repeaterLoadArmed) {
+            setRepeaterLoadArmed(false, null, null);
+            appendLog("Repeater load cancelled.");
+            Toast.makeText(getMapView().getContext(),
+                    "Repeater load cancelled.", Toast.LENGTH_SHORT).show();
+            return;
+        }
         UVProRadioControlManager.RepeaterSpec spec = radioControlManager.getSelectedRepeater();
         if (spec == null) {
             appendLog("Select a repeater marker first.");
@@ -1787,29 +1796,56 @@ public class UVProDropDownReceiver extends DropDownReceiver
         }, "uvpro-load-repeater").start();
     }
 
-    private void scheduleScrollToChannelControlSection() {
+    private void scheduleScrollToRepeaterLoadSection() {
         // Dropdown/layout animation can delay child measurements; run multiple passes.
-        getMapView().postDelayed(this::scrollToChannelControlSection, 120L);
-        getMapView().postDelayed(this::scrollToChannelControlSection, 320L);
-        getMapView().postDelayed(this::scrollToChannelControlSection, 700L);
-        getMapView().postDelayed(this::scrollToChannelControlSection, 1200L);
+        getMapView().postDelayed(this::scrollToRepeaterLoadSection, 120L);
+        getMapView().postDelayed(this::scrollToRepeaterLoadSection, 320L);
+        getMapView().postDelayed(this::scrollToRepeaterLoadSection, 700L);
+        getMapView().postDelayed(this::scrollToRepeaterLoadSection, 1200L);
     }
 
-    private void scrollToChannelControlSection() {
+    private void scrollToRepeaterLoadSection() {
         if (!(rootView instanceof ScrollView)) {
             return;
         }
         ScrollView scroll = (ScrollView) rootView;
         scroll.post(() -> {
-            View target = channelsGrid != null ? channelsGrid : btnLoadSelectedRepeater;
+            View target = btnLoadSelectedRepeater != null ? btnLoadSelectedRepeater : channelsGrid;
             if (target == null) {
                 return;
             }
-            // Anchor to the grid and back off so the Channel Control header/buttons are visible.
-            int y = Math.max(0, target.getTop() - dip(getMapView().getContext(), 190));
-            scroll.scrollTo(0, y);
-            scroll.post(() -> scroll.smoothScrollTo(0, y));
+            // Convert nested child position to ScrollView content coordinates.
+            int y = 0;
+            View cursor = target;
+            while (cursor != null && cursor != scroll) {
+                y += cursor.getTop();
+                android.view.ViewParent p = cursor.getParent();
+                cursor = (p instanceof View) ? (View) p : null;
+            }
+            // Keep a bit of headroom so "Selected Repeater" and the button are in view.
+            y = Math.max(0, y - dip(getMapView().getContext(), 64));
+            final int scrollY = y;
+            scroll.scrollTo(0, scrollY);
+            scroll.post(() -> scroll.smoothScrollTo(0, scrollY));
+            pulseRepeaterLoadButton();
         });
+    }
+
+    private void pulseRepeaterLoadButton() {
+        if (btnLoadSelectedRepeater == null) {
+            return;
+        }
+        if (repeaterLoadFocusAnimator != null) {
+            repeaterLoadFocusAnimator.cancel();
+            repeaterLoadFocusAnimator = null;
+        }
+        btnLoadSelectedRepeater.setAlpha(1f);
+        repeaterLoadFocusAnimator = ObjectAnimator.ofFloat(
+                btnLoadSelectedRepeater, "alpha",
+                1f, 0.50f, 1f);
+        repeaterLoadFocusAnimator.setDuration(320L);
+        repeaterLoadFocusAnimator.setRepeatCount(2);
+        repeaterLoadFocusAnimator.start();
     }
 
     // --- Actions ---
@@ -2147,6 +2183,13 @@ public class UVProDropDownReceiver extends DropDownReceiver
     @Override
     public void onDropDownClose() {
         stopActiveVfoPulse();
+        if (repeaterLoadFocusAnimator != null) {
+            repeaterLoadFocusAnimator.cancel();
+            repeaterLoadFocusAnimator = null;
+        }
+        if (btnLoadSelectedRepeater != null) {
+            btnLoadSelectedRepeater.setAlpha(1f);
+        }
     }
 
     @Override
@@ -2159,7 +2202,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         } else {
             refreshChannelGridFullAsync();
             if (pendingOpenToChannelControl) {
-                scheduleScrollToChannelControlSection();
+                scheduleScrollToRepeaterLoadSection();
                 pendingOpenToChannelControl = false;
             }
         }
@@ -2171,5 +2214,9 @@ public class UVProDropDownReceiver extends DropDownReceiver
         btManager.removeListener(this);
         contactTracker.setListener(null);
         stopActiveVfoPulse();
+        if (repeaterLoadFocusAnimator != null) {
+            repeaterLoadFocusAnimator.cancel();
+            repeaterLoadFocusAnimator = null;
+        }
     }
 }
