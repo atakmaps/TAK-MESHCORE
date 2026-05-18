@@ -11,6 +11,12 @@
             android:summary="Re-broadcast inbound network positions over radio to off-grid users. Throttled to one update per contact per 30 seconds."
             android:defaultValue="false" />
 
+        <com.atakmap.android.gui.PanCheckBoxPreference
+            android:key="uvpro_rf_to_tak_uplink_enabled"
+            android:title="Enable RF to TAK Uplink Relay"
+            android:summary="When SA Relay is enabled, forward inbound RF CoT to TAK network. Use with care to avoid unintended rebroadcast loops."
+            android:defaultValue="false" />
+
     </PreferenceCategory>
 
     <PreferenceCategory

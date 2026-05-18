@@ -57,6 +57,8 @@ public class ChatBridge {
     /** ATAK broadcasts some GeoChat sends with this intent (extras vary). */
     private static final String ACTION_CHAT_SEND =
             "com.atakmap.android.chat.SEND_MESSAGE";
+    /** RF payload wrapper for non-radio destination gatewaying (B -> A -> TAK). */
+    private static final String GW_PREFIX = "__UVGW__|";
 
     /**
      * Broadcast action for outbound GeoChat to a contact whose delivery path uses
@@ -225,6 +227,18 @@ public class ChatBridge {
         }
         if (message == null || message.isEmpty()) return;
 
+        // Gateway envelope: preserve full TAK destination identifiers across 6-byte RF room limits.
+        String gatewayToUid = null;
+        String gatewayRoom = null;
+        GatewayWrapped gw = parseGatewayWrappedMessage(message);
+        if (gw != null) {
+            message = gw.message;
+            gatewayToUid = gw.toUid;
+            gatewayRoom = gw.chatRoom;
+            Log.d(TAG, "Inbound RF gateway envelope toUid=" + gatewayToUid
+                    + " room=" + gatewayRoom);
+        }
+
         // Determine chat room — if destination is a specific callsign,
         // use direct chat. Otherwise use broadcast.
         String chatRoom;
@@ -235,6 +249,11 @@ public class ChatBridge {
             chatRoom = "All Chat Rooms";
         } else {
             chatRoom = toCallsign.trim();
+        }
+        if (gatewayToUid != null && !gatewayToUid.isEmpty()) {
+            chatRoom = gatewayToUid;
+        } else if (gatewayRoom != null && !gatewayRoom.isEmpty()) {
+            chatRoom = gatewayRoom;
         }
 
         // Direct DM: thread id must be the *remote* peer's ANDROID-* UID. Packets include a
@@ -827,13 +846,25 @@ public class ChatBridge {
                         }
                     }
                 }
-                if (!shouldRelay) return;
+                boolean gatewayRelay = false;
+                if (!shouldRelay) {
+                    gatewayRelay = isGatewayRelayEnabled();
+                    if (!gatewayRelay) return;
+                }
                 if (message == null || message.isEmpty()) return;
 
                 String lineUid = extractGeoChatLineUidFromIntent(intent);
                 Log.d(TAG, "Relaying outgoing chat (SEND_MESSAGE) to radio: " + message
                         + " lineUid=" + lineUid);
-                sendChatOverRadio(localCallsign, chatRoom, message, lineUid);
+                if (gatewayRelay) {
+                    String wrapped = wrapGatewayMessage(toUid, chatRoom, message);
+                    String rfRoom = toUid != null && !toUid.isEmpty()
+                            ? toUid
+                            : chatRoom;
+                    sendChatOverRadio(localCallsign, rfRoom, wrapped, lineUid);
+                } else {
+                    sendChatOverRadio(localCallsign, chatRoom, message, lineUid);
+                }
                 return;
             }
 
@@ -1009,6 +1040,49 @@ public class ChatBridge {
             scheduleRetryCheck(wireMid);
         } catch (Exception e) {
             Log.e(TAG, "Error sending chat over radio", e);
+        }
+    }
+
+    private static String wrapGatewayMessage(String toUid, String chatRoom, String message) {
+        String uid = toUid != null ? toUid.trim() : "";
+        String room = chatRoom != null ? chatRoom.trim() : "";
+        return GW_PREFIX + uid + "|" + room + "|" + message;
+    }
+
+    private static GatewayWrapped parseGatewayWrappedMessage(String message) {
+        if (message == null || !message.startsWith(GW_PREFIX)) {
+            return null;
+        }
+        String rest = message.substring(GW_PREFIX.length());
+        int p1 = rest.indexOf('|');
+        if (p1 < 0) return null;
+        int p2 = rest.indexOf('|', p1 + 1);
+        if (p2 < 0) return null;
+        String toUid = rest.substring(0, p1).trim();
+        String room = rest.substring(p1 + 1, p2).trim();
+        String body = rest.substring(p2 + 1);
+        if (body.isEmpty()) return null;
+        return new GatewayWrapped(toUid, room, body);
+    }
+
+    private boolean isGatewayRelayEnabled() {
+        try {
+            return SettingsFragment.isSaRelayEnabled(pluginContext)
+                    && SettingsFragment.isRfToTakUplinkEnabled(pluginContext);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static final class GatewayWrapped {
+        final String toUid;
+        final String chatRoom;
+        final String message;
+
+        GatewayWrapped(String toUid, String chatRoom, String message) {
+            this.toUid = toUid;
+            this.chatRoom = chatRoom;
+            this.message = message;
         }
     }
 

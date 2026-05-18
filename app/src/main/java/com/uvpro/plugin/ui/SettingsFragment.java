@@ -35,6 +35,7 @@ public class SettingsFragment extends PluginPreferenceFragment
     public static final String PREF_RETRY_INTERVAL_MIN = "uvpro_retry_interval_min";
     public static final String PREF_RETRY_MAX = "uvpro_retry_max";
     public static final String PREF_SA_RELAY_ENABLED = "uvpro_sa_relay_enabled";
+    public static final String PREF_RF_TO_TAK_UPLINK_ENABLED = "uvpro_rf_to_tak_uplink_enabled";
     public static final String PREF_PING_REPLY_ENABLED = "uvpro_ping_reply_enabled";
 
     /** Injected after inflate — some ATAK builds omit custom Pan* prefs from XML. */
@@ -307,6 +308,11 @@ public class SettingsFragment extends PluginPreferenceFragment
     public static boolean isPingReplyEnabled(Context context) {
         return getPrefs(context)
                 .getBoolean(PREF_PING_REPLY_ENABLED, true);
+    }
+
+    public static boolean isRfToTakUplinkEnabled(Context context) {
+        return getPrefs(context)
+                .getBoolean(PREF_RF_TO_TAK_UPLINK_ENABLED, false);
     }
 
     public static boolean isEncryptionEnabled(Context context) {

@@ -105,6 +105,15 @@ public class CotBridge {
         }
     }
 
+    private boolean isRfToTakUplinkEnabled() {
+        try {
+            return isSaRelayEnabled() && com.uvpro.plugin.ui.SettingsFragment
+                    .isRfToTakUplinkEnabled(pluginContext);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     /**
      * Injected inbound GeoChat (and similar) is re-processed by core comms; PreSendProcessor
      * then sees the same b-t-f with toUIDs pointing at a BTECH contact and would re-transmit
@@ -410,7 +419,9 @@ public class CotBridge {
 
             if (event != null && event.isValid()) {
                 Log.d(TAG, "Injecting position CoT for " + callsign + " team=" + teamForCot);
+                markInboundInjectSkipOutboundRelay(event.getUID());
                 dispatchCotEvent(event);
+                maybeRelayInboundRadioCotToTak(event);
             } else {
                 Log.w(TAG, "Invalid position CoT for " + callsign);
             }
@@ -511,6 +522,7 @@ public class CotBridge {
                 // PreSendProcessor from echoing received items back over the air.
                 markInboundInjectSkipOutboundRelay(event.getUID());
                 dispatchCotEvent(event);
+                maybeRelayInboundRadioCotToTak(event);
             }
         } catch (Exception e) {
             Log.e(TAG, "Error injecting compressed CoT", e);
@@ -580,6 +592,7 @@ public class CotBridge {
                         + " (uid=" + canonicalUid + " midpkt=" + radioPacketMessageId + ")");
                 markInboundInjectSkipOutboundRelay(event.getUID());
                 dispatchCotEvent(event);
+                maybeRelayInboundRadioCotToTak(event);
             }
         } catch (Exception e) {
             Log.e(TAG, "Error injecting chat CoT", e);
@@ -980,6 +993,22 @@ public class CotBridge {
             new Thread(() -> chatBridge.relayOutboundGeoChatCotAsCompact(event)).start();
         } else {
             new Thread(() -> sendCotOverRadio(event)).start();
+        }
+    }
+
+    /**
+     * Optional RF -> TAK uplink path.
+     * Active only when SA Relay and RF-to-TAK uplink are both enabled.
+     */
+    private void maybeRelayInboundRadioCotToTak(CotEvent event) {
+        if (event == null) return;
+        if (!isRfToTakUplinkEnabled()) return;
+        try {
+            CotMapComponent.getExternalDispatcher().dispatch(event);
+            Log.d(TAG, "RF -> TAK uplink dispatched: type=" + event.getType()
+                    + " uid=" + event.getUID());
+        } catch (Exception e) {
+            Log.w(TAG, "RF -> TAK uplink failed: " + e.getMessage());
         }
     }
 

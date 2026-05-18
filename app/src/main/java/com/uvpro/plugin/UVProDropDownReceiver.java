@@ -1895,12 +1895,28 @@ public class UVProDropDownReceiver extends DropDownReceiver
         switchSaRelay.setChecked(SettingsFragment.isSaRelayEnabled(ctx));
         layout.addView(switchSaRelay);
 
+        Switch switchRfToTakUplink = new Switch(ctx);
+        switchRfToTakUplink.setText("RF -> TAK Uplink Relay");
+        switchRfToTakUplink.setTextColor(0xFFCCCCCC);
+        switchRfToTakUplink.setChecked(SettingsFragment.isRfToTakUplinkEnabled(ctx));
+        switchRfToTakUplink.setEnabled(switchSaRelay.isChecked());
+        layout.addView(switchRfToTakUplink);
+        switchSaRelay.setOnCheckedChangeListener((buttonView, isChecked) ->
+                switchRfToTakUplink.setEnabled(isChecked));
+
         TextView hintSaRelay = new TextView(ctx);
         hintSaRelay.setText(
                 "Throttled: one update per contact per 30 s. Requires TAK server + radio connected.");
         hintSaRelay.setTextColor(0xFF888888);
         hintSaRelay.setTextSize(12);
         layout.addView(hintSaRelay);
+
+        TextView hintRfToTakUplink = new TextView(ctx);
+        hintRfToTakUplink.setText(
+                "Forwards RF CoT to TAK network. Active only when SA Relay is enabled.");
+        hintRfToTakUplink.setTextColor(0xFF888888);
+        hintRfToTakUplink.setTextSize(12);
+        layout.addView(hintRfToTakUplink);
 
         // Team color is controlled by ATAK core settings (locationTeam). Plugin no longer overrides it.
 
@@ -1913,6 +1929,8 @@ public class UVProDropDownReceiver extends DropDownReceiver
                     SharedPreferences.Editor editor = prefs.edit();
                     editor.putBoolean(SettingsFragment.PREF_SA_RELAY_ENABLED,
                             switchSaRelay.isChecked());
+                    editor.putBoolean(SettingsFragment.PREF_RF_TO_TAK_UPLINK_ENABLED,
+                            switchRfToTakUplink.isChecked());
 
                     prefs.edit().putBoolean(SettingsFragment.PREF_PING_REPLY_ENABLED,
                             switchPingReply.isChecked()).apply();
@@ -1937,6 +1955,8 @@ public class UVProDropDownReceiver extends DropDownReceiver
                     editor.apply();
                     appendLog("Settings saved");
                     appendLog("SA Relay " + (switchSaRelay.isChecked() ? "enabled" : "disabled"));
+                    appendLog("RF -> TAK Uplink "
+                            + (switchRfToTakUplink.isChecked() ? "enabled" : "disabled"));
                     if (rootView != null) {
                         getMapView().post(() -> updateStatusFields());
                     }
