@@ -402,15 +402,12 @@ public class BtConnectionManager {
     }
 
     /**
-     * Send raw bytes directly to the radio (non-KISS protocol traffic).
+     * Send HT Commander control commands over Bluetooth (not over-the-air KISS/AX.25).
+     * Radio Silence does not block these — only {@link #sendKissFrame} RF traffic is inhibited.
      */
     public boolean sendRawBytes(byte[] data) {
         if (!connected.get() || outputStream == null) {
             Log.w(TAG, "Cannot send raw bytes: not connected");
-            return false;
-        }
-        if (radioSilenceEnabled.get()) {
-            Log.w(TAG, "Raw TX blocked by Radio Silence");
             return false;
         }
         try {
@@ -427,7 +424,8 @@ public class BtConnectionManager {
     }
 
     /**
-     * Radio Silence blocks all outbound RF/control traffic while still allowing receive.
+     * Radio Silence blocks outbound KISS/AX.25 (chat, ACKs, beacons, CoT) while receive and
+     * Bluetooth radio-control commands ({@link #sendRawBytes}) remain active.
      */
     public void setRadioSilenceEnabled(boolean enabled) {
         radioSilenceEnabled.set(enabled);

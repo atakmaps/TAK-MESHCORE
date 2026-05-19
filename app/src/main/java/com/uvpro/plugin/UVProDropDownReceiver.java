@@ -471,9 +471,10 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 boolean enabled = !btManager.isRadioSilenceEnabled();
                 btManager.setRadioSilenceEnabled(enabled);
                 updateRadioSilenceButtonUi();
+                refreshChannelGridAsync();
                 appendLog(enabled
-                        ? "Radio Silence ON: TX blocked (RX still active)."
-                        : "Radio Silence OFF: TX restored.");
+                        ? "Radio Silence ON: RF TX/ACKs blocked; control and RX active."
+                        : "Radio Silence OFF: RF TX restored.");
                 return true;
             });
         }
@@ -1170,7 +1171,6 @@ public class UVProDropDownReceiver extends DropDownReceiver
         if (channelsGrid == null) {
             return;
         }
-        channelsGrid.removeAllViews();
 
         if (snapshot == null) {
             // Keep last known UI state on transient read failures while connected.
@@ -1183,6 +1183,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
                 }
                 return;
             }
+            channelsGrid.removeAllViews();
             // If actually disconnected, clear to baseline.
             if (switchDualWatch != null) {
                 switchDualWatch.setChecked(false);
@@ -1207,6 +1208,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
             updateReceiveRssiUi(-1);
             return;
         }
+        channelsGrid.removeAllViews();
         lastSnapshot = snapshot;
 
         if (switchDualWatch != null) {
