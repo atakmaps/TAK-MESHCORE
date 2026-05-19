@@ -16,6 +16,7 @@ import com.uvpro.plugin.chat.ChatBridge;
 import com.uvpro.plugin.cot.CotBridge;
 import com.uvpro.plugin.util.CallsignUtil;
 import com.uvpro.plugin.contacts.ContactTracker;
+import com.uvpro.plugin.contacts.RadioContact;
 import com.uvpro.plugin.crypto.EncryptionManager;
 import com.uvpro.plugin.protocol.PacketFragmenter;
 
@@ -33,6 +34,7 @@ import java.util.Locale;
  *
  * For APRS packets (from standard APRS radios / BTECH native APRS):
  *   - Position reports → ContactTracker + CotBridge
+ *   - Telemetry ({@code T#}…) → refresh marker at last fix + remarks when known
  *   - Messages → ChatBridge
  *
  * For UV-PRO custom packets (from other UV-PRO plugins):
@@ -120,7 +122,7 @@ public class PacketRouter {
         }
 
         // Otherwise, try to parse as standard APRS
-        routeAprsPacket(srcCall, srcSsid, info, infoBytes);
+        routeAprsPacket(srcCall, srcSsid, info, infoBytes, destCall, 0);
     }
 
     /**
@@ -221,30 +223,53 @@ public class PacketRouter {
 
     /**
      * Route a standard APRS packet.
+     *
+     * @param destCallsign AX.25 destination (required for Mic-E latitude encoding)
+     * @param unwrapDepth guard nested {@code }} third-party frames
      */
-    private void routeAprsPacket(String callsign, int ssid, String info, byte[] infoBytes) {
-        if (info.isEmpty()) return;
+    private void routeAprsPacket(String callsign, int ssid, String info, byte[] infoBytes,
+                                 String destCallsign, int unwrapDepth) {
+        if (info.isEmpty()) {
+            return;
+        }
+        if (unwrapDepth < 5 && info.charAt(0) == '}') {
+            AprsParser.ThirdPartyInner inner = AprsParser.unwrapThirdParty(info);
+            if (inner != null) {
+                byte[] innerBytes = AprsParser.toUtf8Bytes(inner.payload);
+                routeAprsPacket(inner.callsign, inner.ssid, inner.payload, innerBytes,
+                        inner.toDest, unwrapDepth + 1);
+                return;
+            }
+        }
 
         // Diagnostic trace for symbol mismatches: compare raw payload bytes to parsed fields.
-        Log.d(TAG, "APRS raw " + callsign
+        Log.d(TAG, "APRS raw " + aprsDisplayCallsign(callsign, ssid)
                 + " info_ascii=\"" + sanitizeInfoForLog(info) + "\""
                 + " info_hex=" + toHex(infoBytes, 96));
 
         // Try position first
         AprsParser.AprsPosition pos =
-                AprsParser.parsePosition(callsign, ssid, info);
+                AprsParser.parsePosition(callsign, ssid, info, destCallsign);
         if (pos != null) {
-            Log.d(TAG, "APRS position from " + callsign +
+            String baseId = pos.callsign != null && !pos.callsign.trim().isEmpty()
+                    ? pos.callsign.trim()
+                    : callsign.trim();
+            String mapCall = aprsDisplayCallsign(baseId, pos.ssid);
+            Log.d(TAG, "APRS position from " + mapCall +
                     ": " + pos.latitude + ", " + pos.longitude);
             String iconsetPath = AprsSymbolMapper.iconsetPath(pos.symbolTable, pos.symbol);
-            Log.d(TAG, "APRS symbol " + callsign
+            Log.d(TAG, "APRS symbol " + mapCall
                     + " table='" + pos.symbolTable + "'"
                     + " symbol='" + pos.symbol + "'"
                     + " iconsetpath=" + (iconsetPath != null ? iconsetPath : "<none>"));
-            contactTracker.updateContact(callsign, pos.latitude,
+            contactTracker.updateContact(mapCall, pos.latitude,
                     pos.longitude, pos.altitude, pos.speed, pos.course, -1);
+            RadioContact rcAprs = contactTracker.getContact(mapCall);
+            if (rcAprs != null) {
+                rcAprs.setLastAprsMapSymbol(pos.symbolTable, pos.symbol);
+            }
             String aprsTeam = resolveSharedAprsTeamExcludingLocal();
-            cotBridge.injectPositionCot(callsign, pos.latitude,
+            cotBridge.injectPositionCot(mapCall, pos.latitude,
                     pos.longitude, pos.altitude, pos.speed, pos.course,
                     aprsTeam, pos.symbolTable, pos.symbol);
             return;
@@ -253,14 +278,52 @@ public class PacketRouter {
         // Try message
         AprsParser.AprsMessage msg = AprsParser.parseMessage(callsign, info);
         if (msg != null) {
-            Log.d(TAG, "APRS message from " + msg.fromCallsign +
-                    " to " + msg.toCallsign + ": " + msg.message);
-            chatBridge.injectRadioMessage(msg.fromCallsign,
+            String msgFrom = aprsDisplayCallsign(callsign, ssid);
+            Log.d(TAG, "APRS message from " + msgFrom
+                    + " to " + msg.toCallsign + ": " + msg.message);
+            chatBridge.injectRadioMessage(msgFrom,
                     msg.toCallsign, msg.message, 0);
             return;
         }
 
-        Log.d(TAG, "Unhandled APRS packet from " + callsign + ": " + info);
+        AprsParser.AprsTelemetry telem = AprsParser.parseTelemetry(info);
+        if (telem != null) {
+            String mapCall = aprsDisplayCallsign(callsign, ssid);
+            Log.d(TAG, "APRS telemetry from " + mapCall + ": " + telem.formatSummary());
+            RadioContact c = contactTracker.getContact(mapCall);
+            if (c != null) {
+                contactTracker.touchIfPresent(mapCall);
+                if (c.hasPosition()) {
+                    Character symTab = c.getLastAprsSymbolTable();
+                    Character symCode = c.getLastAprsSymbolCode();
+                    String aprsTeam = resolveSharedAprsTeamExcludingLocal();
+                    cotBridge.injectPositionCot(mapCall, c.getLatitude(),
+                            c.getLongitude(), c.getAltitude(), c.getSpeed(),
+                            c.getCourse(), aprsTeam, symTab, symCode,
+                            telem.formatSummary());
+                }
+            }
+            return;
+        }
+
+        Log.d(TAG, "Unhandled APRS packet from " + aprsDisplayCallsign(callsign, ssid) + ": " + info);
+    }
+
+    /**
+     * APRS / AX.25 SSID distinguishes multiple stations on one base callsign (matches radio menus).
+     */
+    private static String aprsDisplayCallsign(String baseCallsign, int ssid) {
+        if (baseCallsign == null) {
+            return "";
+        }
+        String b = baseCallsign.trim();
+        if (b.isEmpty()) {
+            return "";
+        }
+        if (ssid > 0 && ssid <= 15) {
+            return b + "-" + ssid;
+        }
+        return b;
     }
 
     private static String sanitizeInfoForLog(String input) {

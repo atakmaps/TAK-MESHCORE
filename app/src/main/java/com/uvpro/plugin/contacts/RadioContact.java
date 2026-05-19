@@ -40,6 +40,10 @@ public class RadioContact {
     /** Source of data */
     private ContactSource source;
 
+    /** Last APRS icon from a position report (for telemetry-only CoT refresh). */
+    private Character lastAprsSymbolTable;
+    private Character lastAprsSymbolCode;
+
     public enum ContactStatus {
         /** Actively reporting */
         ACTIVE,
@@ -90,6 +94,10 @@ public class RadioContact {
     public ContactStatus getStatus() { return status; }
     public ContactSource getSource() { return source; }
 
+    public Character getLastAprsSymbolTable() { return lastAprsSymbolTable; }
+
+    public Character getLastAprsSymbolCode() { return lastAprsSymbolCode; }
+
     // --- Setters ---
 
     public void setLatitude(double latitude) { this.latitude = latitude; }
@@ -99,6 +107,15 @@ public class RadioContact {
     public void setCourse(double course) { this.course = course; }
     public void setBattery(int battery) { this.battery = battery; }
     public void setSource(ContactSource source) { this.source = source; }
+
+    /**
+     * Remember APRS map symbol from the last position report so telemetry (no lat/lon)
+     * can refresh the CoT without dropping {@code usericon}.
+     */
+    public void setLastAprsMapSymbol(Character table, Character code) {
+        this.lastAprsSymbolTable = table;
+        this.lastAprsSymbolCode = code;
+    }
 
     /**
      * Update position data.
@@ -126,8 +143,8 @@ public class RadioContact {
     /**
      * Update status based on elapsed time.
      *
-     * @param staleMs   Threshold for STALE status (default 5 minutes)
-     * @param lostMs    Threshold for LOST status (default 15 minutes)
+     * @param staleMs   Threshold for STALE status (see ContactTracker sweep)
+     * @param lostMs    Threshold for LOST status (see ContactTracker sweep)
      */
     public void updateStatus(long staleMs, long lostMs) {
         long elapsed = System.currentTimeMillis() - lastSeen;

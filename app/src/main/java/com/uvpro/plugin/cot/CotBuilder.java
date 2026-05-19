@@ -94,7 +94,7 @@ public class CotBuilder {
                                             long staleMillis,
                                             String cotTypeOverride) {
         return buildPositionCot(callsign, lat, lon, alt, speed, course,
-                teamColor, staleMillis, cotTypeOverride, null, null);
+                teamColor, staleMillis, cotTypeOverride, null, null, null);
     }
 
     public static CotEvent buildPositionCot(String callsign,
@@ -105,6 +105,23 @@ public class CotBuilder {
                                             String cotTypeOverride,
                                             Character aprsSymbolTable,
                                             Character aprsSymbolCode) {
+        return buildPositionCot(callsign, lat, lon, alt, speed, course,
+                teamColor, staleMillis, cotTypeOverride,
+                aprsSymbolTable, aprsSymbolCode, null);
+    }
+
+    /**
+     * Full position CoT builder including optional APRS icon and remarks body.
+     */
+    public static CotEvent buildPositionCot(String callsign,
+                                            double lat, double lon,
+                                            double alt, double speed,
+                                            double course, String teamColor,
+                                            long staleMillis,
+                                            String cotTypeOverride,
+                                            Character aprsSymbolTable,
+                                            Character aprsSymbolCode,
+                                            String remarksInner) {
         CotEvent event = new CotEvent();
 
         String normalizedCall = callsign.trim().toUpperCase();
@@ -176,6 +193,9 @@ public class CotBuilder {
         // Remark with source info
         CotDetail remarks = new CotDetail("remarks");
         remarks.setAttribute("source", "UV-PRO Radio");
+        if (remarksInner != null && !remarksInner.trim().isEmpty()) {
+            remarks.setInnerText(remarksInner.trim());
+        }
         detail.addChild(remarks);
 
         event.setDetail(detail);

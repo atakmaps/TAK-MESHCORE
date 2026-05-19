@@ -24,14 +24,14 @@ public class ContactTracker {
 
     private static final String TAG = "UVPro.Contacts";
 
-    /** Time before a contact becomes stale (5 minutes) */
-    private static final long STALE_THRESHOLD_MS = 5 * 60 * 1000L;
+    /** Time before a contact becomes stale (align with inbound CoT stale, sparse APRS). */
+    private static final long STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000L;
 
-    /** Time before a contact is marked lost (15 minutes) */
-    private static final long LOST_THRESHOLD_MS = 15 * 60 * 1000L;
+    /** Time before a contact is marked lost (after stale). */
+    private static final long LOST_THRESHOLD_MS = 3 * 60 * 60 * 1000L;
 
-    /** Time before a lost contact is auto-removed (1 hour) */
-    private static final long REMOVE_THRESHOLD_MS = 60 * 60 * 1000L;
+    /** Time before a lost contact is auto-removed from the plugin list. */
+    private static final long REMOVE_THRESHOLD_MS = 6 * 60 * 60 * 1000L;
 
     /** Sweep interval for checking stale contacts (60 seconds) */
     private static final long SWEEP_INTERVAL_MS = 60_000;
@@ -136,6 +136,19 @@ public class ContactTracker {
      */
     public RadioContact getContact(String callsign) {
         return contacts.get(normalizeCallsign(callsign));
+    }
+
+    /**
+     * Liveness only: bump {@link RadioContact#touch} if the contact exists
+     * (e.g. APRS telemetry with no new coordinates).
+     */
+    public void touchIfPresent(String callsign) {
+        String key = normalizeCallsign(callsign);
+        RadioContact contact = contacts.get(key);
+        if (contact != null) {
+            contact.touch();
+            notifyContactUpdated(contact);
+        }
     }
 
     /**

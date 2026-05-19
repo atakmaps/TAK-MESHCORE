@@ -49,6 +49,8 @@ public class CotBridge {
     private static final String TAG = "UVPro.CotBridge";
     private static final long STALE_GRACE_MS = 30_000L;
     private static final long MIN_CONTACT_STALE_MS = 60_000L;
+    /** Inbound APRS / radio peers: ATAK uses CoT stale as marker TTL; keep ≥ 2h for sparse beacons. */
+    private static final long MIN_INBOUND_RADIO_STALE_MS = 2 * 60 * 60_000L;
 
     private final Context pluginContext;
     private final MapView mapView;
@@ -388,14 +390,14 @@ public class CotBridge {
                                   double alt, double speed, double course,
                                   String senderTeamFromPeer) {
         injectPositionCot(callsign, lat, lon, alt, speed, course,
-                senderTeamFromPeer, null, null, null);
+                senderTeamFromPeer, null, null, null, null);
     }
 
     public void injectPositionCot(String callsign, double lat, double lon,
                                   double alt, double speed, double course,
                                   String senderTeamFromPeer, String cotTypeOverride) {
         injectPositionCot(callsign, lat, lon, alt, speed, course,
-                senderTeamFromPeer, cotTypeOverride, null, null);
+                senderTeamFromPeer, cotTypeOverride, null, null, null);
     }
 
     public void injectPositionCot(String callsign, double lat, double lon,
@@ -404,13 +406,27 @@ public class CotBridge {
                                   Character aprsSymbolTable,
                                   Character aprsSymbolCode) {
         injectPositionCot(callsign, lat, lon, alt, speed, course,
-                senderTeamFromPeer, null, aprsSymbolTable, aprsSymbolCode);
+                senderTeamFromPeer, null, aprsSymbolTable, aprsSymbolCode, null);
+    }
+
+    /**
+     * Injects position CoT with optional remarks (e.g. APRS telemetry summary at last fix).
+     */
+    public void injectPositionCot(String callsign, double lat, double lon,
+                                  double alt, double speed, double course,
+                                  String senderTeamFromPeer,
+                                  Character aprsSymbolTable,
+                                  Character aprsSymbolCode,
+                                  String remarksInner) {
+        injectPositionCot(callsign, lat, lon, alt, speed, course,
+                senderTeamFromPeer, null, aprsSymbolTable, aprsSymbolCode, remarksInner);
     }
 
     private void injectPositionCot(String callsign, double lat, double lon,
                                    double alt, double speed, double course,
                                    String senderTeamFromPeer, String cotTypeOverride,
-                                   Character aprsSymbolTable, Character aprsSymbolCode) {
+                                   Character aprsSymbolTable, Character aprsSymbolCode,
+                                   String remarksInner) {
         try {
             String teamForCot = senderTeamFromPeer != null && !senderTeamFromPeer.trim().isEmpty()
                     ? senderTeamFromPeer.trim()
@@ -421,7 +437,8 @@ public class CotBridge {
                     resolveInboundContactStaleMs(),
                     cotTypeOverride,
                     aprsSymbolTable,
-                    aprsSymbolCode);
+                    aprsSymbolCode,
+                    remarksInner);
 
             if (event != null && event.isValid()) {
                 Log.d(TAG, "Injecting position CoT for " + callsign + " team=" + teamForCot);
@@ -446,7 +463,7 @@ public class CotBridge {
                     ? mapView.getContext()
                     : pluginContext;
             if (prefsCtx == null) {
-                return 5 * 60_000L;
+                return MIN_INBOUND_RADIO_STALE_MS;
             }
 
             long staleMs;
@@ -460,9 +477,10 @@ public class CotBridge {
                 int fixedSec = Math.max(1, SettingsFragment.getBeaconIntervalSec(pluginContext));
                 staleMs = fixedSec * 1000L;
             }
-            return Math.max(MIN_CONTACT_STALE_MS, staleMs + STALE_GRACE_MS);
+            long fromBeacon = Math.max(MIN_CONTACT_STALE_MS, staleMs + STALE_GRACE_MS);
+            return Math.max(MIN_INBOUND_RADIO_STALE_MS, fromBeacon);
         } catch (Exception ignored) {
-            return 5 * 60_000L;
+            return MIN_INBOUND_RADIO_STALE_MS;
         }
     }
 
