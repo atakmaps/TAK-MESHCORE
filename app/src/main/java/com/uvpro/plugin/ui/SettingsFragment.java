@@ -541,7 +541,16 @@ public class SettingsFragment extends PluginPreferenceFragment
 
     public static String getAprsCallsign(Context context) {
         String cs = getPrefs(context).getString(PREF_APRS_CALLSIGN, "");
-        return cs != null ? cs.trim().toUpperCase(java.util.Locale.US) : "";
+        if (cs == null) {
+            return "";
+        }
+        String out = cs.trim().toUpperCase(java.util.Locale.US);
+        // Accept "CALL-SSID" input in FCC field by normalizing to base callsign.
+        int dash = out.indexOf('-');
+        if (dash > 0) {
+            out = out.substring(0, dash);
+        }
+        return out;
     }
 
     public static int getAprsSsid(Context context) {

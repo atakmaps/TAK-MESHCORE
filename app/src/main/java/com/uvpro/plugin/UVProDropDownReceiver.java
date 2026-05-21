@@ -147,7 +147,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
     private Switch switchSmartBeacon;
     private Button btnManageSmartBeaconSettings;
     private Button btnManagePluginBeaconSettings;
-    private Button btnAprsTxArm;
+    private Button btnAprsBeaconArm;
     private TextView textAprsStatusCall;
     private android.widget.ImageView imageAprsStatusIcon;
     private TextView textAprsStatusIcon;
@@ -364,7 +364,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         switchSmartBeacon = rootView.findViewById(getId("switch_smart_beacon"));
         btnManageSmartBeaconSettings = rootView.findViewById(getId("btn_manage_smart_beacon_settings"));
         btnManagePluginBeaconSettings = rootView.findViewById(getId("btn_manage_plugin_beacon_settings"));
-        btnAprsTxArm = rootView.findViewById(getId("btn_aprs_tx_arm"));
+        btnAprsBeaconArm = rootView.findViewById(getId("btn_aprs_beacon_arm"));
         textAprsStatusCall = rootView.findViewById(getId("text_aprs_status_call"));
         imageAprsStatusIcon = rootView.findViewById(getId("image_aprs_status_icon"));
         textAprsStatusIcon = rootView.findViewById(getId("text_aprs_status_icon"));
@@ -2694,30 +2694,31 @@ public class UVProDropDownReceiver extends DropDownReceiver
 
     private void wireAprsSection() {
         Context ctx = getMapView() != null ? getMapView().getContext() : null;
-        if (btnAprsTxArm != null) {
-            btnAprsTxArm.setOnClickListener(v ->
-                    Toast.makeText(ctx, "Long press to arm/disarm APRS TX.",
+        if (btnAprsBeaconArm != null) {
+            btnAprsBeaconArm.setOnClickListener(v ->
+                    Toast.makeText(ctx, "Long press to enable/disable periodic APRS beacons.",
                             Toast.LENGTH_SHORT).show());
-            btnAprsTxArm.setOnLongClickListener(v -> {
+            btnAprsBeaconArm.setOnLongClickListener(v -> {
                 if (ctx == null) {
                     return true;
                 }
-                boolean armed = SettingsFragment.isAprsTxArmed(ctx);
-                if (!armed && !SettingsFragment.isValidAprsCallsign(
+                boolean enabled = SettingsFragment.isAprsTxArmed(ctx);
+                if (!enabled && !SettingsFragment.isValidAprsCallsign(
                         SettingsFragment.getAprsCallsign(ctx))) {
                     Toast.makeText(ctx,
                             "Set a valid APRS callsign in Edit APRS Settings first.",
                             Toast.LENGTH_LONG).show();
                     return true;
                 }
-                boolean nextArmed = !armed;
-                SettingsFragment.setAprsTxArmed(ctx, nextArmed);
-                if (!nextArmed && SettingsFragment.isAprsDisableAtakTraffic(ctx)) {
-                    // Safety: if APRS TX is disarmed, ATAK traffic must not remain disabled.
+                boolean nextEnabled = !enabled;
+                SettingsFragment.setAprsTxArmed(ctx, nextEnabled);
+                if (!nextEnabled && SettingsFragment.isAprsDisableAtakTraffic(ctx)) {
                     SettingsFragment.setAprsDisableAtakTraffic(ctx, false);
                 }
                 updateAprsSectionUi();
-                appendLog(!armed ? "APRS TX armed" : "APRS TX disarmed");
+                appendLog(nextEnabled
+                        ? "Periodic APRS beaconing enabled"
+                        : "Periodic APRS beaconing disabled");
                 return true;
             });
         }
@@ -2776,10 +2777,12 @@ public class UVProDropDownReceiver extends DropDownReceiver
             }
         }
         if (switchAprsDisableAtak != null) {
-            boolean aprsArmed = SettingsFragment.isAprsTxArmed(ctx);
+            boolean aprsEnabled = SettingsFragment.isAprsTxArmed(ctx)
+                    && SettingsFragment.isValidAprsCallsign(
+                    SettingsFragment.getAprsCallsign(ctx));
             boolean disableAtak = SettingsFragment.isAprsDisableAtakTraffic(ctx);
-            if (!aprsArmed && disableAtak) {
-                // Self-heal stale state from prior sessions/builds.
+            if (!aprsEnabled && disableAtak) {
+                // Without a valid FCC callsign APRS TX is unavailable; do not leave ATAK TX disabled.
                 SettingsFragment.setAprsDisableAtakTraffic(ctx, false);
                 disableAtak = false;
             }
@@ -2788,20 +2791,20 @@ public class UVProDropDownReceiver extends DropDownReceiver
             switchAprsDisableAtak.setOnCheckedChangeListener((buttonView, isChecked) ->
                     SettingsFragment.setAprsDisableAtakTraffic(ctx, isChecked));
         }
-        if (btnAprsTxArm != null) {
-            boolean armed = SettingsFragment.isAprsTxArmed(ctx);
-            btnAprsTxArm.setBackgroundTintList(null);
+        if (btnAprsBeaconArm != null) {
+            boolean enabled = SettingsFragment.isAprsTxArmed(ctx);
+            btnAprsBeaconArm.setBackgroundTintList(null);
             android.graphics.drawable.GradientDrawable bg =
                     new android.graphics.drawable.GradientDrawable();
             bg.setCornerRadius(24f);
             bg.setColor(0xFF455A64);
-            if (armed) {
+            if (enabled) {
                 bg.setStroke(4, 0xFFFF9800);
             }
-            btnAprsTxArm.setBackground(bg);
-            btnAprsTxArm.setText(armed
-                    ? "Long Press for APRS TX (ARMED)"
-                    : "Long Press for APRS TX");
+            btnAprsBeaconArm.setBackground(bg);
+            btnAprsBeaconArm.setText(enabled
+                    ? "Long Press for APRS Beacon (ENABLED)"
+                    : "Long Press for APRS Beacon");
         }
     }
 
@@ -2810,8 +2813,11 @@ public class UVProDropDownReceiver extends DropDownReceiver
         if (ctx == null) {
             return;
         }
-        if (!SettingsFragment.isAprsTxArmed(ctx)) {
-            appendLog("Arm APRS TX first (long press)");
+        if (!SettingsFragment.isValidAprsCallsign(SettingsFragment.getAprsCallsign(ctx))) {
+            Toast.makeText(ctx,
+                    "Set a valid APRS callsign in Edit APRS Settings first.",
+                    Toast.LENGTH_LONG).show();
+            appendLog("APRS beacon blocked (invalid FCC callsign)");
             return;
         }
         if (btManager == null || !btManager.isConnected()) {

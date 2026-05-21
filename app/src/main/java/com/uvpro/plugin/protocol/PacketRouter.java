@@ -346,8 +346,22 @@ public class PacketRouter {
         AprsParser.AprsMessage msg = AprsParser.parseMessage(callsign, info);
         if (msg != null) {
             String msgFrom = aprsDisplayCallsign(callsign, ssid);
+            if (!chatBridge.shouldAcceptAprsDestination(msg.toCallsign)) {
+                Log.d(TAG, "Ignoring APRS message not addressed to this station: from="
+                        + msgFrom + " to=" + msg.toCallsign);
+                return;
+            }
             Log.d(TAG, "APRS message from " + msgFrom
                     + " to " + msg.toCallsign + ": " + msg.message);
+            if (msg.messageId != null && !msg.messageId.trim().isEmpty()) {
+                String m = msg.message != null ? msg.message.trim().toLowerCase(Locale.US) : "";
+                if (!m.startsWith("ack") && !m.startsWith("rej")) {
+                    chatBridge.sendAprsAckIfRequested(msgFrom, msg.messageId);
+                }
+            }
+            com.uvpro.plugin.aprs.AprsMessageTransmitter.markContactResponded(
+                    MapView.getMapView() != null ? MapView.getMapView().getContext() : null,
+                    msgFrom);
             chatBridge.injectRadioMessage(msgFrom,
                     msg.toCallsign, msg.message, 0);
             return;

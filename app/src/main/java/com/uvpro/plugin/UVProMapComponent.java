@@ -157,6 +157,16 @@ public class UVProMapComponent extends DropDownMapComponent {
             UVProContactHandler.clearAllUnread();
         } catch (Exception ignored) {
         }
+        // Safety default: if APRS is not configured, never suppress ATAK traffic on startup.
+        try {
+            Context aprsPrefsCtx = view != null && view.getContext() != null
+                    ? view.getContext() : context;
+            // Operator requirement: periodic APRS beacon mode must always start OFF per launch.
+            com.uvpro.plugin.ui.SettingsFragment.setAprsTxArmed(aprsPrefsCtx, false);
+            com.uvpro.plugin.ui.SettingsFragment.setAprsDisableAtakTraffic(aprsPrefsCtx, false);
+        } catch (Exception e) {
+            Log.w(TAG, "Could not reset APRS traffic default", e);
+        }
 
         // Read user preferences
         String callsign = "UNKNOWN";
@@ -286,7 +296,7 @@ try {
         registerDropDownReceiver(dropDownReceiver, filter);
 
         aprsDetailsDropDownReceiver = new AprsDetailsDropDownReceiver(
-                view, context, contactTracker);
+                view, context, contactTracker, cotBridge);
         AtakBroadcast.DocumentedIntentFilter aprsDetailsFilter =
                 new AtakBroadcast.DocumentedIntentFilter();
         aprsDetailsFilter.addAction(AprsDetailsDropDownReceiver.SHOW_APRS_DETAILS);
@@ -1605,13 +1615,15 @@ try {
 
             boolean disableAtak = com.uvpro.plugin.ui.SettingsFragment
                     .isAprsDisableAtakTraffic(beaconCtx);
-            boolean aprsArmed = com.uvpro.plugin.ui.SettingsFragment.isAprsTxArmed(beaconCtx);
+            boolean aprsEnabled = com.uvpro.plugin.ui.SettingsFragment.isAprsTxArmed(beaconCtx)
+                    && com.uvpro.plugin.ui.SettingsFragment.isValidAprsCallsign(
+                    com.uvpro.plugin.ui.SettingsFragment.getAprsCallsign(beaconCtx));
             boolean openRlSent = false;
-            if (!aprsArmed && disableAtak) {
-                // APRS TX was disarmed; restore normal ATAK traffic automatically.
+            if (!aprsEnabled && disableAtak) {
+                // APRS TX unavailable without FCC callsign; restore normal ATAK traffic automatically.
                 com.uvpro.plugin.ui.SettingsFragment.setAprsDisableAtakTraffic(beaconCtx, false);
                 disableAtak = false;
-                Log.d(TAG, "Disable ATAK traffic auto-cleared (APRS TX disarmed)");
+                Log.d(TAG, "Disable ATAK traffic auto-cleared (invalid APRS callsign)");
             }
 
             if (!disableAtak) {
@@ -1622,16 +1634,16 @@ try {
                 Log.d(TAG, "Periodic OPENRL beacon sent");
             }
 
-            if (aprsArmed && !openRlSent
+            if (aprsEnabled && !openRlSent
                     && !com.uvpro.plugin.protocol.RfTxArbitrator.get().shouldDeferAprsBeacon()) {
                 boolean aprsOk = com.uvpro.plugin.aprs.AprsOutboundTransmitter.sendPositionBeacon(
                         beaconCtx, btConnectionManager);
                 if (aprsOk) {
                     Log.d(TAG, "Periodic APRS beacon sent");
                 }
-            } else if (aprsArmed && openRlSent) {
+            } else if (aprsEnabled && openRlSent) {
                 Log.d(TAG, "Periodic APRS beacon skipped (OPENRL sent this cycle)");
-            } else if (aprsArmed) {
+            } else if (aprsEnabled) {
                 Log.d(TAG, "Periodic APRS beacon skipped (OPENRL priority)");
             }
         } catch (Exception e) {

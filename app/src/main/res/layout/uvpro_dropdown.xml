@@ -722,13 +722,21 @@
                 android:paddingBottom="4dp" />
 
             <Button
-                android:id="@+id/btn_aprs_tx_arm"
+                android:id="@+id/btn_aprs_beacon_arm"
                 style="@style/UvproPillButton.Beacon"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="4dp"
-                android:text="Long Press for APRS TX"
+                android:text="Long Press for APRS Beacon"
                 android:backgroundTint="#FF455A64" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="APRS Beaconing will follow ATAK Beacon Settings"
+                android:textColor="#FFB0BEC5"
+                android:textSize="11sp"
+                android:paddingBottom="4dp" />
 
             <TextView
                 android:id="@+id/text_aprs_status_call"

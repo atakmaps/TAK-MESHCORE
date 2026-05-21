@@ -11,12 +11,18 @@ import androidx.fragment.app.Fragment;
 import com.atakmap.android.chat.ChatManagerMapComponent;
 import com.atakmap.android.ipc.AtakBroadcast;
 import com.atakmap.android.maps.MapView;
+import com.atakmap.android.maps.MapItem;
 import com.atakmap.android.contact.Contact;
 import com.atakmap.android.contact.Contacts;
+import com.atakmap.android.contact.IndividualContact;
+import com.atakmap.android.contact.PluginConnector;
+import com.atakmap.android.contact.IpConnector;
 import com.atakmap.coremap.cot.event.CotEvent;
 import com.atakmap.coremap.cot.event.CotDetail;
+import com.atakmap.android.preference.AtakPreferences;
 
 import com.uvpro.plugin.ax25.Ax25Frame;
+import com.uvpro.plugin.aprs.AprsMessageTransmitter;
 import com.uvpro.plugin.bluetooth.BtConnectionManager;
 import com.uvpro.plugin.cot.CotBridge;
 import com.uvpro.plugin.crypto.EncryptionManager;
@@ -29,8 +35,10 @@ import com.uvpro.plugin.ui.SettingsFragment;
 
 import java.lang.reflect.Field;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.HashSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -59,6 +67,7 @@ public class ChatBridge {
             "com.atakmap.android.chat.SEND_MESSAGE";
     /** RF payload wrapper for non-radio destination gatewaying (B -> A -> TAK). */
     private static final String GW_PREFIX = "__UVGW__|";
+    private static final String ANDROID_UID_PREFIX = "ANDROID-";
 
     /**
      * Broadcast action for outbound GeoChat to a contact whose delivery path uses
@@ -111,6 +120,7 @@ public class ChatBridge {
      */
     private final Set<String> pendingUnreadConversationUids = ConcurrentHashMap.newKeySet();
     private volatile boolean unreadVisibilityPollRunning;
+    private static final Set<String> aprsConversationUids = ConcurrentHashMap.newKeySet();
 
     private volatile boolean disposed;
 
@@ -265,6 +275,23 @@ public class ChatBridge {
         if (!"All Chat Rooms".equalsIgnoreCase(chatRoom)) {
             String destUid = cotBridge.resolveBtechUidForId(chatRoom);
             String senderUid = cotBridge.resolveBtechUidForId(fromCallsign);
+            // APRS senders are intentionally not registered as ATAK Contacts; synthesize an
+            // ANDROID-* UID so GeoChat can thread and badge them like normal conversations.
+            if ((senderUid == null || senderUid.isEmpty()) && fromCallsign != null) {
+                senderUid = syntheticAndroidUid(fromCallsign);
+            }
+            if (senderUid != null && senderUid.startsWith(ANDROID_UID_PREFIX)) {
+                ensurePluginChatContact(fromCallsign, senderUid);
+                if (radioPacketMessageId == 0) {
+                    markAprsContactUid(senderUid);
+                }
+                cotBridge.registerBtechContactUid(senderUid);
+                if (fromCallsign != null && !fromCallsign.trim().isEmpty()) {
+                    cotBridge.registerBtechContactId(fromCallsign, senderUid);
+                }
+                cotBridge.registerBtechContactId(
+                        senderUid.substring(ANDROID_UID_PREFIX.length()), senderUid);
+            }
             String selfUid = null;
             try {
                 selfUid = MapView.getDeviceUid();
@@ -361,6 +388,216 @@ public class ChatBridge {
         } catch (Exception ignored) {
         }
         return false;
+    }
+
+    public static String syntheticAndroidUid(String callsign) {
+        if (callsign == null) {
+            return "";
+        }
+        String c = callsign.trim().toUpperCase(Locale.US);
+        if (c.isEmpty()) {
+            return "";
+        }
+        if (c.startsWith("ANDROID-")) {
+            return c;
+        }
+        c = c.replaceAll("[^A-Z0-9\\-]", "");
+        if (c.isEmpty()) {
+            return "";
+        }
+        return "ANDROID-" + c;
+    }
+
+    /**
+     * Ensure an ATAK contact exists for APRS GeoChat routing, then return the contact UID.
+     */
+    public static String ensurePluginChatContact(String callsignRaw, String preferredUid) {
+        String uid = preferredUid;
+        if (uid == null || uid.trim().isEmpty()) {
+            uid = syntheticAndroidUid(callsignRaw);
+        } else {
+            uid = uid.trim().toUpperCase(Locale.US);
+        }
+        if (uid.isEmpty()) {
+            return "";
+        }
+
+        String callsign = callsignRaw != null ? callsignRaw.trim().toUpperCase(Locale.US) : "";
+        if (callsign.isEmpty() && uid.startsWith(ANDROID_UID_PREFIX)) {
+            callsign = uid.substring(ANDROID_UID_PREFIX.length());
+        }
+        if (callsign.isEmpty()) {
+            callsign = uid;
+        }
+
+        try {
+            Contacts contacts = Contacts.getInstance();
+            Contact existing = contacts.getContactByUuid(uid);
+            if (existing instanceof IndividualContact) {
+                return uid;
+            }
+            if (existing != null) {
+                Log.w(TAG, "Cannot ensure plugin chat contact; non-individual UID exists: " + uid);
+                return uid;
+            }
+
+            MapItem item = null;
+            MapView mv = MapView.getMapView();
+            if (mv != null && mv.getRootGroup() != null) {
+                item = mv.getRootGroup().deepFindUID(uid);
+            }
+
+            IndividualContact c = new IndividualContact(callsign, uid, item);
+            c.addConnector(new PluginConnector(ACTION_PLUGIN_CONTACT_GEOCHAT_SEND));
+            // Keep ATAK send-list compatibility without forcing CoT send path selection.
+            c.addConnector(new IpConnector((String) null));
+
+            if (mv != null) {
+                try {
+                    AtakPreferences prefs = new AtakPreferences(mv.getContext());
+                    prefs.set("contact.connector.default." + c.getUID(),
+                            PluginConnector.CONNECTOR_TYPE);
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed to set default connector for " + uid, e);
+                }
+            }
+            contacts.addContact(c);
+            return uid;
+        } catch (Exception e) {
+            Log.e(TAG, "ensurePluginChatContact failed callsign=" + callsignRaw
+                    + " uid=" + uid, e);
+            return "";
+        }
+    }
+
+    /**
+     * Open ATAK's native GeoChat conversation for a known contact UID.
+     */
+    public static boolean openNativeChatConversation(String contactUid) {
+        if (contactUid == null || contactUid.trim().isEmpty()) {
+            return false;
+        }
+        try {
+            Contact c = Contacts.getInstance().getContactByUuid(contactUid.trim());
+            if (c instanceof IndividualContact) {
+                ChatManagerMapComponent.getInstance().openConversation((IndividualContact) c, true);
+                return true;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "openNativeChatConversation failed uid=" + contactUid, e);
+        }
+        return false;
+    }
+
+    public static void markAprsContactUid(String contactUid) {
+        if (contactUid == null) {
+            return;
+        }
+        String uid = contactUid.trim().toUpperCase(Locale.US);
+        if (uid.isEmpty()) {
+            return;
+        }
+        if (!uid.startsWith(ANDROID_UID_PREFIX)) {
+            uid = ANDROID_UID_PREFIX + uid;
+        }
+        aprsConversationUids.add(uid);
+    }
+
+    private static boolean isAprsContactUid(String contactUid) {
+        if (contactUid == null) {
+            return false;
+        }
+        String uid = contactUid.trim().toUpperCase(Locale.US);
+        if (uid.isEmpty()) {
+            return false;
+        }
+        if (!uid.startsWith(ANDROID_UID_PREFIX)) {
+            uid = ANDROID_UID_PREFIX + uid;
+        }
+        return aprsConversationUids.contains(uid);
+    }
+
+    /**
+     * True when an inbound APRS message addressee targets this device/operator.
+     * Accepts direct local callsign forms and APRS-configured callsign+SSID forms.
+     */
+    public boolean shouldAcceptAprsDestination(String toCallsignRaw) {
+        String to = normalizeAprsDestination(toCallsignRaw);
+        if (to.isEmpty()) {
+            return false;
+        }
+        if ("ALL".equals(to) || to.startsWith("BLN")) {
+            return true;
+        }
+
+        Set<String> accepted = new HashSet<>();
+        addAprsDestinationVariants(accepted, localCallsign);
+        try {
+            if (mapView != null && mapView.getSelfMarker() != null) {
+                addAprsDestinationVariants(accepted,
+                        mapView.getSelfMarker().getMetaString("callsign", null));
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            String aprsBase = SettingsFragment.getAprsCallsign(pluginContext);
+            int aprsSsid = SettingsFragment.getAprsSsid(pluginContext);
+            addAprsDestinationVariants(accepted, aprsBase);
+            if (aprsBase != null && !aprsBase.trim().isEmpty() && aprsSsid > 0 && aprsSsid <= 15) {
+                addAprsDestinationVariants(accepted, aprsBase.trim() + "-" + aprsSsid);
+            }
+        } catch (Exception ignored) {
+        }
+        return accepted.contains(to);
+    }
+
+    private static void addAprsDestinationVariants(Set<String> out, String raw) {
+        String n = normalizeAprsDestination(raw);
+        if (n.isEmpty()) {
+            return;
+        }
+        out.add(n);
+        try {
+            String radio = com.uvpro.plugin.util.CallsignUtil.toRadioCallsign(n);
+            String rn = normalizeAprsDestination(radio);
+            if (!rn.isEmpty()) {
+                out.add(rn);
+            }
+        } catch (Exception ignored) {
+        }
+        int dash = n.indexOf('-');
+        if (dash > 0) {
+            String base = normalizeAprsDestination(n.substring(0, dash));
+            if (!base.isEmpty()) {
+                out.add(base);
+                try {
+                    String radioBase = com.uvpro.plugin.util.CallsignUtil.toRadioCallsign(base);
+                    String rb = normalizeAprsDestination(radioBase);
+                    if (!rb.isEmpty()) {
+                        out.add(rb);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private static String normalizeAprsDestination(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String s = raw.trim().toUpperCase(Locale.US);
+        if (s.isEmpty()) {
+            return "";
+        }
+        if (s.startsWith(ANDROID_UID_PREFIX)) {
+            s = s.substring(ANDROID_UID_PREFIX.length());
+        }
+        s = s.replaceAll("[^A-Z0-9\\-]", "");
+        if (s.length() > 9) {
+            s = s.substring(0, 9);
+        }
+        return s;
     }
 
     /**
@@ -751,6 +988,23 @@ public class ChatBridge {
             return false;
         }
 
+        if (isAprsContactUid(conversationId)) {
+            if (!SettingsFragment.isValidAprsCallsign(SettingsFragment.getAprsCallsign(pluginContext))) {
+                postAprsCallsignWarning();
+                return true;
+            }
+            String to = AprsMessageTransmitter.normalizeAddressee(conversationId);
+            if (to.isEmpty()) {
+                Log.w(TAG, "APRS relay blocked (invalid chat destination): " + conversationId);
+                return true;
+            }
+            boolean ok = AprsMessageTransmitter.sendMessage(pluginContext, btManager, to, msg);
+            if (!ok) {
+                Log.w(TAG, "APRS relay failed for chat destination: " + to);
+            }
+            return true;
+        }
+
         String lineUid = extractGeoChatLineUidFromBundle(b);
         if (lineUid == null) {
             maybeLogPluginGeoChatBundleKeysMissingUid(b);
@@ -772,6 +1026,38 @@ public class ChatBridge {
                 + " lineUid=" + lineUid);
         sendChatOverRadio(localCallsign, room, msg, lineUid);
         return true;
+    }
+
+    private void postAprsCallsignWarning() {
+        try {
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                    android.widget.Toast.makeText(pluginContext,
+                            "Set a valid APRS callsign in Edit APRS Settings first.",
+                            android.widget.Toast.LENGTH_LONG).show());
+        } catch (Exception e) {
+            Log.w(TAG, "Could not show APRS callsign warning", e);
+        }
+    }
+
+    /**
+     * For inbound APRS messages with message IDs ({@code {...}}), send {@code ackNN}.
+     */
+    public boolean sendAprsAckIfRequested(String toCallsignRaw, String messageIdRaw) {
+        String id = messageIdRaw != null ? messageIdRaw.trim() : "";
+        if (id.isEmpty()) {
+            return false;
+        }
+        if (id.length() > 5) {
+            id = id.substring(0, 5);
+        }
+        boolean ok = AprsMessageTransmitter.sendAcknowledgement(
+                pluginContext, btManager, toCallsignRaw, id);
+        if (ok) {
+            Log.d(TAG, "Auto-sent APRS ack id=" + id + " to " + toCallsignRaw);
+        } else {
+            Log.d(TAG, "APRS ack not sent id=" + id + " to " + toCallsignRaw);
+        }
+        return ok;
     }
 
     /**

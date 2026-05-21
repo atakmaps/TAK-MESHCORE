@@ -5,16 +5,20 @@ import android.content.Intent;
 import android.text.method.ScrollingMovementMethod;
 import android.view.LayoutInflater;
 import android.view.View;
+import android.widget.Button;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.atakmap.android.dropdown.DropDown;
 import com.atakmap.android.dropdown.DropDownReceiver;
 import com.atakmap.android.maps.MapItem;
 import com.atakmap.android.maps.MapView;
 import android.util.Log;
+import com.uvpro.plugin.chat.ChatBridge;
 import com.uvpro.plugin.contacts.ContactTracker;
 import com.uvpro.plugin.contacts.RadioContact;
 import com.uvpro.plugin.cot.CotBridge;
+import com.uvpro.plugin.ui.SettingsFragment;
 
 /**
  * APRS-specific details panel: shows comment/telemetry/symbol data from the RF packet,
@@ -34,18 +38,22 @@ public class AprsDetailsDropDownReceiver extends DropDownReceiver
 
     private final Context pluginContext;
     private final ContactTracker contactTracker;
+    private final CotBridge cotBridge;
 
     private View panelView;
     private TextView titleView;
     private TextView bodyView;
+    private Button sendMessageButton;
     private String openUid;
     private boolean dropDownVisible;
 
     public AprsDetailsDropDownReceiver(MapView mapView, Context pluginContext,
-                                       ContactTracker contactTracker) {
+                                       ContactTracker contactTracker,
+                                       CotBridge cotBridge) {
         super(mapView);
         this.pluginContext = pluginContext;
         this.contactTracker = contactTracker;
+        this.cotBridge = cotBridge;
     }
 
     @Override
@@ -82,6 +90,7 @@ public class AprsDetailsDropDownReceiver extends DropDownReceiver
         }
         titleView.setText(callsign);
         refreshBody(uid);
+        wireSendMessageButton(callsign);
 
         try {
             setSelected(item, "asset:/icons/outline.png");
@@ -141,8 +150,48 @@ public class AprsDetailsDropDownReceiver extends DropDownReceiver
                 .getIdentifier("aprs_details_title", "id", pluginContext.getPackageName()));
         bodyView = panelView.findViewById(pluginContext.getResources()
                 .getIdentifier("aprs_details_body", "id", pluginContext.getPackageName()));
+        sendMessageButton = panelView.findViewById(pluginContext.getResources()
+                .getIdentifier("aprs_details_send_message", "id", pluginContext.getPackageName()));
         if (bodyView != null) {
             bodyView.setMovementMethod(new ScrollingMovementMethod());
+        }
+    }
+
+    private void wireSendMessageButton(String targetCallsign) {
+        if (sendMessageButton == null) {
+            return;
+        }
+        sendMessageButton.setOnClickListener(v -> openNativeAprsChat(targetCallsign));
+    }
+
+    private void openNativeAprsChat(String targetCallsign) {
+        Context ctx = getMapView() != null ? getMapView().getContext() : pluginContext;
+        if (ctx == null) {
+            return;
+        }
+        String to = AprsMessageTransmitter.normalizeAddressee(targetCallsign);
+        if (to.isEmpty()) {
+            Toast.makeText(ctx, "Invalid APRS target callsign", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!SettingsFragment.isValidAprsCallsign(SettingsFragment.getAprsCallsign(ctx))) {
+            Toast.makeText(ctx,
+                    "Set a valid APRS callsign in Edit APRS Settings first.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        String uid = ChatBridge.ensurePluginChatContact(to, ChatBridge.syntheticAndroidUid(to));
+        if (uid.isEmpty()) {
+            Toast.makeText(ctx, "Could not create APRS chat contact", Toast.LENGTH_LONG).show();
+            return;
+        }
+        ChatBridge.markAprsContactUid(uid);
+        if (cotBridge != null) {
+            cotBridge.registerBtechContactUid(uid);
+            cotBridge.registerBtechContactId(to, uid);
+        }
+        if (!ChatBridge.openNativeChatConversation(uid)) {
+            Toast.makeText(ctx, "Could not open ATAK chat window", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -171,5 +220,6 @@ public class AprsDetailsDropDownReceiver extends DropDownReceiver
         panelView = null;
         titleView = null;
         bodyView = null;
+        sendMessageButton = null;
     }
 }

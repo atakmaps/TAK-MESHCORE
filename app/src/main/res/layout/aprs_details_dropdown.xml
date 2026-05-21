@@ -41,4 +41,13 @@
             android:lineSpacingExtra="4dp"
             android:textIsSelectable="true" />
     </ScrollView>
+
+    <Button
+        android:id="@+id/aprs_details_send_message"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="Send APRS Message"
+        android:textColor="#FFFFFF"
+        android:backgroundTint="#FF1976D2" />
 </LinearLayout>

@@ -40,10 +40,6 @@ public final class AprsOutboundTransmitter {
             Log.d(TAG, "APRS beacon blocked (radio silence)");
             return false;
         }
-        if (!SettingsFragment.isAprsTxArmed(context)) {
-            Log.d(TAG, "APRS beacon blocked (TX not armed)");
-            return false;
-        }
         boolean defer = enforceGuardWindow
                 ? RfTxArbitrator.get().shouldDeferAprsBeacon()
                 : RfTxArbitrator.get().shouldDeferManualAprsBeacon();
@@ -59,8 +55,7 @@ public final class AprsOutboundTransmitter {
             return false;
         }
         if (!SettingsFragment.isAprsIconSelected(context)) {
-            Log.w(TAG, "APRS beacon blocked (no icon selected)");
-            return false;
+            Log.w(TAG, "APRS icon not selected; using default symbol / >");
         }
         int ssid = SettingsFragment.getAprsSsid(context);
         char symTab = SettingsFragment.getAprsSymbolTable(context);
