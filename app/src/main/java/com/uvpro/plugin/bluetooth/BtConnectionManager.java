@@ -4,87 +4,112 @@ import android.Manifest;
 import android.app.Activity;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothSocket;
+import android.bluetooth.BluetoothGatt;
+import android.bluetooth.BluetoothGattCallback;
+import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattDescriptor;
+import android.bluetooth.BluetoothGattService;
+import android.bluetooth.BluetoothProfile;
+import android.bluetooth.le.BluetoothLeScanner;
+import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanFilter;
+import android.bluetooth.le.ScanResult;
+import android.bluetooth.le.ScanSettings;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.ParcelUuid;
+import android.preference.PreferenceManager;
+import android.util.Base64;
 import android.util.Log;
 
-import com.uvpro.plugin.kiss.KissFrameDecoder;
-import com.uvpro.plugin.kiss.KissFrameEncoder;
 import com.uvpro.plugin.protocol.PacketRouter;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Manages Bluetooth SPP connections to BTECH UV-PRO radios.
+ * MeshCore BLE companion transport.
  *
- * The BTECH UV-PRO exposes a Bluetooth SPP (Serial Port Profile) service
- * that speaks the KISS TNC protocol. Data flows:
- *
- *   Android ←(BT SPP)→ BTECH Radio ←(RF)→ Other Radios
- *
- * This class handles:
- * - Discovering paired BTECH devices
- * - Establishing SPP connections
- * - Reading incoming KISS frames in a background thread
- * - Sending outbound KISS frames
- * - Auto-reconnection on connection loss
+ * <p>This manager connects to MeshCore firmware using the Nordic UART service over BLE and tunnels
+ * AX.25 frames as chunked Base64 text messages in a selected MeshCore channel.</p>
  */
 public class BtConnectionManager {
 
-    private static final String TAG = "UVPro.BT";
+    private static final String TAG = "UVPro.MeshBLE";
 
-    // Standard SPP UUID
-    private static final UUID SPP_UUID =
-            UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+    private static final UUID UUID_UART_SERVICE =
+            UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+    private static final UUID UUID_UART_RX =
+            UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
+    private static final UUID UUID_UART_TX =
+            UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E");
+    private static final UUID UUID_CCC =
+            UUID.fromString("00002902-0000-1000-8000-00805F9B34FB");
 
-    // BTECH radios often advertise with names containing these patterns
-    private static final String[] BTECH_NAME_PATTERNS = {
-            "UV-PRO", "BTECH", "GMRS-PRO", "UV-50PRO", "UVPRO",
-            "UV-50X", "UV50", "PRO50", "BT-TNC", "TNC"
-    };
+    // MeshCore companion commands
+    private static final byte CMD_APP_START = 0x01;
+    private static final byte CMD_SEND_CHANNEL_MSG = 0x03;
+    private static final byte CMD_GET_NEXT_MSG = 0x0A;
+    private static final byte CMD_DEVICE_QUERY = 0x16;
+    private static final byte CMD_DEVICE_QUERY_ARG = 0x03;
+
+    // Companion notifications
+    private static final byte RESP_CHANNEL_MSG = 0x08;
+    private static final byte RESP_CONTACT_MSG = 0x07;
+    private static final byte RESP_CHANNEL_MSG_V3 = 0x11;
+    private static final byte RESP_CONTACT_MSG_V3 = 0x10;
+    private static final byte PUSH_MESSAGES_WAITING = (byte) 0x83;
+
+    private static final int MAX_MESH_MESSAGE_LEN = 130; // leave room below 133 chars
+    private static final int MAX_RAW_AX25_CHUNK = 57; // 57 bytes -> 76 Base64 chars
+    private static final String ENV_PREFIX = "UVAX1|";
 
     private final Context context;
     private final PacketRouter packetRouter;
-    private final KissFrameDecoder kissDecoder;
-    private final KissFrameEncoder kissEncoder;
-
-    private BluetoothAdapter btAdapter;
-    private BluetoothSocket btSocket;
-    private InputStream inputStream;
-    private OutputStream outputStream;
-
-    private Thread readThread;
     private final AtomicBoolean connected = new AtomicBoolean(false);
-    private final AtomicBoolean shouldReconnect = new AtomicBoolean(true);
     private final AtomicBoolean connecting = new AtomicBoolean(false);
+    private final AtomicBoolean shouldReconnect = new AtomicBoolean(true);
     private final AtomicBoolean radioSilenceEnabled = new AtomicBoolean(false);
     private final AtomicLong lastIoActivityMs = new AtomicLong(0L);
-    private int reconnectAttempts = 0;
-    private static final int MAX_RECONNECT_ATTEMPTS = 5;
-
-    private BluetoothDevice lastDevice;
-    // Probe sockets that are already connected — reused by connect() to avoid double-connect
-    private final java.util.concurrent.ConcurrentHashMap<String, BluetoothSocket> openProbeSockets =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private final AtomicInteger outboundMsgId = new AtomicInteger(1);
 
     private final CopyOnWriteArrayList<ConnectionListener> listeners =
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RawDataListener> rawDataListeners =
             new CopyOnWriteArrayList<>();
-
-    /** Invoked while the socket is still open, before streams are closed. */
     private final CopyOnWriteArrayList<Runnable> beforeDisconnectHooks =
             new CopyOnWriteArrayList<>();
+
+    private final Map<Integer, ChunkAccumulator> chunkBuffers = new ConcurrentHashMap<>();
+    private final ArrayDeque<byte[]> writeQueue = new ArrayDeque<>();
+    private boolean writeInFlight = false;
+
+    private BluetoothAdapter btAdapter;
+    private BluetoothLeScanner bleScanner;
+    private ScanCallback scanCallback;
+    private BluetoothGatt gatt;
+    private BluetoothGattCharacteristic rxCharacteristic;
+    private BluetoothGattCharacteristic txCharacteristic;
+    private BluetoothDevice lastDevice;
+    private int reconnectAttempts = 0;
+    private static final int MAX_RECONNECT_ATTEMPTS = 5;
+
+    private final HandlerThread ioThread = new HandlerThread("UVPro-MeshBLE-IO");
+    private Handler ioHandler;
 
     public interface ConnectionListener {
         void onConnected(BluetoothDevice device);
@@ -103,21 +128,18 @@ public class BtConnectionManager {
     }
 
     public BtConnectionManager(Context context, PacketRouter packetRouter) {
-        // Use ATAK's activity context for BT operations — the plugin context
-        // runs under a different package and lacks ATAK's runtime permissions.
         Context atakContext = com.atakmap.android.maps.MapView.getMapView() != null
                 ? com.atakmap.android.maps.MapView.getMapView().getContext()
                 : context;
         this.context = atakContext;
         this.packetRouter = packetRouter;
-        this.kissDecoder = new KissFrameDecoder();
-        this.kissEncoder = new KissFrameEncoder();
         this.btAdapter = BluetoothAdapter.getDefaultAdapter();
+        ioThread.start();
+        ioHandler = new Handler(ioThread.getLooper());
     }
 
     /**
-     * Returns all bonded (paired) Bluetooth devices immediately.
-     * Background reachability probing is handled by showDevicePicker().
+     * Enumerates bonded BLE devices and starts an active BLE scan for MeshCore UART service.
      */
     public void startScan() {
         if (btAdapter == null) {
@@ -133,33 +155,58 @@ public class BtConnectionManager {
             return;
         }
 
+        stopScanInternal();
+
         Set<BluetoothDevice> pairedDevices = btAdapter.getBondedDevices();
-        if (pairedDevices == null || pairedDevices.isEmpty()) {
-            notifyError("No paired Bluetooth devices. Pair your radio in Android Bluetooth settings first.");
-            return;
+        if (pairedDevices != null) {
+            for (BluetoothDevice device : pairedDevices) {
+                String name = device.getName();
+                if (name == null) name = device.getAddress();
+                Log.i(TAG, "Bonded BLE device: " + name + " [" + device.getAddress() + "]");
+                notifyDeviceFound(device);
+            }
         }
 
-        for (BluetoothDevice device : pairedDevices) {
-            String name = device.getName();
-            if (name == null) name = device.getAddress();
-            Log.i(TAG, "Paired device: " + name + " [" + device.getAddress() + "]");
-            notifyDeviceFound(device);
+        bleScanner = btAdapter.getBluetoothLeScanner();
+        if (bleScanner == null) {
+            notifyScanComplete();
+            return;
+        }
+        ScanFilter filter = new ScanFilter.Builder()
+                .setServiceUuid(new ParcelUuid(UUID_UART_SERVICE))
+                .build();
+        ScanSettings settings = new ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build();
+        scanCallback = new ScanCallback() {
+            @Override
+            public void onScanResult(int callbackType, ScanResult result) {
+                BluetoothDevice device = result.getDevice();
+                if (device != null) {
+                    notifyDeviceFound(device);
+                }
+            }
+
+            @Override
+            public void onScanFailed(int errorCode) {
+                Log.w(TAG, "BLE scan failed: " + errorCode);
+                notifyError("BLE scan failed: " + errorCode);
+            }
+        };
+        try {
+            java.util.List<ScanFilter> filters = java.util.Collections.singletonList(filter);
+            bleScanner.startScan(filters, settings, scanCallback);
+            ioHandler.postDelayed(this::stopScanInternal, 8000L);
+        } catch (Exception e) {
+            Log.w(TAG, "BLE scan start failed", e);
         }
         notifyScanComplete();
     }
 
-    /** Stores a probe socket that connect() can reuse to avoid a double-connect. */
-    public void addProbeSocket(String address, BluetoothSocket socket) {
-        openProbeSockets.put(address, socket);
-    }
-
-    /** Closes and discards all open probe sockets. */
-    public void clearProbeSockets() {
-        for (BluetoothSocket s : openProbeSockets.values()) {
-            try { s.close(); } catch (Exception ignored) {}
-        }
-        openProbeSockets.clear();
-    }
+    /** No-op in BLE mode (kept for compatibility with existing UI flow). */
+    public void addProbeSocket(String address, android.bluetooth.BluetoothSocket socket) {}
+    /** No-op in BLE mode (kept for compatibility with existing UI flow). */
+    public void clearProbeSockets() {}
 
 
     /**
@@ -218,6 +265,8 @@ public class BtConnectionManager {
      * Tries multiple socket strategies to handle various Android BT quirks.
      */
     public void connect(BluetoothDevice device) {
+        if (device == null) return;
+        stopScanInternal();
         if (connected.get()) {
             disconnect();
         }
@@ -229,113 +278,27 @@ public class BtConnectionManager {
         lastDevice = device;
         shouldReconnect.set(true);
         reconnectAttempts = 0;
+        clearQueues();
 
-        new Thread(() -> {
+        ioHandler.post(() -> {
             try {
-                String devName = device.getName() != null ? device.getName() : device.getAddress();
-                Log.i(TAG, "Connecting to " + devName + "...");
-
-                // Cancel discovery to speed up connection
-                if (btAdapter.isDiscovering()) {
-                    btAdapter.cancelDiscovery();
+                closeGattInternal();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    gatt = device.connectGatt(context.getApplicationContext(),
+                            false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+                } else {
+                    gatt = device.connectGatt(context.getApplicationContext(),
+                            false, gattCallback);
                 }
-
-                // Strategy 0: Reuse probe socket if we have one already open from startScan()
-                BluetoothSocket socket = null;
-                BluetoothSocket probeSocket = openProbeSockets.remove(device.getAddress());
-                if (probeSocket != null && probeSocket.isConnected()) {
-                    Log.i(TAG, "Reusing probe socket for " + devName);
-                    socket = probeSocket;
-                    // Close any other leftover probe sockets we won't use
-                    for (BluetoothSocket s : openProbeSockets.values()) {
-                        try { s.close(); } catch (Exception ignored) {}
-                    }
-                    openProbeSockets.clear();
-                }
-
-                // Strategy 1: Standard SPP UUID
-                if (socket == null) {
-                    socket = tryConnect(device, "SPP UUID", () ->
-                            device.createRfcommSocketToServiceRecord(SPP_UUID));
-                }
-
-                // Strategy 2: Reflection-based createRfcommSocket on channel 1
-                if (socket == null) {
-                    socket = tryConnect(device, "RFCOMM ch1", () -> {
-                        Method m = device.getClass().getMethod(
-                                "createRfcommSocket", int.class);
-                        return (BluetoothSocket) m.invoke(device, 1);
-                    });
-                }
-
-                // Strategy 3: Insecure SPP (no encryption handshake)
-                if (socket == null) {
-                    socket = tryConnect(device, "Insecure SPP", () ->
-                            device.createInsecureRfcommSocketToServiceRecord(SPP_UUID));
-                }
-
-                if (socket == null) {
-                    notifyError("All connection methods failed for " + devName
-                            + ". Try turning the radio off/on and re-pairing.");
+                if (gatt == null) {
                     connecting.set(false);
-                    if (shouldReconnect.get()) {
-                        scheduleReconnect();
-                    }
-                    return;
+                    notifyError("BLE connectGatt failed");
                 }
-
-                btSocket = socket;
-                inputStream = btSocket.getInputStream();
-                outputStream = btSocket.getOutputStream();
-                connected.set(true);
-                connecting.set(false);
-                reconnectAttempts = 0;
-                markIoActivity();
-
-                // Reset decoder state from any previous partial frames
-                kissDecoder.reset();
-
-                Log.i(TAG, "Connected to " + devName);
-                notifyConnected(device);
-
-                // Start reading KISS frames
-                startReadThread();
-
             } catch (Exception e) {
-                Log.e(TAG, "Connection failed: " + e.getMessage());
-                notifyError("Connection failed: " + e.getMessage());
-                cleanup();
                 connecting.set(false);
-
-                // Auto-reconnect
-                if (shouldReconnect.get()) {
-                    scheduleReconnect();
-                }
+                notifyError("BLE connect failed: " + e.getMessage());
             }
-        }, "BT-Connect").start();
-    }
-
-    /**
-     * Try a single socket connection strategy.
-     * @return Connected socket, or null if failed.
-     */
-    private BluetoothSocket tryConnect(BluetoothDevice device, String label,
-                                       SocketFactory factory) {
-        try {
-            Log.d(TAG, "Trying " + label + "...");
-            BluetoothSocket socket = factory.create();
-            socket.connect();
-            Log.i(TAG, "Connected via " + label);
-            return socket;
-        } catch (Exception e) {
-            Log.w(TAG, label + " failed: " + e.getMessage());
-            return null;
-        }
-    }
-
-    @FunctionalInterface
-    private interface SocketFactory {
-        BluetoothSocket create() throws Exception;
+        });
     }
 
     /**
@@ -345,7 +308,6 @@ public class BtConnectionManager {
         if (lastDevice != null) {
             connect(lastDevice);
         } else {
-            // Try to find a BTECH radio in paired devices
             startScan();
         }
     }
@@ -357,7 +319,12 @@ public class BtConnectionManager {
         shouldReconnect.set(false);
         connecting.set(false);
         connected.set(false);
-        cleanup();
+        stopScanInternal();
+        ioHandler.removeCallbacksAndMessages(null);
+        ioHandler.post(() -> {
+            runBeforeDisconnectHooks();
+            closeGattInternal();
+        });
         notifyDisconnected("User disconnected");
     }
 
@@ -370,17 +337,19 @@ public class BtConnectionManager {
         reconnectAttempts = 0;
         connecting.set(false);
         connected.set(false);
-        cleanup();
-        clearProbeSockets();
+        stopScanInternal();
+        ioHandler.post(() -> {
+            runBeforeDisconnectHooks();
+            closeGattInternal();
+        });
         notifyDisconnected("Connection attempt cancelled");
     }
 
     /**
-     * Send raw data through the KISS TNC to the radio.
-     * The data should be an AX.25 frame (without KISS framing — we add that).
+     * Send AX.25 frame over MeshCore channel using chunked Base64 text envelopes.
      */
     public boolean sendKissFrame(byte[] ax25Frame) {
-        if (!connected.get() || outputStream == null) {
+        if (!connected.get()) {
             Log.w(TAG, "Cannot send: not connected");
             return false;
         }
@@ -389,43 +358,43 @@ public class BtConnectionManager {
             return false;
         }
 
-        try {
-            byte[] kissFrame = kissEncoder.encode(ax25Frame);
-            byte[] wireBytes = java.util.Arrays.copyOf(kissFrame, kissFrame.length);
-            java.util.Arrays.fill(kissFrame, (byte) 0);
-            outputStream.write(wireBytes);
-            outputStream.flush();
-            markIoActivity();
-            packetRouter.notifyPacketTransmitted();
-            Log.d(TAG, "Sent KISS frame: " + wireBytes.length + " bytes");
-            return true;
-        } catch (IOException e) {
-            Log.e(TAG, "Send failed: " + e.getMessage());
-            handleConnectionLost();
+        if (ax25Frame == null || ax25Frame.length == 0) {
             return false;
         }
+
+        int msgId = outboundMsgId.getAndIncrement() & 0x7fffffff;
+        int total = (ax25Frame.length + MAX_RAW_AX25_CHUNK - 1) / MAX_RAW_AX25_CHUNK;
+        for (int i = 0; i < total; i++) {
+            int off = i * MAX_RAW_AX25_CHUNK;
+            int len = Math.min(MAX_RAW_AX25_CHUNK, ax25Frame.length - off);
+            byte[] chunk = new byte[len];
+            System.arraycopy(ax25Frame, off, chunk, 0, len);
+            String b64 = Base64.encodeToString(chunk, Base64.NO_WRAP);
+            String payload = ENV_PREFIX + msgId + "|" + (i + 1) + "|" + total + "|" + b64;
+            if (payload.length() > MAX_MESH_MESSAGE_LEN) {
+                Log.w(TAG, "Mesh payload too long, dropping frame");
+                return false;
+            }
+            enqueueCommand(buildSendChannelMessageCommand(getMeshChannelIndex(), payload));
+        }
+        packetRouter.notifyPacketTransmitted();
+        return true;
     }
 
     /**
-     * Send HT Commander control commands over Bluetooth (not over-the-air KISS/AX.25).
-     * Radio Silence does not block these — only {@link #sendKissFrame} RF traffic is inhibited.
+     * Send control bytes as a Base64 envelope over MeshCore transport.
      */
     public boolean sendRawBytes(byte[] data) {
-        if (!connected.get() || outputStream == null) {
+        if (!connected.get() || data == null || data.length == 0) {
             Log.w(TAG, "Cannot send raw bytes: not connected");
             return false;
         }
-        try {
-            outputStream.write(data);
-            outputStream.flush();
-            markIoActivity();
-            Log.d(TAG, "Sent raw bytes: " + data.length + " bytes");
-            return true;
-        } catch (IOException e) {
-            Log.e(TAG, "Raw send failed: " + e.getMessage());
-            handleConnectionLost();
+        String payload = "UVRAW|" + Base64.encodeToString(data, Base64.NO_WRAP);
+        if (payload.length() > MAX_MESH_MESSAGE_LEN) {
             return false;
         }
+        enqueueCommand(buildSendChannelMessageCommand(getMeshChannelIndex(), payload));
+        return true;
     }
 
     /**
@@ -441,68 +410,11 @@ public class BtConnectionManager {
         return radioSilenceEnabled.get();
     }
 
-    /**
-     * Background thread that continuously reads KISS frames from the radio.
-     */
-    private void startReadThread() {
-        readThread = new Thread(() -> {
-            byte[] buffer = new byte[1024];
-            Log.i(TAG, "Read thread started");
-
-            while (connected.get()) {
-                try {
-                    int bytesRead = inputStream.read(buffer);
-                    if (bytesRead > 0) {
-                        markIoActivity();
-                        byte[] data = new byte[bytesRead];
-                        System.arraycopy(buffer, 0, data, 0, bytesRead);
-                        java.util.Arrays.fill(buffer, (byte) 0);
-
-                        boolean consumed = false;
-                        for (RawDataListener listener : rawDataListeners) {
-                            try {
-                                if (listener.onRawBytes(data)) {
-                                    consumed = true;
-                                }
-                            } catch (Exception e) {
-                                Log.w(TAG, "RawDataListener failed: " + e.getMessage());
-                            }
-                        }
-                        if (consumed) {
-                            continue;
-                        }
-
-                        // KissFrameDecoder accumulates bytes and emits
-                        // complete AX.25 frames when FEND delimiters are found
-                        byte[][] frames = kissDecoder.decode(data);
-                        for (byte[] frame : frames) {
-                            Log.d(TAG, "Received AX.25 frame: " + frame.length + " bytes");
-                            packetRouter.routeIncoming(frame);
-                        }
-                    } else if (bytesRead == -1) {
-                        // Stream ended
-                        handleConnectionLost();
-                        break;
-                    }
-                } catch (IOException e) {
-                    if (connected.get()) {
-                        Log.e(TAG, "Read error: " + e.getMessage());
-                        handleConnectionLost();
-                    }
-                    break;
-                }
-            }
-
-            Log.i(TAG, "Read thread stopped");
-        }, "BT-Read");
-
-        readThread.setDaemon(true);
-        readThread.start();
-    }
-
     private void handleConnectionLost() {
         connected.set(false);
-        cleanup();
+        connecting.set(false);
+        clearQueues();
+        ioHandler.post(this::closeGattInternal);
         notifyDisconnected("Connection lost");
 
         if (shouldReconnect.get()) {
@@ -521,42 +433,12 @@ public class BtConnectionManager {
         reconnectAttempts++;
         int delaySec = 5 * reconnectAttempts; // Back off: 5s, 10s, 15s...
         Log.i(TAG, "Scheduling reconnect #" + reconnectAttempts + " in " + delaySec + " seconds...");
-        new Thread(() -> {
-            try {
-                Thread.sleep(delaySec * 1000L);
-                if (shouldReconnect.get() && !connected.get() && !connecting.get()) {
-                    Log.i(TAG, "Attempting reconnect #" + reconnectAttempts + "...");
-                    connect(lastDevice);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        ioHandler.postDelayed(() -> {
+            if (shouldReconnect.get() && !connected.get() && !connecting.get()) {
+                Log.i(TAG, "Attempting reconnect #" + reconnectAttempts + "...");
+                connect(lastDevice);
             }
-        }, "BT-Reconnect").start();
-    }
-
-    private void cleanup() {
-        runBeforeDisconnectHooks();
-        try {
-            if (inputStream != null) inputStream.close();
-        } catch (IOException ignored) {}
-        try {
-            if (outputStream != null) outputStream.close();
-        } catch (IOException ignored) {}
-        try {
-            if (btSocket != null) btSocket.close();
-        } catch (IOException ignored) {}
-
-        inputStream = null;
-        outputStream = null;
-        btSocket = null;
-    }
-
-    private boolean isBtechDevice(String name) {
-        String upper = name.toUpperCase();
-        for (String pattern : BTECH_NAME_PATTERNS) {
-            if (upper.contains(pattern)) return true;
-        }
-        return false;
+        }, delaySec * 1000L);
     }
 
     public boolean isConnected() {
@@ -586,7 +468,7 @@ public class BtConnectionManager {
             String name = lastDevice.getName();
             return name != null ? name : lastDevice.getAddress();
         }
-        return "Radio";
+        return "MeshCore";
     }
 
     // --- Listener management ---
@@ -649,5 +531,302 @@ public class BtConnectionManager {
 
     private void markIoActivity() {
         lastIoActivityMs.set(System.currentTimeMillis());
+    }
+
+    private void stopScanInternal() {
+        if (bleScanner != null && scanCallback != null) {
+            try {
+                bleScanner.stopScan(scanCallback);
+            } catch (Exception ignored) {}
+        }
+        scanCallback = null;
+    }
+
+    private void closeGattInternal() {
+        try {
+            if (gatt != null) {
+                gatt.disconnect();
+                gatt.close();
+            }
+        } catch (Exception ignored) {}
+        gatt = null;
+        rxCharacteristic = null;
+        txCharacteristic = null;
+    }
+
+    private void clearQueues() {
+        synchronized (writeQueue) {
+            writeQueue.clear();
+            writeInFlight = false;
+        }
+        chunkBuffers.clear();
+    }
+
+    private void enqueueCommand(byte[] cmd) {
+        if (cmd == null || cmd.length == 0) return;
+        synchronized (writeQueue) {
+            writeQueue.addLast(cmd);
+            if (writeInFlight) {
+                return;
+            }
+            writeInFlight = true;
+        }
+        ioHandler.post(this::drainWriteQueue);
+    }
+
+    private void drainWriteQueue() {
+        while (connected.get()) {
+            byte[] next;
+            synchronized (writeQueue) {
+                next = writeQueue.peekFirst();
+                if (next == null) {
+                    writeInFlight = false;
+                    return;
+                }
+            }
+            if (gatt == null || rxCharacteristic == null) {
+                synchronized (writeQueue) {
+                    writeInFlight = false;
+                }
+                return;
+            }
+            rxCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+            rxCharacteristic.setValue(next);
+            boolean started = gatt.writeCharacteristic(rxCharacteristic);
+            if (!started) {
+                synchronized (writeQueue) {
+                    writeQueue.pollFirst();
+                }
+                continue;
+            }
+            return; // wait for callback
+        }
+        synchronized (writeQueue) {
+            writeInFlight = false;
+        }
+    }
+
+    private byte[] buildAppStartCommand() {
+        byte[] app = "atak-uvpro".getBytes(StandardCharsets.UTF_8);
+        byte[] out = new byte[8 + app.length];
+        out[0] = CMD_APP_START;
+        System.arraycopy(app, 0, out, 8, app.length);
+        return out;
+    }
+
+    private byte[] buildDeviceQueryCommand() {
+        return new byte[]{CMD_DEVICE_QUERY, CMD_DEVICE_QUERY_ARG};
+    }
+
+    private byte[] buildGetNextMessageCommand() {
+        return new byte[]{CMD_GET_NEXT_MSG};
+    }
+
+    private byte[] buildSendChannelMessageCommand(int channel, String text) {
+        byte[] msg = text.getBytes(StandardCharsets.UTF_8);
+        ByteBuffer buf = ByteBuffer.allocate(7 + msg.length);
+        buf.order(ByteOrder.LITTLE_ENDIAN);
+        buf.put(CMD_SEND_CHANNEL_MSG);
+        buf.put((byte) 0x00);
+        buf.put((byte) Math.max(0, Math.min(7, channel)));
+        buf.putInt((int) (System.currentTimeMillis() / 1000L));
+        buf.put(msg);
+        return buf.array();
+    }
+
+    private int getMeshChannelIndex() {
+        try {
+            SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+            String val = prefs.getString("meshatak_mesh_channel", "0");
+            int i = Integer.parseInt(val);
+            if (i < 0) return 0;
+            if (i > 7) return 7;
+            return i;
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    private void handleCompanionPacket(byte[] pkt) {
+        if (pkt == null || pkt.length == 0) return;
+        markIoActivity();
+        byte t = pkt[0];
+        if (t == PUSH_MESSAGES_WAITING) {
+            enqueueCommand(buildGetNextMessageCommand());
+            return;
+        }
+        String message = null;
+        if (t == RESP_CHANNEL_MSG) {
+            message = extractChannelText(pkt, false);
+        } else if (t == RESP_CHANNEL_MSG_V3) {
+            message = extractChannelText(pkt, true);
+        } else if (t == RESP_CONTACT_MSG) {
+            message = extractContactText(pkt, false);
+        } else if (t == RESP_CONTACT_MSG_V3) {
+            message = extractContactText(pkt, true);
+        }
+        if (message != null) {
+            handleMeshMessage(message);
+        }
+    }
+
+    private String extractChannelText(byte[] pkt, boolean v3) {
+        int off = v3 ? 11 : 8;
+        if (pkt.length < off) return null;
+        return new String(pkt, off, pkt.length - off, StandardCharsets.UTF_8);
+    }
+
+    private String extractContactText(byte[] pkt, boolean v3) {
+        int txtTypeIndex = v3 ? 11 : 8;
+        int off = v3 ? 16 : 13;
+        if (pkt.length < off) return null;
+        byte txtType = pkt[txtTypeIndex];
+        if (txtType == 2) off += 4;
+        if (pkt.length < off) return null;
+        return new String(pkt, off, pkt.length - off, StandardCharsets.UTF_8);
+    }
+
+    private void handleMeshMessage(String msg) {
+        if (msg == null || !msg.startsWith(ENV_PREFIX)) return;
+        String[] parts = msg.split("\\|", 5);
+        if (parts.length != 5) return;
+        try {
+            int msgId = Integer.parseInt(parts[1]);
+            int seq = Integer.parseInt(parts[2]);
+            int total = Integer.parseInt(parts[3]);
+            byte[] chunk = Base64.decode(parts[4], Base64.DEFAULT);
+            if (chunk == null || total < 1 || seq < 1 || seq > total) return;
+
+            ChunkAccumulator acc = chunkBuffers.get(msgId);
+            if (acc == null || acc.total != total) {
+                acc = new ChunkAccumulator(total);
+                chunkBuffers.put(msgId, acc);
+            }
+            acc.parts.put(seq, chunk);
+            acc.lastUpdateMs = System.currentTimeMillis();
+            if (acc.parts.size() < total) return;
+
+            int len = 0;
+            for (int i = 1; i <= total; i++) {
+                byte[] p = acc.parts.get(i);
+                if (p == null) return;
+                len += p.length;
+            }
+            byte[] ax25 = new byte[len];
+            int off = 0;
+            for (int i = 1; i <= total; i++) {
+                byte[] p = acc.parts.get(i);
+                System.arraycopy(p, 0, ax25, off, p.length);
+                off += p.length;
+            }
+            chunkBuffers.remove(msgId);
+
+            for (RawDataListener listener : rawDataListeners) {
+                try {
+                    if (listener.onRawBytes(ax25)) {
+                        return;
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "RawDataListener failed: " + e.getMessage());
+                }
+            }
+            packetRouter.routeIncoming(ax25);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
+        @Override
+        public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                gatt = g;
+                reconnectAttempts = 0;
+                connected.set(false);
+                g.requestMtu(512);
+                g.discoverServices();
+                return;
+            }
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                handleConnectionLost();
+            }
+        }
+
+        @Override
+        public void onServicesDiscovered(BluetoothGatt g, int status) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                notifyError("BLE service discovery failed");
+                handleConnectionLost();
+                return;
+            }
+            BluetoothGattService svc = g.getService(UUID_UART_SERVICE);
+            if (svc == null) {
+                notifyError("MeshCore UART service not found");
+                handleConnectionLost();
+                return;
+            }
+            rxCharacteristic = svc.getCharacteristic(UUID_UART_RX);
+            txCharacteristic = svc.getCharacteristic(UUID_UART_TX);
+            if (rxCharacteristic == null || txCharacteristic == null) {
+                notifyError("MeshCore RX/TX characteristic missing");
+                handleConnectionLost();
+                return;
+            }
+            g.setCharacteristicNotification(txCharacteristic, true);
+            BluetoothGattDescriptor ccc = txCharacteristic.getDescriptor(UUID_CCC);
+            if (ccc == null) {
+                notifyError("MeshCore CCC descriptor missing");
+                handleConnectionLost();
+                return;
+            }
+            ccc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+            g.writeDescriptor(ccc);
+        }
+
+        @Override
+        public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor descriptor, int status) {
+            if (!UUID_CCC.equals(descriptor.getUuid())) return;
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                notifyError("BLE notification enable failed");
+                handleConnectionLost();
+                return;
+            }
+            connecting.set(false);
+            connected.set(true);
+            markIoActivity();
+            notifyConnected(lastDevice);
+            enqueueCommand(buildAppStartCommand());
+            enqueueCommand(buildDeviceQueryCommand());
+            enqueueCommand(buildGetNextMessageCommand());
+        }
+
+        @Override
+        public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic characteristic) {
+            if (characteristic == null || !UUID_UART_TX.equals(characteristic.getUuid())) return;
+            handleCompanionPacket(characteristic.getValue());
+        }
+
+        @Override
+        public void onCharacteristicWrite(BluetoothGatt g, BluetoothGattCharacteristic characteristic, int status) {
+            synchronized (writeQueue) {
+                writeQueue.pollFirst();
+            }
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "BLE write failed: " + status);
+            } else {
+                markIoActivity();
+            }
+            drainWriteQueue();
+        }
+    };
+
+    private static final class ChunkAccumulator {
+        final int total;
+        final Map<Integer, byte[]> parts = new ConcurrentHashMap<>();
+        long lastUpdateMs;
+
+        ChunkAccumulator(int total) {
+            this.total = total;
+            this.lastUpdateMs = System.currentTimeMillis();
+        }
     }
 }
