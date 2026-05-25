@@ -352,8 +352,8 @@ try {
         // 8. Register settings with ATAK Tools Preferences
         ToolsPreferenceFragment.register(
                 new ToolsPreferenceFragment.ToolPreference(
-                        "UV-PRO Settings",
-                        "UV-PRO radio bridge configuration",
+                        "MeshCore Settings",
+                        "MeshCore radio bridge configuration",
                         SettingsFragment.TOOL_SETTINGS_KEY,
                         UVProTool.toolbarIcon(context),
                         new SettingsFragment(context)));

@@ -15,7 +15,7 @@
             android:id="@+id/header_title"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="UV-PRO"
+            android:text="MeshCore"
             android:textColor="#FFFFFFFF"
             android:textSize="18sp"
             android:textStyle="bold"
@@ -860,7 +860,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Plugin settings: tap the button below. Full ATAK list: Settings → Tool Preferences → UV-PRO Settings."
+                android:text="Plugin settings: tap the button below. Full ATAK list: Settings → Tool Preferences → MeshCore Settings."
                 android:textColor="#FF888888"
                 android:textSize="11sp"
                 android:paddingBottom="6dp" />

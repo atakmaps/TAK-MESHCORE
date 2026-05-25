@@ -66,12 +66,17 @@ public class BtConnectionManager {
     private static final byte CMD_GET_NEXT_MSG = 0x0A;
     private static final byte CMD_DEVICE_QUERY = 0x16;
     private static final byte CMD_DEVICE_QUERY_ARG = 0x03;
+    private static final byte CMD_GET_CHANNEL = 0x1F;
 
     // Companion notifications
     private static final byte RESP_CHANNEL_MSG = 0x08;
     private static final byte RESP_CONTACT_MSG = 0x07;
+    private static final byte RESP_SELF_INFO = 0x05;
+    private static final byte RESP_DEVICE_INFO = 0x0D;
     private static final byte RESP_CHANNEL_MSG_V3 = 0x11;
     private static final byte RESP_CONTACT_MSG_V3 = 0x10;
+    private static final byte RESP_CHANNEL_INFO = 0x12;
+    private static final byte RESP_NO_MORE_MSGS = 0x0A;
     private static final byte PUSH_MESSAGES_WAITING = (byte) 0x83;
 
     private static final int MAX_MESH_MESSAGE_LEN = 130; // leave room below 133 chars
@@ -86,6 +91,7 @@ public class BtConnectionManager {
     private final AtomicBoolean radioSilenceEnabled = new AtomicBoolean(false);
     private final AtomicLong lastIoActivityMs = new AtomicLong(0L);
     private final AtomicInteger outboundMsgId = new AtomicInteger(1);
+    private final AtomicInteger activeMeshChannel = new AtomicInteger(0);
 
     private final CopyOnWriteArrayList<ConnectionListener> listeners =
             new CopyOnWriteArrayList<>();
@@ -110,6 +116,16 @@ public class BtConnectionManager {
 
     private final HandlerThread ioThread = new HandlerThread("UVPro-MeshBLE-IO");
     private Handler ioHandler;
+    private final Runnable periodicMessagePoll = new Runnable() {
+        @Override
+        public void run() {
+            if (!connected.get()) {
+                return;
+            }
+            enqueueCommand(buildGetNextMessageCommand());
+            ioHandler.postDelayed(this, 2500L);
+        }
+    };
 
     public interface ConnectionListener {
         void onConnected(BluetoothDevice device);
@@ -320,6 +336,7 @@ public class BtConnectionManager {
         connecting.set(false);
         connected.set(false);
         stopScanInternal();
+        ioHandler.removeCallbacks(periodicMessagePoll);
         ioHandler.removeCallbacksAndMessages(null);
         ioHandler.post(() -> {
             runBeforeDisconnectHooks();
@@ -338,6 +355,7 @@ public class BtConnectionManager {
         connecting.set(false);
         connected.set(false);
         stopScanInternal();
+        ioHandler.removeCallbacks(periodicMessagePoll);
         ioHandler.post(() -> {
             runBeforeDisconnectHooks();
             closeGattInternal();
@@ -364,6 +382,7 @@ public class BtConnectionManager {
 
         int msgId = outboundMsgId.getAndIncrement() & 0x7fffffff;
         int total = (ax25Frame.length + MAX_RAW_AX25_CHUNK - 1) / MAX_RAW_AX25_CHUNK;
+        Log.d(TAG, "sendKissFrame over mesh bytes=" + ax25Frame.length + " chunks=" + total);
         for (int i = 0; i < total; i++) {
             int off = i * MAX_RAW_AX25_CHUNK;
             int len = Math.min(MAX_RAW_AX25_CHUNK, ax25Frame.length - off);
@@ -375,6 +394,7 @@ public class BtConnectionManager {
                 Log.w(TAG, "Mesh payload too long, dropping frame");
                 return false;
             }
+            Log.d(TAG, "chunk " + (i + 1) + "/" + total + " textLen=" + payload.length());
             enqueueCommand(buildSendChannelMessageCommand(getMeshChannelIndex(), payload));
         }
         packetRouter.notifyPacketTransmitted();
@@ -413,6 +433,7 @@ public class BtConnectionManager {
     private void handleConnectionLost() {
         connected.set(false);
         connecting.set(false);
+        ioHandler.removeCallbacks(periodicMessagePoll);
         clearQueues();
         ioHandler.post(this::closeGattInternal);
         notifyDisconnected("Connection lost");
@@ -564,8 +585,11 @@ public class BtConnectionManager {
 
     private void enqueueCommand(byte[] cmd) {
         if (cmd == null || cmd.length == 0) return;
+        int type = cmd[0] & 0xFF;
         synchronized (writeQueue) {
             writeQueue.addLast(cmd);
+            Log.d(TAG, "Queue cmd type=0x" + Integer.toHexString(type)
+                    + " len=" + cmd.length + " q=" + writeQueue.size());
             if (writeInFlight) {
                 return;
             }
@@ -594,10 +618,13 @@ public class BtConnectionManager {
             rxCharacteristic.setValue(next);
             boolean started = gatt.writeCharacteristic(rxCharacteristic);
             if (!started) {
+                Log.w(TAG, "writeCharacteristic returned false; retrying cmd type=0x"
+                        + Integer.toHexString(next[0] & 0xFF));
                 synchronized (writeQueue) {
-                    writeQueue.pollFirst();
+                    writeInFlight = false;
                 }
-                continue;
+                ioHandler.postDelayed(this::drainWriteQueue, 150L);
+                return;
             }
             return; // wait for callback
         }
@@ -622,6 +649,10 @@ public class BtConnectionManager {
         return new byte[]{CMD_GET_NEXT_MSG};
     }
 
+    private byte[] buildGetChannelInfoCommand(int idx) {
+        return new byte[]{CMD_GET_CHANNEL, (byte) (idx & 0xFF)};
+    }
+
     private byte[] buildSendChannelMessageCommand(int channel, String text) {
         byte[] msg = text.getBytes(StandardCharsets.UTF_8);
         ByteBuffer buf = ByteBuffer.allocate(7 + msg.length);
@@ -631,10 +662,15 @@ public class BtConnectionManager {
         buf.put((byte) Math.max(0, Math.min(7, channel)));
         buf.putInt((int) (System.currentTimeMillis() / 1000L));
         buf.put(msg);
+        Log.d(TAG, "TX channel msg channel=" + channel + " textLen=" + msg.length);
         return buf.array();
     }
 
     private int getMeshChannelIndex() {
+        int discovered = activeMeshChannel.get();
+        if (discovered >= 0 && discovered <= 7) {
+            return discovered;
+        }
         try {
             SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
             String val = prefs.getString("meshatak_mesh_channel", "0");
@@ -650,9 +686,26 @@ public class BtConnectionManager {
     private void handleCompanionPacket(byte[] pkt) {
         if (pkt == null || pkt.length == 0) return;
         markIoActivity();
+        pruneStaleChunks();
         byte t = pkt[0];
+        Log.d(TAG, "RX pkt type=0x" + Integer.toHexString(t & 0xFF) + " len=" + pkt.length);
         if (t == PUSH_MESSAGES_WAITING) {
             enqueueCommand(buildGetNextMessageCommand());
+            return;
+        }
+        if (t == RESP_NO_MORE_MSGS) {
+            return;
+        }
+        if (t == RESP_CHANNEL_INFO) {
+            applyChannelInfo(pkt);
+            return;
+        }
+        if (t == RESP_SELF_INFO) {
+            logSelfInfo(pkt);
+            return;
+        }
+        if (t == RESP_DEVICE_INFO) {
+            logDeviceInfo(pkt);
             return;
         }
         String message = null;
@@ -666,8 +719,127 @@ public class BtConnectionManager {
             message = extractContactText(pkt, true);
         }
         if (message != null) {
-            handleMeshMessage(message);
+            String routed = extractRoutableEnvelope(message);
+            if (routed != null) {
+                Log.d(TAG, "RX mesh env len=" + routed.length());
+                handleMeshMessage(routed);
+            } else {
+                Log.d(TAG, "RX non-env text len=" + message.length());
+            }
+            // Drain firmware queue quickly while messages are available.
+            enqueueCommand(buildGetNextMessageCommand());
         }
+    }
+
+    private String extractRoutableEnvelope(String text) {
+        if (text == null) {
+            return null;
+        }
+        int p = text.indexOf(ENV_PREFIX);
+        if (p < 0) {
+            return null;
+        }
+        return text.substring(p).trim();
+    }
+
+    private void applyChannelInfo(byte[] pkt) {
+        if (pkt == null || pkt.length < 50) {
+            return;
+        }
+        int idx = pkt[1] & 0xFF;
+        if (idx < 0 || idx > 7) {
+            return;
+        }
+        // bytes 2..33 are null-padded UTF-8 channel name
+        String raw = new String(pkt, 2, 32, StandardCharsets.UTF_8);
+        int nul = raw.indexOf('\0');
+        String name = (nul >= 0 ? raw.substring(0, nul) : raw).trim();
+        String secretFp = channelSecretFingerprint(pkt, 34, 16);
+        Log.d(TAG, "Channel slot " + idx + " name='" + name + "' secretFp=" + secretFp);
+        if (!name.isEmpty()) {
+            int old = activeMeshChannel.getAndSet(idx);
+            if (old != idx) {
+                Log.i(TAG, "Auto-selected MeshCore channel " + idx + " (" + name + ")");
+            }
+        }
+    }
+
+    private void logSelfInfo(byte[] pkt) {
+        // Layout from companion firmware:
+        // [0]=code [1]=advType [2]=txPower [3]=maxTx [4..35]=pubkey
+        // [36..39]=latE6 [40..43]=lonE6 [44]=multiAck [45]=advertLoc [46]=telem
+        // [47]=manualAdd [48..51]=freqHz [52..55]=bwHz [56]=sf [57]=cr [58..]=name
+        try {
+            if (pkt.length < 58) {
+                Log.d(TAG, "SELF info short len=" + pkt.length);
+                return;
+            }
+            ByteBuffer bb = ByteBuffer.wrap(pkt).order(ByteOrder.LITTLE_ENDIAN);
+            int latE6 = bb.getInt(36);
+            int lonE6 = bb.getInt(40);
+            long freqHz = ((long) bb.getInt(48)) & 0xFFFFFFFFL;
+            long bwHz = ((long) bb.getInt(52)) & 0xFFFFFFFFL;
+            int sf = pkt[56] & 0xFF;
+            int cr = pkt[57] & 0xFF;
+            String node = "";
+            if (pkt.length > 58) {
+                node = new String(pkt, 58, pkt.length - 58, StandardCharsets.UTF_8).trim();
+            }
+            double lat = latE6 / 1_000_000.0;
+            double lon = lonE6 / 1_000_000.0;
+            Log.i(TAG, "Node self-info name='" + node + "' freqHz=" + freqHz
+                    + " bwHz=" + bwHz + " sf=" + sf + " cr=" + cr
+                    + " lat=" + lat + " lon=" + lon);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed parsing self-info: " + e.getMessage());
+        }
+    }
+
+    private void logDeviceInfo(byte[] pkt) {
+        // Mostly build/manufacturer metadata; useful for confirming both sides are same firmware branch.
+        try {
+            if (pkt.length < 4) {
+                return;
+            }
+            int fwCode = pkt[1] & 0xFF;
+            int maxContactsHalf = pkt[2] & 0xFF;
+            int maxChannels = pkt[3] & 0xFF;
+            String manufacturer = "";
+            String version = "";
+            if (pkt.length >= 77) {
+                manufacturer = decodeCString(pkt, 20, 40);
+                version = decodeCString(pkt, 60, 20);
+            }
+            Log.i(TAG, "Device info fwCode=" + fwCode + " maxChannels=" + maxChannels
+                    + " maxContacts=" + (maxContactsHalf * 2)
+                    + " mfg='" + manufacturer + "' ver='" + version + "'");
+        } catch (Exception e) {
+            Log.w(TAG, "Failed parsing device-info: " + e.getMessage());
+        }
+    }
+
+    private String decodeCString(byte[] src, int off, int maxLen) {
+        if (src == null || off < 0 || maxLen <= 0 || src.length <= off) {
+            return "";
+        }
+        int end = Math.min(src.length, off + maxLen);
+        int n = off;
+        while (n < end && src[n] != 0) n++;
+        return new String(src, off, n - off, StandardCharsets.UTF_8).trim();
+    }
+
+    private String channelSecretFingerprint(byte[] frame, int off, int len) {
+        if (frame == null || off < 0 || len <= 0 || frame.length < off + len) {
+            return "invalid";
+        }
+        int end = Math.min(off + len, frame.length);
+        StringBuilder sb = new StringBuilder(len * 2);
+        for (int i = off; i < end; i++) {
+            int b = frame[i] & 0xFF;
+            if (b < 0x10) sb.append('0');
+            sb.append(Integer.toHexString(b));
+        }
+        return sb.toString();
     }
 
     private String extractChannelText(byte[] pkt, boolean v3) {
@@ -704,6 +876,8 @@ public class BtConnectionManager {
             }
             acc.parts.put(seq, chunk);
             acc.lastUpdateMs = System.currentTimeMillis();
+            Log.d(TAG, "RX chunk msgId=" + msgId + " seq=" + seq + "/" + total
+                    + " chunkBytes=" + chunk.length + " have=" + acc.parts.size());
             if (acc.parts.size() < total) return;
 
             int len = 0;
@@ -720,16 +894,19 @@ public class BtConnectionManager {
                 off += p.length;
             }
             chunkBuffers.remove(msgId);
+            Log.d(TAG, "Reassembled msgId=" + msgId + " bytes=" + ax25.length);
 
             for (RawDataListener listener : rawDataListeners) {
                 try {
                     if (listener.onRawBytes(ax25)) {
+                        Log.d(TAG, "Raw listener consumed msgId=" + msgId);
                         return;
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "RawDataListener failed: " + e.getMessage());
                 }
             }
+            Log.d(TAG, "Routing reassembled AX.25 bytes=" + ax25.length);
             packetRouter.routeIncoming(ax25);
         } catch (Exception ignored) {
         }
@@ -738,6 +915,7 @@ public class BtConnectionManager {
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
         @Override
         public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
+            Log.i(TAG, "onConnectionStateChange status=" + status + " newState=" + newState);
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 gatt = g;
                 reconnectAttempts = 0;
@@ -753,6 +931,7 @@ public class BtConnectionManager {
 
         @Override
         public void onServicesDiscovered(BluetoothGatt g, int status) {
+            Log.i(TAG, "onServicesDiscovered status=" + status);
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 notifyError("BLE service discovery failed");
                 handleConnectionLost();
@@ -785,6 +964,7 @@ public class BtConnectionManager {
         @Override
         public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor descriptor, int status) {
             if (!UUID_CCC.equals(descriptor.getUuid())) return;
+            Log.i(TAG, "onDescriptorWrite CCC status=" + status);
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 notifyError("BLE notification enable failed");
                 handleConnectionLost();
@@ -796,7 +976,12 @@ public class BtConnectionManager {
             notifyConnected(lastDevice);
             enqueueCommand(buildAppStartCommand());
             enqueueCommand(buildDeviceQueryCommand());
+            for (int i = 0; i < 8; i++) {
+                enqueueCommand(buildGetChannelInfoCommand(i));
+            }
             enqueueCommand(buildGetNextMessageCommand());
+            ioHandler.removeCallbacks(periodicMessagePoll);
+            ioHandler.postDelayed(periodicMessagePoll, 2500L);
         }
 
         @Override
@@ -807,12 +992,16 @@ public class BtConnectionManager {
 
         @Override
         public void onCharacteristicWrite(BluetoothGatt g, BluetoothGattCharacteristic characteristic, int status) {
+            byte[] sent = characteristic != null ? characteristic.getValue() : null;
+            int type = (sent != null && sent.length > 0) ? (sent[0] & 0xFF) : -1;
             synchronized (writeQueue) {
                 writeQueue.pollFirst();
             }
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                Log.w(TAG, "BLE write failed: " + status);
+                Log.w(TAG, "BLE write failed: status=" + status + " cmdType=0x"
+                        + Integer.toHexString(type));
             } else {
+                Log.d(TAG, "BLE write ok cmdType=0x" + Integer.toHexString(type));
                 markIoActivity();
             }
             drainWriteQueue();
@@ -827,6 +1016,17 @@ public class BtConnectionManager {
         ChunkAccumulator(int total) {
             this.total = total;
             this.lastUpdateMs = System.currentTimeMillis();
+        }
+    }
+
+    private void pruneStaleChunks() {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<Integer, ChunkAccumulator> e : chunkBuffers.entrySet()) {
+            ChunkAccumulator acc = e.getValue();
+            if (acc == null) continue;
+            if (now - acc.lastUpdateMs > 120_000L) {
+                chunkBuffers.remove(e.getKey());
+            }
         }
     }
 }

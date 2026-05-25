@@ -332,7 +332,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         updateSelectedRepeaterUi();
         refreshChannelGridFullAsync();
         refreshLogView();
-        appendLog("UV-PRO ready");
+        appendLog("MeshCore ready");
         return rootView;
     }
 
@@ -2613,7 +2613,7 @@ public class UVProDropDownReceiver extends DropDownReceiver
         scrollView.addView(layout);
 
         new AlertDialog.Builder(ctx)
-                .setTitle("UV-PRO Settings")
+                .setTitle("MeshCore Settings")
                 .setView(scrollView)
                 .setPositiveButton("Save", (dialog, which) -> {
                     SharedPreferences.Editor editor = prefs.edit();

@@ -113,7 +113,7 @@ android {
 
     sourceSets {
         main {
-            setProperty("archivesBaseName", "ATAK-Plugin-UVPro-" + PLUGIN_VERSION + "-" + pluginVcsLabel() + "-" + ATAK_VERSION)
+            setProperty("archivesBaseName", "ATAK-Plugin-Meshcore-" + PLUGIN_VERSION + "-" + pluginVcsLabel() + "-" + ATAK_VERSION)
             // Derive a deterministic versionCode from PLUGIN_VERSION (e.g. "1.8.0" → 10800).
             // This ensures the auto-update server can compare versions correctly regardless of
             // whether the build has a git history (TPC builds do not).
@@ -127,6 +127,7 @@ android {
     }
 
     defaultConfig {
+        applicationId "com.atakmaps.meshcore.plugin"
         minSdkVersion 21
         targetSdkVersion 33
         // TPP (and similar CI) only has fixed NDK revisions installed — do not declare a version
