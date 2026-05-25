@@ -4,7 +4,7 @@ A free, open-source ATAK plugin focused on MeshCore BLE companion transport for 
 
 ## 1.1 MeshCore-only Cutover (2026-05-25)
 
-Version `1.1` removes UV-PRO-specific UI workflows from the plugin panel and ships MeshCore-only connection behavior:
+Version `1.1.0` removes UV-PRO-specific UI workflows from the plugin panel and ships MeshCore-only connection behavior:
 
 - MeshCore scan/connect/disconnect only (no UV radio control panel buttons).
 - Dedicated Mesh favorite direct-connect behavior in the main panel.
@@ -137,7 +137,7 @@ If you just want to install the plugin without building it:
 1. Download the latest APK from the [Releases](../../releases) page.
 2. Transfer it to your Android device.
 3. Install with: `adb install -r ATAK-Plugin-Meshcore-*.apk`
-4. Open ATAK → Menu → Tools → **UV-PRO**.
+4. Open ATAK → Menu → Tools → **MeshCore**.
 
 APK filenames look like `ATAK-Plugin-Meshcore-*-5.5.1-civ-release.apk` (or `civ-debug` for debug builds).
 
@@ -162,7 +162,7 @@ After reinstalling, open ATAK → Menu → Tools → **UV-PRO** and reconnect yo
 ## GitHub releases and signing
 
 - **Third-party (TPC) signing:** The APK that is fully aligned with **stock ATAK-CIV** and the usual install rules is the one built and signed on the **TAK Product Center third-party pipeline** (takrepo). It may show the standard indicator that the plugin was signed with the third-party service. No extra code is required in this repo for that — trust comes from the **pipeline signature**, not a flag in Java.
-- **GitHub Releases:** Each [release](https://github.com/atakmaps/UV-PRO/releases) can attach the **same civ-release APK** produced for that version (ideally the TPC output). You can also build `assembleCivRelease` yourself (see below); for **public distribution**, prefer the **TPC-signed** binary when you have it.
+- **GitHub Releases:** Each [release](https://github.com/atakmaps/TAK-MESHCORE/releases) can attach the TPC-signed civ-release APK for that version. You can also build `assembleCivRelease` locally (see below).
 - **Local `assembleCivRelease`:** ProGuard/R8 needs an **ATAK apply-mapping** file. This repo sets `atak.proguard.mapping` automatically: if you place the real `proguard-civ-release-mapping.txt` from a TPC/takrepo build in `app/libs/atak-civ/`, that is used; otherwise a **placeholder empty mapping** (`tools/empty-atak-applymapping.txt`) is used so the build completes. A build with the placeholder is fine for **CI smoke tests**; for **field use**, prefer a release built with the **official ATAK mapping** and/or the **TPC APK**.
 - The `android` block in `app/build.gradle` sets `bundle { storeArchive { enable = false } }` as required by **atak-takdev** `takdevLint` for release signing.
 
@@ -205,8 +205,8 @@ Open `gradle.properties` and set `org.gradle.java.home` to your JDK 17 if needed
 
 ```bash
 # Clone the repo
-git clone https://github.com/atakmaps/UV-PRO.git
-cd UV-PRO
+git clone https://github.com/atakmaps/TAK-MESHCORE.git
+cd TAK-MESHCORE
 
 # Linux/macOS
 ./gradlew assembleCivDebug
@@ -217,16 +217,16 @@ gradlew.bat assembleCivDebug
 
 The APK will be at:
 ```
-app/build/outputs/apk/civ/debug/ATAK-Plugin-UVPro-*.apk
+app/build/outputs/apk/civ/debug/ATAK-Plugin-Meshcore-*.apk
 ```
 
 ### 4. Install
 
 ```bash
-adb install -r app/build/outputs/apk/civ/debug/ATAK-Plugin-UVPro-*.apk
+adb install -r app/build/outputs/apk/civ/debug/ATAK-Plugin-Meshcore-*.apk
 ```
 
-Then open ATAK → Menu → Tools → **UV-PRO**.
+Then open ATAK → Menu → Tools → **MeshCore**.
 
 ### 5. Release (minified) build — `assembleCivRelease`
 
@@ -240,7 +240,7 @@ For a **R8/ProGuard** release build (smaller, obfuscated) matching the TPC `civR
 Output:
 
 ```
-app/build/outputs/apk/civ/release/ATAK-Plugin-UVPro-*-civ-release.apk
+app/build/outputs/apk/civ/release/ATAK-Plugin-Meshcore-*-civ-release.apk
 ```
 
 Use the **official ProGuard apply-mapping** from the ATAK/takrepo pipeline when you need a **production-equivalent** binary (see [GitHub releases and signing](#github-releases-and-signing) above).
@@ -306,37 +306,25 @@ When enabled, all outgoing packets are encrypted with AES-256-CBC using a key de
 ## Project Structure
 
 ```
-app/src/main/java/com/uvpro/plugin/
-├── UVProLifecycle.java       # Plugin entry point
-├── UVProTool.java            # Tool registration
-├── UVProMapComponent.java    # Core component — wires everything together
-├── UVProDropDownReceiver.java # UI panel
+app/src/main/java/com/atakmaps/meshcore/plugin/
+├── MeshCoreLifecycle.java        # Plugin entry point (plugin.xml)
+├── MeshCoreTool.java             # Tool registration
+├── MeshCoreMapComponent.java     # Core component — wires transport + UI
+├── MeshCoreDropDownReceiver.java # Mesh panel
+├── MeshCoreContactHandler.java   # ATAK contact connector
 ├── bluetooth/
-│   └── BtConnectionManager.java  # Bluetooth SPP + KISS TNC connection
-├── kiss/
-│   ├── KissConstants.java        # KISS protocol constants
-│   ├── KissFrameEncoder.java     # Encode AX.25 → KISS frames
-│   └── KissFrameDecoder.java     # Decode KISS frames → AX.25
-├── ax25/
-│   ├── Ax25Frame.java            # AX.25 frame builder/parser
-│   └── AprsParser.java           # APRS position parser
+│   └── BtConnectionManager.java  # MeshCore BLE (NUS UART)
 ├── protocol/
-│   ├── UVProPacket.java          # Binary packet format
-│   ├── PacketRouter.java         # Routes incoming packets to subsystems
-│   ├── PacketFragmenter.java     # Fragment/reassemble large packets
-│   ├── NetSlotConfig.java        # Ping-reply slots + net distribution
-│   ├── PingReplyScheduler.java   # Slotted GPS ping replies
-│   └── UVProRadioServices.java   # Live radio TX for administration
+│   ├── MeshCorePacket.java       # OPENRL binary packet format
+│   └── PacketRouter.java         # Routes incoming packets
 ├── cot/
-│   ├── CotBridge.java            # CoT ↔ radio relay
-│   └── CotBuilder.java           # Build CoT events from radio data
+│   ├── CotBridge.java            # CoT ↔ MeshCore relay
+│   └── CotBuilder.java
 ├── chat/
-│   └── ChatBridge.java           # GeoChat ↔ radio relay
-├── crypto/
-│   └── EncryptionManager.java    # AES-256-GCM + PBKDF2 (envelope v3)
+│   └── ChatBridge.java           # GeoChat ↔ MeshCore relay
 ├── contacts/
-│   ├── ContactTracker.java       # Track radios in range
-│   └── RadioContact.java         # Contact data model
+│   ├── ContactTracker.java
+│   └── RadioContact.java
 ├── voice/
 │   └── (legacy PTT scaffolding; not shipped as a feature in this fork)
 └── ui/
