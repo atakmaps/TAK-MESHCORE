@@ -1,6 +1,57 @@
-# UV-PRO — Open-Source BTECH Radio ↔ ATAK Bridge Plugin
+# MeshCore ATAK Plugin
 
-A free, open-source ATAK plugin that connects UV-PRO radios to the Android Team Awareness Kit (ATAK) over Bluetooth. Team members with radios can share positions, chat, and situational awareness data entirely off-grid — no cell service or internet required.
+A free, open-source ATAK plugin focused on MeshCore BLE companion transport for off-grid ATAK awareness.
+
+## 1.1 MeshCore-only Cutover (2026-05-25)
+
+Version `1.1` removes UV-PRO-specific UI workflows from the plugin panel and ships MeshCore-only connection behavior:
+
+- MeshCore scan/connect/disconnect only (no UV radio control panel buttons).
+- Dedicated Mesh favorite direct-connect behavior in the main panel.
+- Startup auto-connect to last selected Mesh favorite target.
+- Simplified Mesh-focused dropdown and actions surface.
+
+Legacy UV/APRS architecture notes below are retained as historical reference while the remaining backend cleanup is completed.
+
+## MeshCore Migration Status (2026-05-25)
+
+Current MeshCore integration status:
+
+- BLE companion transport is connected and stable (NUS UART service, command queue, polling).
+- Mesh channel discovery is working (`CMD_GET_CHANNEL` -> slot/name/secret visibility).
+- ATAK beacon/contact flow over MeshCore is now proven working between two phones after parser fixes.
+- End-to-end message ingress is confirmed (`RESP_CHANNEL_MSG_V3` receive path).
+- RF mismatch diagnosis is now built in via parsed self-info (`freq`, `bw`, `sf`, `cr`) from `RESP_SELF_INFO`.
+
+Key troubleshooting lessons validated in field testing:
+
+- Matching channel name is not enough; slot secret must match.
+- Matching slot secret is still not enough; RF params must also match (`freq`, `bw`, `sf`, `cr`).
+- Inbound MeshCore text may include sender prefix before payload; parser must extract `UVAX1|...` from anywhere in message body, not just at string start.
+- If both nodes show connected but only `RESP_NO_MORE_MSGS (0x0A)`, verify RF profile parity before debugging ATAK contact logic.
+
+## What Is Working Right Now
+
+- Two-node field test is successful for discovery/beacon contact visibility over MeshCore.
+- ATAK-generated beacons are transmitted over MeshCore channel messages and received by peer plugin instances.
+- Plugin can now prove operational state quickly through logs:
+  - channel slot + secret fingerprint (`CMD_GET_CHANNEL` / `RESP_CHANNEL_INFO`)
+  - node RF profile (`RESP_SELF_INFO`)
+  - inbound channel message receipt (`RESP_CHANNEL_MSG_V3`)
+  - envelope extraction and reassembly (`UVAX1|...` parser)
+
+## Next Steps to Reach Full ATAK-over-MeshCore Functionality
+
+Priority roadmap:
+
+1. Add plugin-side radio profile controls (`CMD_SET_RADIO_PARAMS`) so operators can align RF settings from ATAK without switching apps.
+2. Add mismatch detection/warnings in UI when local node RF params differ from expected profile (local vs desired profile).
+3. Expand inbound message decoding coverage to include additional companion response types used by advert/contact workflows.
+4. Promote native TAK wire payload path (`!T1P`, `!T1C`, `!T1F`) to primary transport for CoT/chat/PLI, while keeping UVAX shim compatibility during transition.
+5. Expand reliability around large CoT payloads (fragment retries, queue pressure, stale fragment eviction tuning, bounded reassembly memory).
+6. Implement operator-visible health telemetry (queue depth, last RX/TX, no-message watchdog, channel index/secret fingerprint, RF profile).
+7. Finish namespace/package migration from `com.uvpro.plugin` to MeshCore-specific package names to prevent class collisions when multiple plugins are installed.
+8. Build a repeatable interoperability matrix (2-node/3-node, mixed GPS/no-GPS, chat + markers + routes + casevac + geofences + mission packages).
 
 ## Features
 

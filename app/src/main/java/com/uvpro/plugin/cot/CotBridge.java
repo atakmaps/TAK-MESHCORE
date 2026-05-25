@@ -833,9 +833,14 @@ public class CotBridge {
     }
 
     /** ATAK {@code GeoChatService.sendMessage} errors if peer UID is not in Contacts yet. */
-    private static void ensureOutboundGeoChatDestinationsKnown(String[] toUIDs) {
+    private void ensureOutboundGeoChatDestinationsKnown(String[] toUIDs) {
         if (toUIDs == null) {
             return;
+        }
+        String localUid = null;
+        try {
+            localUid = MapView.getDeviceUid();
+        } catch (Exception ignored) {
         }
         for (String raw : toUIDs) {
             if (raw == null || raw.trim().isEmpty()) {
@@ -843,6 +848,14 @@ public class CotBridge {
             }
             String uid = raw.trim().toUpperCase(Locale.US);
             if (!uid.startsWith(ANDROID_UID_PREFIX)) {
+                continue;
+            }
+            if (localUid != null && uid.equalsIgnoreCase(localUid)) {
+                // Never synthesize a chat contact for our own ATAK device UID.
+                continue;
+            }
+            if (!isBtechContactUid(uid) && resolveBtechUidForId(uid) == null) {
+                // Ignore random ATAK/system UIDs that are not known radio peers.
                 continue;
             }
             String callsign = uid.substring(ANDROID_UID_PREFIX.length());
@@ -1248,6 +1261,7 @@ public class CotBridge {
             CotMapComponent.getInternalDispatcher().dispatch(event);
             Log.d(TAG, "Dispatched CoT event: " + event.getUID());
             applyAprsMarkerPresentation(event.getUID());
+            applyRadioMarkerLabelPresentation(event.getUID());
 
             if (BuildConfig.DEBUG) {
                 try {
@@ -1287,6 +1301,45 @@ public class CotBridge {
             } catch (Exception e2) {
                 Log.e(TAG, "Failed to broadcast CoT event", e2);
             }
+        }
+    }
+
+    /**
+     * Ensure inbound radio contacts render callsign labels on-map (not dot-only marker).
+     */
+    private void applyRadioMarkerLabelPresentation(String uid) {
+        if (uid == null || uid.isEmpty()) {
+            return;
+        }
+        if (!uid.startsWith("ANDROID-")) {
+            return;
+        }
+        try {
+            MapView mv = MapView.getMapView();
+            if (mv == null || mv.getRootGroup() == null) {
+                return;
+            }
+            com.atakmap.android.maps.MapItem item = mv.getRootGroup().deepFindUID(uid);
+            if (!(item instanceof com.atakmap.android.maps.Marker)) {
+                return;
+            }
+            com.atakmap.android.maps.Marker marker =
+                    (com.atakmap.android.maps.Marker) item;
+            String callsign = item.getMetaString("callsign", null);
+            if (callsign == null || callsign.trim().isEmpty()) {
+                String fromUid = uid.substring("ANDROID-".length());
+                callsign = fromUid;
+                item.setMetaString("callsign", fromUid);
+            }
+            item.setTitle(callsign);
+            item.setMetaBoolean("labels_on", true);
+            item.removeMetaData("hideLabel");
+            // Marker API path used by ATAK icon adapters for label visibility.
+            marker.setShowLabel(true);
+            // Keep labels visible at normal map scales.
+            item.setMetaDouble("minRenderScale", 1.0E-5d);
+        } catch (Exception e) {
+            Log.w(TAG, "applyRadioMarkerLabelPresentation failed uid=" + uid, e);
         }
     }
 

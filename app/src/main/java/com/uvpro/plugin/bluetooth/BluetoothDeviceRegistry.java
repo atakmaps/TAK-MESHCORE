@@ -27,6 +27,7 @@ public final class BluetoothDeviceRegistry {
 
     public static final String PREF_BT_DEVICES_JSON = "uvpro_bt_devices_json";
     public static final String PREF_BT_CONNECT_TARGET = "uvpro_bt_connect_target";
+    public static final String PREF_BT_MESH_CONNECT_TARGET = "uvpro_bt_mesh_connect_target";
 
     private static final int MAX_DEVICES = 128;
 
@@ -68,6 +69,13 @@ public final class BluetoothDeviceRegistry {
 
     /** Record or update entry after a successful connection. */
     public static void recordConnection(Context context, BluetoothDevice device) {
+        recordConnection(context, device, true);
+    }
+
+    /** Record or update entry after a successful connection. */
+    public static void recordConnection(Context context,
+                                        BluetoothDevice device,
+                                        boolean setAsUvProConnectTarget) {
         if (device == null) return;
         String addr = normalizeAddress(device.getAddress());
         synchronized (BluetoothDeviceRegistry.class) {
@@ -82,9 +90,11 @@ public final class BluetoothDeviceRegistry {
             found.lastSystemName = nm != null ? nm.trim() : null;
             trimOverflow(list);
             saveAll(context, list);
-            // Persist this as the direct-connect target so "connect last radio"
-            // works across ATAK/plugin restarts.
-            setConnectTargetAddress(context, addr);
+            if (setAsUvProConnectTarget) {
+                // Persist this as the direct-connect target so "connect last radio"
+                // works across ATAK/plugin restarts.
+                setConnectTargetAddress(context, addr);
+            }
         }
     }
 
@@ -167,6 +177,10 @@ public final class BluetoothDeviceRegistry {
             if (tgt != null && norm.equals(normalizeAddress(tgt))) {
                 setConnectTargetAddress(context, "");
             }
+            String meshTgt = getMeshConnectTargetAddress(context);
+            if (meshTgt != null && norm.equals(normalizeAddress(meshTgt))) {
+                setMeshConnectTargetAddress(context, "");
+            }
         }
     }
 
@@ -195,6 +209,23 @@ public final class BluetoothDeviceRegistry {
             ed.putString(PREF_BT_CONNECT_TARGET, "");
         } else {
             ed.putString(PREF_BT_CONNECT_TARGET, normalizeAddress(macOrNull));
+        }
+        ed.apply();
+    }
+
+    @Nullable
+    public static String getMeshConnectTargetAddress(Context context) {
+        String s = prefs(context).getString(PREF_BT_MESH_CONNECT_TARGET, "").trim();
+        return s.isEmpty() ? null : normalizeAddress(s);
+    }
+
+    public static void setMeshConnectTargetAddress(Context context,
+                                                   @Nullable String macOrNull) {
+        SharedPreferences.Editor ed = prefs(context).edit();
+        if (macOrNull == null || macOrNull.trim().isEmpty()) {
+            ed.putString(PREF_BT_MESH_CONNECT_TARGET, "");
+        } else {
+            ed.putString(PREF_BT_MESH_CONNECT_TARGET, normalizeAddress(macOrNull));
         }
         ed.apply();
     }
