@@ -36,7 +36,4 @@
     <string name="pref_vox_enable_title">Enable VOX</string>
     <string name="pref_vox_sensitivity_title">VOX Sensitivity</string>
 
-    <!-- Base64(UTF-8): must match PKCS#12 store key used to build assets/atakmaps-ca.p12 (keytool -storepass). -->
-    <string name="uvpro_trust_bundle_p12_key" translatable="false">YXRha2F0YWs=</string>
-
 </resources>

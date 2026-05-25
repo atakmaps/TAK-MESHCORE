@@ -3,7 +3,7 @@
 
     <extension
         type="gov.tak.api.plugin.IPlugin"
-        impl="com.uvpro.plugin.UVProLifecycle"
+        impl="com.atakmaps.meshcore.plugin.MeshCoreLifecycle"
         singleton="true" />
 
 </plugin>

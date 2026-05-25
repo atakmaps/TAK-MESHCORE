@@ -70,8 +70,8 @@
 -repackageclasses atakplugin.UVPro
 
 ################################################################################
-## Rules specific to UV-PRO plugin (com.uvpro.plugin)
+## Rules specific to MeshCore ATAK plugin (com.atakmaps.meshcore.plugin)
 ################################################################################
 
--keep class com.uvpro.plugin.** { *; }
+-keep class com.atakmaps.meshcore.plugin.** { *; }
 -dontwarn android.bluetooth.**

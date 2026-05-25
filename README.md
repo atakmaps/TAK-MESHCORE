@@ -50,7 +50,7 @@ Priority roadmap:
 4. Promote native TAK wire payload path (`!T1P`, `!T1C`, `!T1F`) to primary transport for CoT/chat/PLI, while keeping UVAX shim compatibility during transition.
 5. Expand reliability around large CoT payloads (fragment retries, queue pressure, stale fragment eviction tuning, bounded reassembly memory).
 6. Implement operator-visible health telemetry (queue depth, last RX/TX, no-message watchdog, channel index/secret fingerprint, RF profile).
-7. Finish namespace/package migration from `com.uvpro.plugin` to MeshCore-specific package names to prevent class collisions when multiple plugins are installed.
+7. ~~Finish namespace/package migration~~ — **Done (1.1.0):** `com.atakmaps.meshcore.plugin` / `MeshCore*` entry classes; distinct from UV-PRO.
 8. Build a repeatable interoperability matrix (2-node/3-node, mixed GPS/no-GPS, chat + markers + routes + casevac + geofences + mission packages).
 
 ## Features
@@ -136,10 +136,10 @@ If you just want to install the plugin without building it:
 
 1. Download the latest APK from the [Releases](../../releases) page.
 2. Transfer it to your Android device.
-3. Install with: `adb install -r UVPro-*.apk`
+3. Install with: `adb install -r ATAK-Plugin-Meshcore-*.apk`
 4. Open ATAK → Menu → Tools → **UV-PRO**.
 
-APK filenames look like `ATAK-Plugin-UVPro-*-civ-release.apk` (or `civ-debug` for debug builds).
+APK filenames look like `ATAK-Plugin-Meshcore-*-5.5.1-civ-release.apk` (or `civ-debug` for debug builds).
 
 ### Upgrading from a debug or self-signed build
 
@@ -151,10 +151,10 @@ If you previously installed a **debug** or **self-signed** (non-TPC) build, Andr
 
 ```bash
 # 1. Remove the old plugin (ATAK data is untouched)
-adb uninstall com.uvpro.plugin
+adb uninstall com.atakmaps.meshcore.plugin
 
 # 2. Install the new TPC-signed APK
-adb install ATAK-Plugin-UVPro-*-tpc-*-civ-release.apk
+adb install ATAK-Plugin-Meshcore-*-tpc-*-5.5.1-civ-release.apk
 ```
 
 After reinstalling, open ATAK → Menu → Tools → **UV-PRO** and reconnect your radio. All previous settings are stored in ATAK's shared preferences and will be restored automatically.

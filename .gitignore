@@ -42,9 +42,8 @@ logs/
 scratch/*
 !scratch/README.txt
 
-# Generated portal drop (tools/package-submission.sh)
+# Local submission output copies (optional)
 submission/
-tools/package-submission.sh
 
 # OS files
 Thumbs.db
