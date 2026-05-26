@@ -2,6 +2,16 @@
 
 A free, open-source ATAK plugin focused on MeshCore BLE companion transport for off-grid ATAK awareness.
 
+## 1.2 MeshCore UX/Relay Parity Update (2026-05-26)
+
+Version `1.2.0` focuses on restoring MeshCore runtime UX parity with the previously working panel behavior:
+
+- Restored in-panel settings dialog for beacon/smart-beacon/Bluetooth favorites management.
+- Restored contact connector/endpoint metadata wiring for GeoChat from map/contact actions.
+- Restored MeshCore map status overlay behavior and panel-open tap action.
+- Added MeshCore GPS controls in-panel (`Enable MeshCore GPS`, `Update ATAK with MeshCore GPS`).
+- Added fresh-fix request flow for manual MeshCore GPS updates (no stale fix apply during manual refresh).
+
 ## 1.1 MeshCore-only Cutover (2026-05-25)
 
 Version `1.1.0` removes UV-PRO-specific UI workflows from the plugin panel and ships MeshCore-only connection behavior:

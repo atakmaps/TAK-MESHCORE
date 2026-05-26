@@ -235,7 +235,10 @@ public class CotBridge {
      */
     public void registerBtechContactUid(String uid) {
         if (uid == null) return;
-        btechContactUids.add(uid);
+        String trimmed = uid.trim();
+        if (trimmed.isEmpty()) return;
+        btechContactUids.add(trimmed);
+        btechContactUids.add(trimmed.toUpperCase(Locale.US));
     }
 
     /**
@@ -251,7 +254,15 @@ public class CotBridge {
     }
 
     public boolean isBtechContactUid(String uid) {
-        return uid != null && btechContactUids.contains(uid);
+        if (uid == null) {
+            return false;
+        }
+        String trimmed = uid.trim();
+        if (trimmed.isEmpty()) {
+            return false;
+        }
+        return btechContactUids.contains(trimmed)
+                || btechContactUids.contains(trimmed.toUpperCase(Locale.US));
     }
 
     private static final String ANDROID_UID_PREFIX = "ANDROID-";
@@ -278,6 +289,9 @@ public class CotBridge {
         if (id == null) return null;
         String key = id.trim().toUpperCase();
         if (key.isEmpty()) return null;
+        if (isBtechContactUid(key)) {
+            return key;
+        }
         String mapped = btechIdToUid.get(key);
         if (mapped != null) return mapped;
         String stripped = normalizeBtechRoutingId(id);
@@ -321,7 +335,7 @@ public class CotBridge {
                     intent.getStringArrayListExtra("toUIDs");
             if (toUIDs == null || toUIDs.isEmpty()) return false;
             for (String uid : toUIDs) {
-                if (uid != null && btechContactUids.contains(uid)) return true;
+                if (isBtechOutboundChatDestination(uid, null)) return true;
             }
         } catch (Exception ignored) {
         }
@@ -484,6 +498,17 @@ public class CotBridge {
 
             if (event != null && event.isValid()) {
                 Log.d(TAG, "Injecting position CoT for " + callsign + " team=" + teamForCot);
+                try {
+                    String uid = event.getUID();
+                    if (uid != null && uid.startsWith(ANDROID_UID_PREFIX)) {
+                        // Ensure position-only peers are also valid GeoChat/plugin contacts so
+                        // radial menu Contact Card + GeoChat actions stay enabled.
+                        ChatBridge.ensurePluginChatContactExactUid(callsign, uid);
+                        registerBtechAliases(callsign, uid, uid);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed to seed chat contact from position for " + callsign, e);
+                }
                 markInboundInjectSkipOutboundRelay(event.getUID());
                 dispatchCotEvent(event);
                 maybeRelayInboundRadioCotToTak(event);
@@ -707,6 +732,9 @@ public class CotBridge {
         } catch (Exception e) {
             Log.w(TAG, "GeoChatService.onCotEvent failed, fallback dispatch", e);
             dispatchCotEvent(event);
+            if (!contactListUpdate) {
+                notifyInboundRfChat(event);
+            }
         }
     }
 
@@ -1159,8 +1187,7 @@ public class CotBridge {
     }
 
     /**
-     * After CoT import: APRS usericon markers get label bounds and a minimal pinwheel whose
-     * Details action opens CoT Info (remarks), not the TAK contact-card menu.
+     * After CoT import: APRS usericon markers get stable icon/label rendering.
      */
     private void applyAprsMarkerPresentation(String uid) {
         if (uid == null || uid.isEmpty() || this.mapView == null) {
@@ -1187,7 +1214,6 @@ public class CotBridge {
             marker.setMinLabelRenderResolution(0.0d);
             marker.setMaxLabelRenderResolution(0.1d);
             marker.setMetaString("menu", "menus/default_item_w_type.xml");
-            removeAprsFromContactsPane(uid);
         } catch (Exception e) {
             Log.w(TAG, "applyAprsMarkerPresentation failed uid=" + uid, e);
         }
@@ -1336,8 +1362,11 @@ public class CotBridge {
             item.removeMetaData("hideLabel");
             // Marker API path used by ATAK icon adapters for label visibility.
             marker.setShowLabel(true);
+            // Keep callsign labels visible at wider map extents (target ~20km view).
+            marker.setMinLabelRenderResolution(0.0d);
+            marker.setMaxLabelRenderResolution(100000.0d);
             // Keep labels visible at normal map scales.
-            item.setMetaDouble("minRenderScale", 1.0E-5d);
+            item.setMetaDouble("minRenderScale", 1.0E-7d);
         } catch (Exception e) {
             Log.w(TAG, "applyRadioMarkerLabelPresentation failed uid=" + uid, e);
         }
@@ -1437,14 +1466,29 @@ public class CotBridge {
                     if (uid == null) continue;
                     String trimmed = uid.trim();
                     // Fast path: already registered in our in-memory set (populated on beacon).
-                    if (btechContactUids.contains(trimmed)) {
+                    if (isBtechOutboundChatDestination(trimmed, null)) {
                         targetsBtechContact = true;
+                        btechContactUids.add(trimmed);
+                        String resolvedUid = resolveBtechUidForId(trimmed);
+                        if (resolvedUid != null && !resolvedUid.isEmpty()) {
+                            btechContactUids.add(resolvedUid);
+                        }
                         break;
                     }
                     // Fallback: contact persisted from a previous session but no beacon yet
                     // this session — check whether it carries our PluginConnector.
                     try {
                         Contact c = Contacts.getInstance().getContactByUuid(trimmed);
+                        if (c == null) {
+                            c = Contacts.getInstance().getContactByUuid(
+                                    trimmed.toUpperCase(Locale.US));
+                        }
+                        if (c == null) {
+                            String resolvedUid = resolveBtechUidForId(trimmed);
+                            if (resolvedUid != null && !resolvedUid.isEmpty()) {
+                                c = Contacts.getInstance().getContactByUuid(resolvedUid);
+                            }
+                        }
                         Log.d(TAG, "PreSend UID lookup: " + trimmed + " → " + (c == null ? "null" : c.getClass().getSimpleName()));
                         if (c instanceof IndividualContact) {
                             com.atakmap.android.contact.Connector conn =

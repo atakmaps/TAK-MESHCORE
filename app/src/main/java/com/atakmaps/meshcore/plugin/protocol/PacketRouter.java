@@ -159,8 +159,9 @@ public class PacketRouter {
             return;
         }
 
-        // Otherwise, try to parse as standard APRS
-        routeAprsPacket(srcCall, srcSsid, info, infoBytes, destCall, 0);
+        // MeshCore-only build: ignore non-OPENRL AX.25/APRS frames.
+        Log.d(TAG, "Ignoring non-MeshCore frame dest=" + destCall
+                + " src=" + srcCall + "-" + srcSsid);
     }
 
     /**
@@ -330,6 +331,17 @@ public class PacketRouter {
 
             final String normalized = mapCall.trim().toUpperCase(Locale.US);
             final String uid = "ANDROID-" + normalized;
+            cotBridge.registerBtechContactUid(uid);
+            cotBridge.registerBtechContactId(normalized, uid);
+            String radioTrunc = CallsignUtil.toRadioCallsign(normalized);
+            if (radioTrunc != null && !radioTrunc.isEmpty()
+                    && !radioTrunc.equalsIgnoreCase(normalized)) {
+                cotBridge.registerBtechContactId(radioTrunc, uid);
+            }
+            MapView mv = MapView.getMapView();
+            if (mv != null) {
+                mv.post(() -> linkRadioIndividualContactToMapMarker(normalized, uid, 0));
+            }
             String aprsDetails = AprsInfoFormatter.formatPosition(mapCall, pos);
             if (rcAprs != null) {
                 rcAprs.setLastAprsDetailsText(aprsDetails);
@@ -338,7 +350,6 @@ public class PacketRouter {
             if (aprsTrackManager != null) {
                 aprsTrackManager.recordPosition(uid, mapCall, pos);
             }
-            // Map marker only — do not register IndividualContact (not actionable in Contacts pane).
             return;
         }
 
@@ -566,7 +577,25 @@ public class PacketRouter {
 
             if (existing instanceof IndividualContact) {
                 IndividualContact ic = (IndividualContact) existing;
+                // If contact was created by a non-plugin path first, ensure GeoChat/send connectors
+                // are attached so Contact Card and chat actions are enabled.
+                if (ic.getConnector(com.atakmap.android.contact.PluginConnector.CONNECTOR_TYPE) == null) {
+                    ic.addConnector(new com.atakmap.android.contact.PluginConnector(
+                            ChatBridge.ACTION_PLUGIN_CONTACT_GEOCHAT_SEND));
+                }
+                if (ic.getConnector(IpConnector.CONNECTOR_TYPE) == null) {
+                    ic.addConnector(new IpConnector((String) null));
+                }
+                try {
+                    com.atakmap.android.preference.AtakPreferences prefs =
+                            new com.atakmap.android.preference.AtakPreferences(mv.getContext());
+                    prefs.set("contact.connector.default." + ic.getUID(),
+                            com.atakmap.android.contact.PluginConnector.CONNECTOR_TYPE);
+                } catch (Exception ignored) {
+                }
                 if (item != null) {
+                    item.setMetaBoolean("sendable", true);
+                    item.setMetaString("endpoint", ChatBridge.ACTION_PLUGIN_CONTACT_GEOCHAT_SEND);
                     ic.setMapItem(item);
                     ic.dispatchChangeEvent();
                     return;
@@ -605,6 +634,10 @@ public class PacketRouter {
                     com.atakmap.android.contact.PluginConnector.CONNECTOR_TYPE);
 
             contacts.addContact(c);
+            if (item != null) {
+                item.setMetaBoolean("sendable", true);
+                item.setMetaString("endpoint", ChatBridge.ACTION_PLUGIN_CONTACT_GEOCHAT_SEND);
+            }
         } catch (Exception e) {
             Log.e(TAG, "linkRadioIndividualContactToMapMarker failed uid=" + uid, e);
         }

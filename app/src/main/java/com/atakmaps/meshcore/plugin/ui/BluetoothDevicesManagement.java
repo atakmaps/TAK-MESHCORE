@@ -48,7 +48,7 @@ public final class BluetoothDevicesManagement {
         if (devices.isEmpty()) {
             TextView empty = new TextView(act);
             empty.setText(
-                    "No saved radios yet.\n\nConnect once from the UV-PRO panel "
+                    "No saved radios yet.\n\nConnect once from the MeshCore panel "
                             + "(Scan & Connect); each successful connection is "
                             + "remembered here.");
             empty.setTextColor(0xFFE0E0E0);
@@ -115,7 +115,7 @@ public final class BluetoothDevicesManagement {
         }
 
         CheckBox fav = new CheckBox(act);
-        fav.setText("Favorite (shown on UV-PRO panel)");
+        fav.setText("Favorite (shown on MeshCore panel)");
         fav.setTextColor(0xFFE0E0E0);
         fav.setChecked(r.favorite);
         fav.setOnCheckedChangeListener((buttonView, isChecked) -> {

@@ -24,7 +24,7 @@
             android:id="@+id/header_version"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="v1.1"
+            android:text="v1.2"
             android:textColor="#FF888888"
             android:textSize="11sp"
             android:paddingBottom="8dp" />
@@ -245,11 +245,99 @@
                 android:paddingBottom="6dp" />
 
             <Button
+                android:id="@+id/btn_send_beacon"
+                style="@style/UvproPillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Send Beacon"
+                android:backgroundTint="#FF455A64" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingTop="8dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Enable MeshCore GPS"
+                    android:textColor="#FFAAAAAA"
+                    android:textSize="13sp" />
+
+                <Switch
+                    android:id="@+id/switch_mesh_enable_gps"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btn_update_gps_from_meshcore"
+                style="@style/UvproPillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Update ATAK with MeshCore GPS"
+                android:layout_marginTop="6dp"
+                android:visibility="gone"
+                android:backgroundTint="#FF455A64" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingTop="8dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Enable Smart Beacon"
+                    android:textColor="#FFAAAAAA"
+                    android:textSize="13sp" />
+
+                <Switch
+                    android:id="@+id/switch_smart_beacon"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btn_smart_beacon_settings"
+                style="@style/UvproPillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Smart Beacon Settings"
+                android:layout_marginTop="6dp"
+                android:backgroundTint="#FF455A64" />
+
+            <Button
+                android:id="@+id/btn_beacon_settings"
+                style="@style/UvproPillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Beacon Settings"
+                android:layout_marginTop="6dp"
+                android:backgroundTint="#FF455A64" />
+
+            <Button
+                android:id="@+id/btn_plugin_settings"
+                style="@style/UvproPillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Plugin Settings"
+                android:layout_marginTop="6dp"
+                android:backgroundTint="#FF455A64" />
+
+            <Button
                 android:id="@+id/btn_settings"
                 style="@style/UvproPillButton.Beacon"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="Manage Bluetooth Devices"
+                android:layout_marginTop="6dp"
                 android:backgroundTint="#FF455A64" />
         </LinearLayout>
 

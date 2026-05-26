@@ -8,6 +8,9 @@ import android.bluetooth.BluetoothDevice;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.drawable.GradientDrawable;
+import android.os.SystemClock;
+import android.preference.PreferenceManager;
+import android.text.InputType;
 import android.text.method.ScrollingMovementMethod;
 import android.util.Log;
 import android.view.LayoutInflater;
@@ -15,20 +18,31 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CompoundButton;
+import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import com.atakmap.android.dropdown.DropDown;
 import com.atakmap.android.dropdown.DropDownReceiver;
+import com.atakmap.android.ipc.AtakBroadcast;
+import com.atakmap.android.maps.MetaDataHolder2;
 import com.atakmap.android.maps.MapView;
+import com.atakmaps.meshcore.plugin.beacon.SmartBeacon;
+import com.atakmaps.meshcore.plugin.beacon.SmartBeaconSettingsDialog;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry.BtDeviceRecord;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
 import com.atakmaps.meshcore.plugin.contacts.RadioContact;
+import com.atakmaps.meshcore.plugin.cot.CotBridge;
 import com.atakmaps.meshcore.plugin.protocol.PacketRouter;
+import com.atakmaps.meshcore.plugin.ui.MeshStatusOverlay;
+import com.atakmaps.meshcore.plugin.ui.SettingsFragment;
 
 import java.util.ArrayList;
 import java.util.LinkedList;
@@ -54,6 +68,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private final Context pluginContext;
     private final BtConnectionManager btManager;
     private final ContactTracker contactTracker;
+    private final CotBridge cotBridge;
 
     private View rootView;
     private View statusDot;
@@ -70,6 +85,13 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnScan;
     private Button btnDisconnect;
     private Button btnSettings;
+    private Button btnSendBeacon;
+    private Button btnBeaconSettings;
+    private Button btnPluginSettings;
+    private Button btnSmartBeaconSettings;
+    private Switch switchSmartBeacon;
+    private Switch switchMeshEnableGps;
+    private Button btnUpdateGpsFromMeshcore;
 
     private final List<BluetoothDevice> foundDevices = new ArrayList<>();
     private final LinkedList<String> logLines = new LinkedList<>();
@@ -78,16 +100,82 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
     private ValueAnimator connectPulseAnimator;
     private GradientDrawable connectPulseDrawable;
+    private static final long MESH_GPS_FRESH_TIMEOUT_MS = 12_000L;
+    private Boolean meshGpsEnabledState = null;
+    private boolean suppressMeshGpsSwitchCallbacks = false;
+    private boolean pendingManualMeshGpsUpdate = false;
+    private long pendingManualMeshGpsSinceMs = 0L;
+    private final Runnable manualMeshGpsTimeoutRunnable = () -> {
+        if (!pendingManualMeshGpsUpdate) {
+            return;
+        }
+        pendingManualMeshGpsUpdate = false;
+        pendingManualMeshGpsSinceMs = 0L;
+        appendLog("No fresh MeshCore GPS fix received. Move device outside and retry.");
+    };
+    private final BtConnectionManager.MeshStateListener meshStateListener =
+            new BtConnectionManager.MeshStateListener() {
+                @Override
+                public void onMeshGpsStateChanged(boolean enabled) {
+                    meshGpsEnabledState = enabled;
+                    getMapView().post(() -> {
+                        updateMeshGpsControlsUi();
+                        appendLog("MeshCore GPS " + (enabled ? "enabled" : "disabled"));
+                    });
+                }
+
+                @Override
+                public void onMeshSelfLocationUpdated(BtConnectionManager.MeshLocationFix fix) {
+                    if (fix == null || !fix.isValid()) {
+                        return;
+                    }
+                    if (!pendingManualMeshGpsUpdate) {
+                        return;
+                    }
+                    if (fix.receivedAtMs < pendingManualMeshGpsSinceMs) {
+                        return;
+                    }
+                    pendingManualMeshGpsUpdate = false;
+                    pendingManualMeshGpsSinceMs = 0L;
+                    getMapView().removeCallbacks(manualMeshGpsTimeoutRunnable);
+                    getMapView().post(() -> {
+                        if (injectMeshGpsIntoAtak(fix)) {
+                            appendLog(String.format(Locale.US,
+                                    "Updated ATAK from MeshCore GPS: %.5f, %.5f",
+                                    fix.latitude, fix.longitude));
+                        } else {
+                            appendLog("Could not apply MeshCore GPS to ATAK");
+                        }
+                    });
+                }
+            };
+    private final CompoundButton.OnCheckedChangeListener smartBeaconCheckedListener =
+            (buttonView, isChecked) -> {
+                if (!buttonView.isPressed()) {
+                    return;
+                }
+                Context ctx = getMapView().getContext();
+                SmartBeacon.setEnabled(ctx, isChecked);
+                appendLog("Smart beacon " + (isChecked ? "enabled" : "disabled"));
+                try {
+                    AtakBroadcast.getInstance().sendBroadcast(
+                            new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
+                } catch (Exception ignored) {
+                }
+            };
 
     public MeshCoreDropDownReceiver(MapView mapView,
                                  Context pluginContext,
                                  BtConnectionManager btManager,
-                                 ContactTracker contactTracker) {
+                                 ContactTracker contactTracker,
+                                 CotBridge cotBridge) {
         super(mapView);
         this.pluginContext = pluginContext;
         this.btManager = btManager;
         this.contactTracker = contactTracker;
+        this.cotBridge = cotBridge;
         btManager.addListener(this);
+        btManager.addMeshStateListener(meshStateListener);
         contactTracker.setListener(this);
     }
 
@@ -110,6 +198,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
         bindViews();
         setupListeners();
+        MeshStatusOverlay.install(pluginContext);
 
         String callsign = "UNKNOWN";
         try {
@@ -122,9 +211,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
         if (btManager.isConnected()) {
             updateConnectionUI(true, btManager.getConnectedDeviceName());
+            MeshStatusOverlay.setConnected(true);
             stopConnectButtonPulse(true);
         } else {
             updateConnectionUI(false, null);
+            MeshStatusOverlay.setConnected(false);
             if (btManager.isConnecting()) {
                 startConnectButtonPulse();
             } else {
@@ -136,6 +227,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         updatePacketCount();
         refreshFavoriteStrip();
         updateScanButtonText();
+        if (switchSmartBeacon != null) {
+            switchSmartBeacon.setChecked(SmartBeacon.isEnabled(getMapView().getContext()));
+        }
+        meshGpsEnabledState = btManager.getMeshGpsEnabled();
+        updateMeshGpsControlsUi();
         appendLog("MeshCore ready");
         return rootView;
     }
@@ -157,6 +253,13 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnScan = rootView.findViewById(getId("btn_scan"));
         btnDisconnect = rootView.findViewById(getId("btn_disconnect"));
         btnSettings = rootView.findViewById(getId("btn_settings"));
+        btnSendBeacon = rootView.findViewById(getId("btn_send_beacon"));
+        btnBeaconSettings = rootView.findViewById(getId("btn_beacon_settings"));
+        btnPluginSettings = rootView.findViewById(getId("btn_plugin_settings"));
+        btnSmartBeaconSettings = rootView.findViewById(getId("btn_smart_beacon_settings"));
+        switchSmartBeacon = rootView.findViewById(getId("switch_smart_beacon"));
+        switchMeshEnableGps = rootView.findViewById(getId("switch_mesh_enable_gps"));
+        btnUpdateGpsFromMeshcore = rootView.findViewById(getId("btn_update_gps_from_meshcore"));
 
         if (logText != null) {
             logText.setMovementMethod(new ScrollingMovementMethod());
@@ -189,6 +292,233 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                                 updateScanButtonText();
                             })));
         }
+        if (btnSendBeacon != null) {
+            btnSendBeacon.setOnClickListener(v -> sendManualBeacon());
+        }
+        if (btnBeaconSettings != null) {
+            btnBeaconSettings.setOnClickListener(v -> showSettingsDialog());
+        }
+        if (btnPluginSettings != null) {
+            btnPluginSettings.setOnClickListener(v -> showSettingsDialog());
+        }
+        if (switchSmartBeacon != null) {
+            switchSmartBeacon.setOnCheckedChangeListener(smartBeaconCheckedListener);
+        }
+        if (btnSmartBeaconSettings != null) {
+            btnSmartBeaconSettings.setOnClickListener(v ->
+                    SmartBeaconSettingsDialog.show(getMapView().getContext(),
+                            () -> appendLog("Smart beacon settings updated")));
+        }
+        if (switchMeshEnableGps != null) {
+            switchMeshEnableGps.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (suppressMeshGpsSwitchCallbacks) {
+                    return;
+                }
+                if (!btManager.isConnected()) {
+                    appendLog("Connect to MeshCore before changing GPS state");
+                    updateMeshGpsControlsUi();
+                    return;
+                }
+                meshGpsEnabledState = isChecked;
+                updateMeshGpsControlsUi();
+                btManager.setMeshGpsEnabled(isChecked);
+                btManager.queryMeshGpsEnabled();
+            });
+        }
+        if (btnUpdateGpsFromMeshcore != null) {
+            btnUpdateGpsFromMeshcore.setOnClickListener(v -> requestManualMeshGpsUpdate());
+        }
+    }
+
+    private void updateMeshGpsControlsUi() {
+        boolean enabled = Boolean.TRUE.equals(meshGpsEnabledState);
+        if (switchMeshEnableGps != null) {
+            suppressMeshGpsSwitchCallbacks = true;
+            switchMeshEnableGps.setChecked(enabled);
+            suppressMeshGpsSwitchCallbacks = false;
+            switchMeshEnableGps.setEnabled(btManager != null && btManager.isConnected());
+        }
+        if (btnUpdateGpsFromMeshcore != null) {
+            btnUpdateGpsFromMeshcore.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private void requestManualMeshGpsUpdate() {
+        if (!btManager.isConnected()) {
+            appendLog("Connect to MeshCore first");
+            return;
+        }
+        BtConnectionManager.MeshLocationFix cached = btManager.getLatestSelfLocation();
+        if (cached != null && cached.isValid()) {
+            long ageSec = Math.max(0L, (System.currentTimeMillis() - cached.receivedAtMs) / 1000L);
+            appendLog("Cached MeshCore fix age: " + ageSec + "s");
+        }
+        pendingManualMeshGpsUpdate = true;
+        pendingManualMeshGpsSinceMs = System.currentTimeMillis();
+        getMapView().removeCallbacks(manualMeshGpsTimeoutRunnable);
+        getMapView().postDelayed(manualMeshGpsTimeoutRunnable, MESH_GPS_FRESH_TIMEOUT_MS);
+        appendLog("Requesting fresh MeshCore GPS fix...");
+        btManager.requestSelfInfo();
+    }
+
+    private boolean injectMeshGpsIntoAtak(BtConnectionManager.MeshLocationFix fix) {
+        if (fix == null || !fix.isValid()) {
+            return false;
+        }
+        MapView mv = getMapView();
+        if (mv == null) {
+            return false;
+        }
+        MetaDataHolder2 data = mv.getMapData();
+        if (data == null) {
+            return false;
+        }
+        com.atakmap.coremap.maps.coords.GeoPoint gp =
+                new com.atakmap.coremap.maps.coords.GeoPoint(fix.latitude, fix.longitude);
+        data.setMetaString("locationSourcePrefix", "mock");
+        data.setMetaBoolean("mockLocationAvailable", true);
+        data.setMetaString("mockLocationSource", "MeshCore GPS");
+        data.setMetaString("mockLocationSourceColor", "#FF00BCD4");
+        data.setMetaBoolean("mockLocationCallsignValid", true);
+        data.setMetaString("mockLocation", gp.toString());
+        data.setMetaLong("mockLocationTime", SystemClock.elapsedRealtime());
+        data.setMetaLong("mockGPSTime", new com.atakmap.coremap.maps.time.CoordinatedTime().getMilliseconds());
+        Intent gpsReceived = new Intent("com.atakmap.android.map.WR_GPS_RECEIVED");
+        AtakBroadcast.getInstance().sendBroadcast(gpsReceived);
+        return true;
+    }
+
+    private void sendManualBeacon() {
+        if (cotBridge == null || !btManager.isConnected()) {
+            appendLog("Not connected");
+            return;
+        }
+        com.atakmap.android.maps.MapItem self = getMapView().getSelfMarker();
+        if (!(self instanceof com.atakmap.android.maps.PointMapItem)) {
+            appendLog("No self-location available");
+            return;
+        }
+        com.atakmap.coremap.maps.coords.GeoPoint gp =
+                ((com.atakmap.android.maps.PointMapItem) self).getPoint();
+        cotBridge.sendPositionOverRadio(
+                gp.getLatitude(),
+                gp.getLongitude(),
+                gp.getAltitude(),
+                0f,
+                0f,
+                -1);
+        appendLog("Beacon sent");
+    }
+
+    private void showSettingsDialog() {
+        Context ctx = getMapView().getContext();
+        android.content.SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(ctx);
+
+        ScrollView scrollView = new ScrollView(ctx);
+        LinearLayout layout = new LinearLayout(ctx);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int pad = dip(ctx, 12);
+        layout.setPadding(pad, pad, pad, pad);
+        scrollView.addView(layout);
+
+        TextView bluetoothHeader = new TextView(ctx);
+        bluetoothHeader.setText("Bluetooth Favorites");
+        bluetoothHeader.setTextColor(0xFFFFFFFF);
+        bluetoothHeader.setTextSize(15f);
+        layout.addView(bluetoothHeader);
+
+        TextView bluetoothHint = new TextView(ctx);
+        bluetoothHint.setText("Manage saved MeshCore devices and favorites shown on the panel.");
+        bluetoothHint.setTextColor(0xFFAAAAAA);
+        bluetoothHint.setTextSize(11f);
+        bluetoothHint.setPadding(0, dip(ctx, 2), 0, dip(ctx, 6));
+        layout.addView(bluetoothHint);
+
+        Button btnBluetoothDevices = new Button(ctx);
+        btnBluetoothDevices.setText("Manage Bluetooth Devices");
+        applyPillButtonBackground(btnBluetoothDevices, COLOR_PILL_BUTTON_PRIMARY);
+        btnBluetoothDevices.setOnClickListener(v ->
+                com.atakmaps.meshcore.plugin.ui.BluetoothDevicesManagement.show(ctx, () ->
+                        getMapView().post(() -> {
+                            refreshFavoriteStrip();
+                            updateScanButtonText();
+                        })));
+        layout.addView(btnBluetoothDevices);
+
+        TextView beaconHeader = new TextView(ctx);
+        beaconHeader.setText("\nBeacon");
+        beaconHeader.setTextColor(0xFFFFFFFF);
+        beaconHeader.setTextSize(15f);
+        layout.addView(beaconHeader);
+
+        TextView beaconLabel = new TextView(ctx);
+        beaconLabel.setText("GPS Beacon Interval (seconds)");
+        beaconLabel.setTextColor(0xFFAAAAAA);
+        beaconLabel.setPadding(0, dip(ctx, 4), 0, dip(ctx, 2));
+        layout.addView(beaconLabel);
+
+        EditText editBeaconInterval = new EditText(ctx);
+        editBeaconInterval.setInputType(InputType.TYPE_CLASS_NUMBER);
+        editBeaconInterval.setText(prefs.getString(
+                SettingsFragment.PREF_BEACON_INTERVAL,
+                SettingsFragment.DEFAULT_BEACON_INTERVAL));
+        layout.addView(editBeaconInterval);
+
+        LinearLayout smartRow = new LinearLayout(ctx);
+        smartRow.setOrientation(LinearLayout.HORIZONTAL);
+        smartRow.setPadding(0, dip(ctx, 8), 0, dip(ctx, 2));
+
+        TextView smartLabel = new TextView(ctx);
+        smartLabel.setText("Enable Smart Beacon");
+        smartLabel.setTextColor(0xFFE0E0E0);
+        LinearLayout.LayoutParams smartLabelLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        smartRow.addView(smartLabel, smartLabelLp);
+
+        Switch switchSmart = new Switch(ctx);
+        switchSmart.setChecked(SmartBeacon.isEnabled(ctx));
+        smartRow.addView(switchSmart);
+        layout.addView(smartRow);
+
+        Button btnSmartSettings = new Button(ctx);
+        btnSmartSettings.setText("Smart Beacon Settings");
+        applyPillButtonBackground(btnSmartSettings, COLOR_PILL_BUTTON_PRIMARY);
+        btnSmartSettings.setOnClickListener(v ->
+                SmartBeaconSettingsDialog.show(ctx,
+                        () -> appendLog("Smart beacon settings updated")));
+        layout.addView(btnSmartSettings);
+
+        switchSmart.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            SmartBeacon.setEnabled(ctx, isChecked);
+            editBeaconInterval.setEnabled(!isChecked);
+            editBeaconInterval.setAlpha(isChecked ? 0.45f : 1.0f);
+        });
+        editBeaconInterval.setEnabled(!switchSmart.isChecked());
+        editBeaconInterval.setAlpha(switchSmart.isChecked() ? 0.45f : 1.0f);
+
+        new AlertDialog.Builder(ctx)
+                .setTitle("MeshCore Settings")
+                .setView(scrollView)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Save", (dialog, which) -> {
+                    String beacon = editBeaconInterval.getText().toString().trim();
+                    android.content.SharedPreferences.Editor editor = prefs.edit();
+                    if (!beacon.isEmpty()) {
+                        editor.putString(SettingsFragment.PREF_BEACON_INTERVAL, beacon);
+                    }
+                    editor.apply();
+                    SmartBeacon.setEnabled(ctx, switchSmart.isChecked());
+                    if (switchSmartBeacon != null) {
+                        switchSmartBeacon.setChecked(switchSmart.isChecked());
+                    }
+                    appendLog("Settings saved");
+                    try {
+                        AtakBroadcast.getInstance().sendBroadcast(
+                                new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
+                    } catch (Exception ignored) {
+                    }
+                })
+                .show();
     }
 
     private void onScanOrConnectClicked() {
@@ -508,9 +838,12 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 : "MeshCore";
         getMapView().post(() -> {
             stopConnectButtonPulse(true);
+            MeshStatusOverlay.setConnected(true);
             updateConnectionUI(true, display);
+            updateMeshGpsControlsUi();
             refreshFavoriteStrip();
             appendLog("Connected to " + display);
+            btManager.queryMeshGpsEnabled();
         });
     }
 
@@ -518,7 +851,12 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     public void onDisconnected(String reason) {
         getMapView().post(() -> {
             stopConnectButtonPulse(true);
+            MeshStatusOverlay.setConnected(false);
+            pendingManualMeshGpsUpdate = false;
+            pendingManualMeshGpsSinceMs = 0L;
+            getMapView().removeCallbacks(manualMeshGpsTimeoutRunnable);
             updateConnectionUI(false, null);
+            updateMeshGpsControlsUi();
             appendLog("Disconnected: " + reason);
         });
     }
@@ -527,6 +865,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     public void onError(String error) {
         getMapView().post(() -> {
             stopConnectButtonPulse(true);
+            MeshStatusOverlay.setConnected(false);
             appendLog("Error: " + error);
         });
     }
@@ -600,7 +939,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     @Override
     public void disposeImpl() {
         btManager.removeListener(this);
+        btManager.removeMeshStateListener(meshStateListener);
         contactTracker.setListener(null);
         stopConnectButtonPulse(true);
+        pendingManualMeshGpsUpdate = false;
+        pendingManualMeshGpsSinceMs = 0L;
+        getMapView().removeCallbacks(manualMeshGpsTimeoutRunnable);
     }
 }

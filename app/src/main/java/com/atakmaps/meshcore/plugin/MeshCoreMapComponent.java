@@ -7,6 +7,7 @@ import android.util.Log;
 import com.atakmap.android.dropdown.DropDownMapComponent;
 import com.atakmap.android.ipc.AtakBroadcast;
 import com.atakmap.android.maps.MapView;
+import com.atakmap.app.preferences.ToolsPreferenceFragment;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.chat.ChatBridge;
@@ -14,6 +15,8 @@ import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
 import com.atakmaps.meshcore.plugin.crypto.EncryptionManager;
 import com.atakmaps.meshcore.plugin.protocol.PacketRouter;
+import com.atakmaps.meshcore.plugin.ui.MeshStatusOverlay;
+import com.atakmaps.meshcore.plugin.ui.SettingsFragment;
 
 /**
  * MeshCore-only map component.
@@ -21,6 +24,7 @@ import com.atakmaps.meshcore.plugin.protocol.PacketRouter;
 public class MeshCoreMapComponent extends DropDownMapComponent {
 
     private static final String TAG = "MeshCore";
+    private static final long POST_CONNECT_BEACON_DELAY_MS = 30_000L;
 
     public static final String PLUGIN_PACKAGE = "com.atakmaps.meshcore.plugin";
     public static final String ACTION_BEACON_INTERVAL_CHANGED =
@@ -36,6 +40,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
     private ContactTracker contactTracker;
     private MeshCoreDropDownReceiver dropDownReceiver;
     private EncryptionManager encryptionManager;
+    private final Runnable postConnectBeaconRunnable = this::sendPostConnectBeacon;
 
     @Override
     public void onCreate(Context context, Intent intent, MapView view) {
@@ -59,26 +64,120 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         cotBridge.setChatBridge(chatBridge);
 
         contactTracker = new ContactTracker(cotBridge);
+        try {
+            com.atakmap.android.contact.ContactConnectorManager mgr =
+                    com.atakmap.android.cot.CotMapComponent.getInstance()
+                            .getContactConnectorMgr();
+            mgr.addContactHandler(new com.atakmaps.meshcore.plugin.MeshCoreContactHandler(context));
+        } catch (Exception e) {
+            Log.e(TAG, "Contact handler registration failed", e);
+        }
         packetRouter = new PacketRouter(cotBridge, chatBridge, contactTracker);
         encryptionManager = new EncryptionManager();
         cotBridge.setEncryptionManager(encryptionManager);
+        chatBridge.setEncryptionManager(encryptionManager);
         packetRouter.setEncryptionManager(encryptionManager);
 
         btConnectionManager = new BtConnectionManager(context, packetRouter);
+        btConnectionManager.addListener(new BtConnectionManager.ConnectionListener() {
+            @Override
+            public void onConnected(android.bluetooth.BluetoothDevice device) {
+                MeshStatusOverlay.setConnected(true);
+                schedulePostConnectBeacon();
+            }
+
+            @Override
+            public void onDisconnected(String reason) {
+                MeshStatusOverlay.setConnected(false);
+                cancelPostConnectBeacon();
+            }
+
+            @Override
+            public void onError(String error) {
+                MeshStatusOverlay.setConnected(false);
+            }
+
+            @Override
+            public void onDeviceFound(android.bluetooth.BluetoothDevice device) {
+            }
+
+            @Override
+            public void onScanComplete() {
+            }
+        });
         cotBridge.setBtManager(btConnectionManager);
         chatBridge.setBtManager(btConnectionManager);
 
         dropDownReceiver = new MeshCoreDropDownReceiver(
-                view, pluginContext, btConnectionManager, contactTracker);
+                view, pluginContext, btConnectionManager, contactTracker, cotBridge);
         packetRouter.setPacketCountListener(dropDownReceiver);
 
         AtakBroadcast.DocumentedIntentFilter filter =
                 new AtakBroadcast.DocumentedIntentFilter();
         filter.addAction(MeshCoreDropDownReceiver.SHOW_PLUGIN);
         registerDropDownReceiver(dropDownReceiver, filter);
+        ToolsPreferenceFragment.register(
+                new ToolsPreferenceFragment.ToolPreference(
+                        "MeshCore Settings",
+                        "MeshCore plugin configuration",
+                        SettingsFragment.TOOL_SETTINGS_KEY,
+                        MeshCoreTool.toolbarIcon(context),
+                        new SettingsFragment(context)));
+        view.post(() -> MeshStatusOverlay.install(pluginContext));
+        MeshStatusOverlay.setConnected(btConnectionManager.isConnected());
+        contactTracker.start();
+        chatBridge.setRelayOutgoing(true);
+        chatBridge.startOutgoingRelay();
+        cotBridge.setRelayOutgoingSa(false);
+        cotBridge.startOutgoingRelay();
 
         view.postDelayed(() -> autoConnectLastMesh(context), 3500L);
         Log.i(TAG, "MeshCore plugin initialized");
+    }
+
+    private void schedulePostConnectBeacon() {
+        if (mapView == null) {
+            return;
+        }
+        mapView.removeCallbacks(postConnectBeaconRunnable);
+        mapView.postDelayed(postConnectBeaconRunnable, POST_CONNECT_BEACON_DELAY_MS);
+        Log.d(TAG, "Scheduled post-connect beacon in 30 seconds");
+    }
+
+    private void cancelPostConnectBeacon() {
+        if (mapView == null) {
+            return;
+        }
+        mapView.removeCallbacks(postConnectBeaconRunnable);
+    }
+
+    private void sendPostConnectBeacon() {
+        try {
+            if (mapView == null || btConnectionManager == null || cotBridge == null) {
+                return;
+            }
+            if (!btConnectionManager.isConnected()) {
+                Log.d(TAG, "Skipping post-connect beacon: no longer connected");
+                return;
+            }
+            com.atakmap.android.maps.MapItem self = mapView.getSelfMarker();
+            if (!(self instanceof com.atakmap.android.maps.PointMapItem)) {
+                Log.w(TAG, "Skipping post-connect beacon: self marker unavailable");
+                return;
+            }
+            com.atakmap.coremap.maps.coords.GeoPoint gp =
+                    ((com.atakmap.android.maps.PointMapItem) self).getPoint();
+            cotBridge.sendPositionOverRadio(
+                    gp.getLatitude(),
+                    gp.getLongitude(),
+                    gp.getAltitude(),
+                    0f,
+                    0f,
+                    -1);
+            Log.i(TAG, "Sent post-connect beacon at 30s");
+        } catch (Exception e) {
+            Log.w(TAG, "Post-connect beacon failed: " + e.getMessage());
+        }
     }
 
     private void autoConnectLastMesh(Context context) {
@@ -116,8 +215,21 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             }
         } catch (Exception ignored) {
         }
+        ToolsPreferenceFragment.unregister(SettingsFragment.TOOL_SETTINGS_KEY);
+        cancelPostConnectBeacon();
+        MeshStatusOverlay.uninstall();
+        if (chatBridge != null) {
+            chatBridge.dispose();
+        }
+        if (cotBridge != null) {
+            cotBridge.dispose();
+        }
+        if (contactTracker != null) {
+            contactTracker.stop();
+        }
         if (btConnectionManager != null) {
             btConnectionManager.disconnect();
+            btConnectionManager.shutdown();
             btConnectionManager = null;
         }
         packetRouter = null;

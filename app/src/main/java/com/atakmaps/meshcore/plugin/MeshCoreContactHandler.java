@@ -99,7 +99,7 @@ public class MeshCoreContactHandler extends
 
     @Override
     public String getName() {
-        return "UV-PRO";
+        return "MeshCore";
     }
 
     @Override
@@ -150,6 +150,6 @@ public class MeshCoreContactHandler extends
 
     @Override
     public String getDescription() {
-        return "UV-PRO Contact Handler";
+        return "MeshCore Contact Handler";
     }
 }

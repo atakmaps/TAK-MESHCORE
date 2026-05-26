@@ -33,7 +33,7 @@ public class SmartBeacon {
     public static final boolean DEFAULT_ENABLED        = false;
     public static final int     DEFAULT_LOW_SPEED      = 5;    // mph
     public static final int     DEFAULT_HIGH_SPEED     = 60;   // mph
-    public static final int     DEFAULT_SLOW_RATE      = 1800; // seconds (30 min)
+    public static final int     DEFAULT_SLOW_RATE      = 600;  // seconds (10 min)
     public static final int     DEFAULT_FAST_RATE      = 180;  // seconds (3 min)
     public static final int     DEFAULT_MIN_TURN_TIME  = 15;   // seconds
     public static final int     DEFAULT_TURN_THRESHOLD = 30;   // degrees

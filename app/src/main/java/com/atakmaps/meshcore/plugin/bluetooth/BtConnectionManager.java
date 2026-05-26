@@ -12,10 +12,13 @@ import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
-import android.bluetooth.le.ScanFilter;
+import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
@@ -23,6 +26,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.ParcelUuid;
 import android.preference.PreferenceManager;
+import android.provider.Settings;
 import android.util.Base64;
 import android.util.Log;
 
@@ -32,6 +36,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -53,6 +58,8 @@ public class BtConnectionManager {
 
     private static final UUID UUID_UART_SERVICE =
             UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+    private static final UUID UUID_MESHTASTIC_SERVICE =
+            UUID.fromString("6BA1B218-15A8-461F-9FA8-5DCAE273EAFD");
     private static final UUID UUID_UART_RX =
             UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
     private static final UUID UUID_UART_TX =
@@ -67,6 +74,8 @@ public class BtConnectionManager {
     private static final byte CMD_DEVICE_QUERY = 0x16;
     private static final byte CMD_DEVICE_QUERY_ARG = 0x03;
     private static final byte CMD_GET_CHANNEL = 0x1F;
+    private static final byte CMD_GET_GPS_STATE = 0x28;
+    private static final byte CMD_SET_SETTING_TEXT = 0x29;
 
     // Companion notifications
     private static final byte RESP_CHANNEL_MSG = 0x08;
@@ -76,12 +85,14 @@ public class BtConnectionManager {
     private static final byte RESP_CHANNEL_MSG_V3 = 0x11;
     private static final byte RESP_CONTACT_MSG_V3 = 0x10;
     private static final byte RESP_CHANNEL_INFO = 0x12;
+    private static final byte RESP_SETTING_TEXT = 0x15;
     private static final byte RESP_NO_MORE_MSGS = 0x0A;
     private static final byte PUSH_MESSAGES_WAITING = (byte) 0x83;
 
     private static final int MAX_MESH_MESSAGE_LEN = 130; // leave room below 133 chars
     private static final int MAX_RAW_AX25_CHUNK = 57; // 57 bytes -> 76 Base64 chars
     private static final String ENV_PREFIX = "UVAX1|";
+    private static final String COMPANION_APP_ID = "meshcore-flutter";
 
     private final Context context;
     private final PacketRouter packetRouter;
@@ -89,15 +100,19 @@ public class BtConnectionManager {
     private final AtomicBoolean connecting = new AtomicBoolean(false);
     private final AtomicBoolean shouldReconnect = new AtomicBoolean(true);
     private final AtomicBoolean radioSilenceEnabled = new AtomicBoolean(false);
+    private final AtomicBoolean scanCompleteNotified = new AtomicBoolean(false);
     private final AtomicLong lastIoActivityMs = new AtomicLong(0L);
     private final AtomicInteger outboundMsgId = new AtomicInteger(1);
     private final AtomicInteger activeMeshChannel = new AtomicInteger(0);
+    private final Set<String> seenScanAddresses = new HashSet<>();
 
     private final CopyOnWriteArrayList<ConnectionListener> listeners =
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RawDataListener> rawDataListeners =
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<Runnable> beforeDisconnectHooks =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<MeshStateListener> meshStateListeners =
             new CopyOnWriteArrayList<>();
 
     private final Map<Integer, ChunkAccumulator> chunkBuffers = new ConcurrentHashMap<>();
@@ -111,8 +126,15 @@ public class BtConnectionManager {
     private BluetoothGattCharacteristic rxCharacteristic;
     private BluetoothGattCharacteristic txCharacteristic;
     private BluetoothDevice lastDevice;
+    private volatile Boolean meshGpsEnabled = null;
+    private volatile MeshLocationFix latestSelfLocation = null;
+    private BluetoothDevice pendingBondDevice;
+    private BroadcastReceiver bondReceiver;
+    private final AtomicBoolean bondReceiverRegistered = new AtomicBoolean(false);
     private int reconnectAttempts = 0;
     private static final int MAX_RECONNECT_ATTEMPTS = 5;
+    private static final String ACTION_BLUETOOTH_PAIRING_SETTINGS =
+            "android.settings.BLUETOOTH_PAIRING_SETTINGS";
 
     private final HandlerThread ioThread = new HandlerThread("MeshCore-MeshBLE-IO");
     private Handler ioHandler;
@@ -141,6 +163,35 @@ public class BtConnectionManager {
      */
     public interface RawDataListener {
         boolean onRawBytes(byte[] data);
+    }
+
+    public interface MeshStateListener {
+        void onMeshGpsStateChanged(boolean enabled);
+        void onMeshSelfLocationUpdated(MeshLocationFix fix);
+    }
+
+    public static final class MeshLocationFix {
+        public final double latitude;
+        public final double longitude;
+        public final long receivedAtMs;
+        public final String nodeName;
+
+        public MeshLocationFix(double latitude, double longitude, long receivedAtMs, String nodeName) {
+            this.latitude = latitude;
+            this.longitude = longitude;
+            this.receivedAtMs = receivedAtMs;
+            this.nodeName = nodeName;
+        }
+
+        public boolean isValid() {
+            if (Double.isNaN(latitude) || Double.isNaN(longitude)) {
+                return false;
+            }
+            if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
+                return false;
+            }
+            return !(Math.abs(latitude) < 0.000001 && Math.abs(longitude) < 0.000001);
+        }
     }
 
     public BtConnectionManager(Context context, PacketRouter packetRouter) {
@@ -172,14 +223,37 @@ public class BtConnectionManager {
         }
 
         stopScanInternal();
+        scanCompleteNotified.set(false);
+        synchronized (seenScanAddresses) {
+            seenScanAddresses.clear();
+        }
 
         Set<BluetoothDevice> pairedDevices = btAdapter.getBondedDevices();
         if (pairedDevices != null) {
             for (BluetoothDevice device : pairedDevices) {
+                if (device == null) {
+                    continue;
+                }
                 String name = device.getName();
-                if (name == null) name = device.getAddress();
-                Log.i(TAG, "Bonded BLE device: " + name + " [" + device.getAddress() + "]");
-                notifyDeviceFound(device);
+                if (!isLikelyMeshName(name)) {
+                    continue;
+                }
+                String address = device.getAddress();
+                boolean isNew = true;
+                if (address != null) {
+                    synchronized (seenScanAddresses) {
+                        if (seenScanAddresses.contains(address)) {
+                            isNew = false;
+                        } else {
+                            seenScanAddresses.add(address);
+                        }
+                    }
+                }
+                if (isNew) {
+                    Log.i(TAG, "Bonded Mesh candidate: "
+                            + (name != null ? name : address) + " [" + address + "]");
+                    notifyDeviceFound(device);
+                }
             }
         }
 
@@ -188,9 +262,6 @@ public class BtConnectionManager {
             notifyScanComplete();
             return;
         }
-        ScanFilter filter = new ScanFilter.Builder()
-                .setServiceUuid(new ParcelUuid(UUID_UART_SERVICE))
-                .build();
         ScanSettings settings = new ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build();
@@ -198,7 +269,21 @@ public class BtConnectionManager {
             @Override
             public void onScanResult(int callbackType, ScanResult result) {
                 BluetoothDevice device = result.getDevice();
-                if (device != null) {
+                if (device == null || !isLikelyMeshDevice(result, device)) {
+                    return;
+                }
+                String address = device.getAddress();
+                boolean isNew = true;
+                if (address != null) {
+                    synchronized (seenScanAddresses) {
+                        if (seenScanAddresses.contains(address)) {
+                            isNew = false;
+                        } else {
+                            seenScanAddresses.add(address);
+                        }
+                    }
+                }
+                if (isNew) {
                     notifyDeviceFound(device);
                 }
             }
@@ -207,16 +292,69 @@ public class BtConnectionManager {
             public void onScanFailed(int errorCode) {
                 Log.w(TAG, "BLE scan failed: " + errorCode);
                 notifyError("BLE scan failed: " + errorCode);
+                if (scanCompleteNotified.compareAndSet(false, true)) {
+                    notifyScanComplete();
+                }
             }
         };
         try {
-            java.util.List<ScanFilter> filters = java.util.Collections.singletonList(filter);
-            bleScanner.startScan(filters, settings, scanCallback);
-            ioHandler.postDelayed(this::stopScanInternal, 8000L);
+            bleScanner.startScan(null, settings, scanCallback);
+            ioHandler.postDelayed(() -> {
+                stopScanInternal();
+                if (scanCompleteNotified.compareAndSet(false, true)) {
+                    notifyScanComplete();
+                }
+            }, 8000L);
         } catch (Exception e) {
             Log.w(TAG, "BLE scan start failed", e);
+            if (scanCompleteNotified.compareAndSet(false, true)) {
+                notifyScanComplete();
+            }
         }
-        notifyScanComplete();
+    }
+
+    private boolean isLikelyMeshDevice(ScanResult result, BluetoothDevice device) {
+        try {
+            ScanRecord record = result != null ? result.getScanRecord() : null;
+            if (record != null && record.getServiceUuids() != null) {
+                for (ParcelUuid pu : record.getServiceUuids()) {
+                    if (pu == null || pu.getUuid() == null) {
+                        continue;
+                    }
+                    UUID adv = pu.getUuid();
+                    if (UUID_UART_SERVICE.equals(adv) || UUID_MESHTASTIC_SERVICE.equals(adv)) {
+                        return true;
+                    }
+                }
+            }
+            String name = record != null ? record.getDeviceName() : null;
+            if (name == null || name.trim().isEmpty()) {
+                name = device.getName();
+            }
+            return isLikelyMeshName(name);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isLikelyMeshName(String name) {
+        if (name == null || name.trim().isEmpty()) {
+            return false;
+        }
+        String n = name.toLowerCase(java.util.Locale.US);
+        return n.contains("meshtastic")
+                || n.contains("meshcore")
+                || n.contains("wismesh")
+                || n.contains("heltec")
+                || n.contains("lilygo")
+                || n.contains("t-echo")
+                || n.contains("tdeck")
+                || n.contains("t-deck")
+                || n.contains("rak")
+                || n.contains("seeed")
+                || n.contains("seed")
+                || n.contains("sensecap")
+                || n.contains("mesh");
     }
 
     /** No-op in BLE mode (kept for compatibility with existing UI flow). */
@@ -286,6 +424,9 @@ public class BtConnectionManager {
         if (connected.get()) {
             disconnect();
         }
+        if (!ensureBondThenConnect(device)) {
+            return;
+        }
         if (connecting.getAndSet(true)) {
             Log.w(TAG, "Already connecting, ignoring duplicate request");
             return;
@@ -317,6 +458,105 @@ public class BtConnectionManager {
         });
     }
 
+    private boolean ensureBondThenConnect(BluetoothDevice device) {
+        if (device == null) {
+            return false;
+        }
+        int bondState = BluetoothDevice.BOND_NONE;
+        try {
+            bondState = device.getBondState();
+        } catch (Exception ignored) {
+        }
+        if (bondState == BluetoothDevice.BOND_BONDED) {
+            pendingBondDevice = null;
+            return true;
+        }
+
+        pendingBondDevice = device;
+        registerBondReceiver();
+        if (bondState == BluetoothDevice.BOND_BONDING) {
+            launchPairingUi(device);
+            notifyError("Pairing in progress. Enter PIN to continue.");
+            return false;
+        }
+
+        try {
+            boolean started = device.createBond();
+            if (!started) {
+                notifyError("Could not start pairing. Pair device in Bluetooth settings.");
+                launchPairingUi(device);
+                return false;
+            }
+            launchPairingUi(device);
+            notifyError("Pairing required. Enter PIN in Bluetooth dialog.");
+            return false;
+        } catch (Exception e) {
+            notifyError("Pairing failed to start: " + e.getMessage());
+            launchPairingUi(device);
+            return false;
+        }
+    }
+
+    private void registerBondReceiver() {
+        if (bondReceiverRegistered.get()) {
+            return;
+        }
+        bondReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context ctx, Intent intent) {
+                if (intent == null || !BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(intent.getAction())) {
+                    return;
+                }
+                BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (device == null || pendingBondDevice == null) {
+                    return;
+                }
+                String target = pendingBondDevice.getAddress();
+                if (target == null || !target.equalsIgnoreCase(device.getAddress())) {
+                    return;
+                }
+                int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR);
+                int prev = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR);
+                if (state == BluetoothDevice.BOND_BONDED) {
+                    BluetoothDevice bondedDevice = pendingBondDevice;
+                    pendingBondDevice = null;
+                    notifyError("Pairing complete. Connecting...");
+                    connect(bondedDevice);
+                } else if (state == BluetoothDevice.BOND_NONE && prev == BluetoothDevice.BOND_BONDING) {
+                    pendingBondDevice = null;
+                    notifyError("Pairing cancelled or failed.");
+                }
+            }
+        };
+        try {
+            IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+            context.registerReceiver(bondReceiver, filter);
+            bondReceiverRegistered.set(true);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to register bond receiver", e);
+        }
+    }
+
+    private void launchPairingUi(BluetoothDevice device) {
+        Intent pairingSettings = new Intent(ACTION_BLUETOOTH_PAIRING_SETTINGS);
+        pairingSettings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (device != null) {
+            pairingSettings.putExtra(BluetoothDevice.EXTRA_DEVICE, device);
+        }
+        try {
+            context.startActivity(pairingSettings);
+            return;
+        } catch (Exception ignored) {
+        }
+        try {
+            Intent btSettings = new Intent(Settings.ACTION_BLUETOOTH_SETTINGS);
+            btSettings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(btSettings);
+        } catch (Exception e) {
+            Log.w(TAG, "Could not launch Bluetooth settings for pairing", e);
+        }
+    }
+
     /**
      * Connect to the last known device.
      */
@@ -335,6 +575,7 @@ public class BtConnectionManager {
         shouldReconnect.set(false);
         connecting.set(false);
         connected.set(false);
+        pendingBondDevice = null;
         stopScanInternal();
         ioHandler.removeCallbacks(periodicMessagePoll);
         ioHandler.removeCallbacksAndMessages(null);
@@ -354,6 +595,7 @@ public class BtConnectionManager {
         reconnectAttempts = 0;
         connecting.set(false);
         connected.set(false);
+        pendingBondDevice = null;
         stopScanInternal();
         ioHandler.removeCallbacks(periodicMessagePoll);
         ioHandler.post(() -> {
@@ -510,6 +752,50 @@ public class BtConnectionManager {
         rawDataListeners.remove(listener);
     }
 
+    public void addMeshStateListener(MeshStateListener listener) {
+        if (listener != null) {
+            meshStateListeners.add(listener);
+        }
+    }
+
+    public void removeMeshStateListener(MeshStateListener listener) {
+        meshStateListeners.remove(listener);
+    }
+
+    public Boolean getMeshGpsEnabled() {
+        return meshGpsEnabled;
+    }
+
+    public MeshLocationFix getLatestSelfLocation() {
+        return latestSelfLocation;
+    }
+
+    public void queryMeshGpsEnabled() {
+        if (!connected.get()) {
+            return;
+        }
+        enqueueCommand(new byte[]{CMD_GET_GPS_STATE});
+    }
+
+    public void setMeshGpsEnabled(boolean enabled) {
+        if (!connected.get()) {
+            return;
+        }
+        byte[] txt = ("gps:" + (enabled ? "1" : "0")).getBytes(StandardCharsets.UTF_8);
+        byte[] out = new byte[1 + txt.length];
+        out[0] = CMD_SET_SETTING_TEXT;
+        System.arraycopy(txt, 0, out, 1, txt.length);
+        enqueueCommand(out);
+        enqueueCommand(new byte[]{CMD_GET_GPS_STATE});
+    }
+
+    public void requestSelfInfo() {
+        if (!connected.get()) {
+            return;
+        }
+        enqueueCommand(buildAppStartCommand());
+    }
+
     public void addBeforeDisconnectHook(Runnable hook) {
         if (hook != null) {
             beforeDisconnectHooks.add(hook);
@@ -550,6 +836,24 @@ public class BtConnectionManager {
         for (ConnectionListener l : listeners) l.onScanComplete();
     }
 
+    private void notifyMeshGpsStateChanged(boolean enabled) {
+        for (MeshStateListener l : meshStateListeners) {
+            try {
+                l.onMeshGpsStateChanged(enabled);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void notifyMeshSelfLocation(MeshLocationFix fix) {
+        for (MeshStateListener l : meshStateListeners) {
+            try {
+                l.onMeshSelfLocationUpdated(fix);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
     private void markIoActivity() {
         lastIoActivityMs.set(System.currentTimeMillis());
     }
@@ -573,6 +877,17 @@ public class BtConnectionManager {
         gatt = null;
         rxCharacteristic = null;
         txCharacteristic = null;
+    }
+
+    public void shutdown() {
+        pendingBondDevice = null;
+        if (bondReceiverRegistered.compareAndSet(true, false)) {
+            try {
+                context.unregisterReceiver(bondReceiver);
+            } catch (Exception ignored) {
+            }
+        }
+        bondReceiver = null;
     }
 
     private void clearQueues() {
@@ -634,7 +949,7 @@ public class BtConnectionManager {
     }
 
     private byte[] buildAppStartCommand() {
-        byte[] app = "atak-uvpro".getBytes(StandardCharsets.UTF_8);
+        byte[] app = COMPANION_APP_ID.getBytes(StandardCharsets.UTF_8);
         byte[] out = new byte[8 + app.length];
         out[0] = CMD_APP_START;
         System.arraycopy(app, 0, out, 8, app.length);
@@ -694,6 +1009,10 @@ public class BtConnectionManager {
             return;
         }
         if (t == RESP_NO_MORE_MSGS) {
+            return;
+        }
+        if (t == RESP_SETTING_TEXT) {
+            applySettingText(pkt);
             return;
         }
         if (t == RESP_CHANNEL_INFO) {
@@ -790,8 +1109,30 @@ public class BtConnectionManager {
             Log.i(TAG, "Node self-info name='" + node + "' freqHz=" + freqHz
                     + " bwHz=" + bwHz + " sf=" + sf + " cr=" + cr
                     + " lat=" + lat + " lon=" + lon);
+            MeshLocationFix fix = new MeshLocationFix(lat, lon, System.currentTimeMillis(), node);
+            if (fix.isValid()) {
+                latestSelfLocation = fix;
+                notifyMeshSelfLocation(fix);
+            }
         } catch (Exception e) {
             Log.w(TAG, "Failed parsing self-info: " + e.getMessage());
+        }
+    }
+
+    private void applySettingText(byte[] pkt) {
+        if (pkt == null || pkt.length < 2) {
+            return;
+        }
+        try {
+            String text = new String(pkt, 1, pkt.length - 1, StandardCharsets.UTF_8).trim();
+            if (text.startsWith("gps:")) {
+                boolean enabled = text.endsWith("1")
+                        || text.equalsIgnoreCase("gps:on")
+                        || text.equalsIgnoreCase("gps:true");
+                meshGpsEnabled = enabled;
+                notifyMeshGpsStateChanged(enabled);
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -979,6 +1320,7 @@ public class BtConnectionManager {
             for (int i = 0; i < 8; i++) {
                 enqueueCommand(buildGetChannelInfoCommand(i));
             }
+            enqueueCommand(new byte[]{CMD_GET_GPS_STATE});
             enqueueCommand(buildGetNextMessageCommand());
             ioHandler.removeCallbacks(periodicMessagePoll);
             ioHandler.postDelayed(periodicMessagePoll, 2500L);

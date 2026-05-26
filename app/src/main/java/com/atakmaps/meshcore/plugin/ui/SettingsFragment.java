@@ -31,7 +31,7 @@ import com.atakmaps.meshcore.plugin.protocol.NetSlotConfig;
 import com.atakmaps.meshcore.plugin.protocol.MeshCoreRadioServices;
 
 /**
- * Settings screen for the UVPro plugin.
+ * Settings screen for the MeshCore plugin.
  *
  * Provides configuration for:
  * - Callsign
@@ -630,7 +630,7 @@ public class SettingsFragment extends PluginPreferenceFragment
     }
 
     /**
-     * Opens ATAK Tool Preferences for this plugin (Settings → Tool Preferences → UV-PRO).
+     * Opens ATAK Tool Preferences for this plugin (Settings → Tool Preferences → MeshCore).
      */
     public static void openToolPreferences(Context context) {
         launchPluginSettings(TOOL_SETTINGS_KEY, null, context);
@@ -660,7 +660,7 @@ public class SettingsFragment extends PluginPreferenceFragment
                     AtakBroadcast.getInstance().sendBroadcast(intent);
                 } catch (Exception e2) {
                     Toast.makeText(context,
-                            "Open Settings → Tool Preferences → UV-PRO Settings",
+                            "Open Settings → Tool Preferences → MeshCore Settings",
                             Toast.LENGTH_LONG).show();
                 }
             }
