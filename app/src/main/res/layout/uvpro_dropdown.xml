@@ -24,7 +24,7 @@
             android:id="@+id/header_version"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="v1.2"
+            android:text="v1.3"
             android:textColor="#FF888888"
             android:textSize="11sp"
             android:paddingBottom="8dp" />

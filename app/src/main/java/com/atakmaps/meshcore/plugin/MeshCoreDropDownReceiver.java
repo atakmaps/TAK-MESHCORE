@@ -97,9 +97,28 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private final LinkedList<String> logLines = new LinkedList<>();
     private int txCount = 0;
     private int rxCount = 0;
+    private boolean scanFoundAnyDevice = false;
 
     private ValueAnimator connectPulseAnimator;
     private GradientDrawable connectPulseDrawable;
+    private volatile boolean scanDiscoveryPulseActive = false;
+    private boolean scanPulseBright = false;
+    private final Runnable scanDiscoveryPulseRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!scanDiscoveryPulseActive || btnScan == null) {
+                return;
+            }
+            int fill = scanPulseBright ? 0xFFE0B800 : COLOR_PILL_BUTTON_PRIMARY;
+            int stroke = 0xFFFFEB3B;
+            btnScan.setBackgroundTintList(null);
+            btnScan.setBackground(buildPillButtonBackground(fill, stroke));
+            btnScan.setAlpha(1f);
+            btnScan.invalidate();
+            scanPulseBright = !scanPulseBright;
+            getMapView().postDelayed(this, 320L);
+        }
+    };
     private static final long MESH_GPS_FRESH_TIMEOUT_MS = 12_000L;
     private Boolean meshGpsEnabledState = null;
     private boolean suppressMeshGpsSwitchCallbacks = false;
@@ -539,7 +558,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             return;
         }
 
-        String target = BluetoothDeviceRegistry.getMeshConnectTargetAddress(ctx);
+        String target = getFavoriteDirectConnectTarget(ctx);
         BtDeviceRecord targetRecord =
                 (target != null && !target.isEmpty()) ? BluetoothDeviceRegistry.find(ctx, target) : null;
         boolean connectMode = target != null && !target.isEmpty();
@@ -563,10 +582,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
 
         foundDevices.clear();
-        BluetoothDeviceRegistry.setMeshConnectTargetAddress(ctx, "");
+        scanFoundAnyDevice = false;
         refreshFavoriteStrip();
         updateScanButtonText();
         appendLog("Scanning for MeshCore devices...");
+        startScanDiscoveryPulse();
         btManager.startScan();
     }
 
@@ -588,9 +608,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                             return;
                         }
                         BluetoothDevice selected = foundDevices.get(which);
-                        BluetoothDeviceRegistry.setMeshConnectTargetAddress(ctx, selected.getAddress());
                         appendLog("Connecting to " + names[which] + "...");
-                        updateScanButtonText();
                         startConnectButtonPulse();
                         btManager.connect(selected);
                     })
@@ -629,7 +647,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private void updateScanButtonText() {
         if (btnScan == null) return;
         Context ctx = getMapView().getContext();
-        String tgt = BluetoothDeviceRegistry.getMeshConnectTargetAddress(ctx);
+        String tgt = getFavoriteDirectConnectTarget(ctx);
         if (!btManager.isConnected() && tgt != null && !tgt.isEmpty()) {
             btnScan.setText("CONNECT");
         } else {
@@ -663,7 +681,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         favoritesLabel.setVisibility(View.VISIBLE);
         favoritesScroll.setVisibility(View.VISIBLE);
 
-        String selected = BluetoothDeviceRegistry.getMeshConnectTargetAddress(ctx);
+        String selected = getFavoriteDirectConnectTarget(ctx);
         if (selected != null && !selected.isEmpty()) {
             connectModeHint.setVisibility(View.VISIBLE);
             connectModeHint.setText("Direct connect enabled — tap same favorite for scan mode");
@@ -735,6 +753,20 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         return n != null ? n : device.getAddress();
     }
 
+    private String getFavoriteDirectConnectTarget(Context ctx) {
+        String target = BluetoothDeviceRegistry.getMeshConnectTargetAddress(ctx);
+        if (target == null || target.isEmpty()) {
+            return null;
+        }
+        BtDeviceRecord r = BluetoothDeviceRegistry.find(ctx, target);
+        if (r == null || !r.favorite || !isLikelyMeshRecord(r)) {
+            // Guard against stale/accidental targets so new users stay in scan mode.
+            BluetoothDeviceRegistry.setMeshConnectTargetAddress(ctx, "");
+            return null;
+        }
+        return target;
+    }
+
     private int getId(String name) {
         return pluginContext.getResources().getIdentifier(
                 name, "id", pluginContext.getPackageName());
@@ -769,19 +801,40 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         stopConnectButtonPulse(false);
         btnScan.setBackgroundTintList(null);
-        connectPulseDrawable = buildPillButtonBackground(COLOR_PILL_BUTTON_PRIMARY, 0x11FFEB3B);
+        btnScan.setAlpha(1f);
+        connectPulseDrawable = buildPillButtonBackground(COLOR_PILL_BUTTON_PRIMARY, 0xFFFFEB3B);
         btnScan.setBackground(connectPulseDrawable);
-        connectPulseAnimator = ValueAnimator.ofObject(new ArgbEvaluator(), 0x11FFEB3B, 0xFFFFEB3B);
-        connectPulseAnimator.setDuration(220L);
+        connectPulseAnimator = ValueAnimator.ofFloat(1.0f, 0.62f);
+        connectPulseAnimator.setDuration(560L);
         connectPulseAnimator.setRepeatMode(ValueAnimator.REVERSE);
         connectPulseAnimator.setRepeatCount(ValueAnimator.INFINITE);
         connectPulseAnimator.addUpdateListener(animation -> {
-            if (connectPulseDrawable == null || btnScan == null) return;
-            int color = (Integer) animation.getAnimatedValue();
-            connectPulseDrawable.setStroke(dip(getMapView().getContext(), EDIT_SELECTION_STROKE_DP), color);
+            if (btnScan == null) return;
+            float alpha = (Float) animation.getAnimatedValue();
+            btnScan.setAlpha(alpha);
             btnScan.invalidate();
         });
         connectPulseAnimator.start();
+    }
+
+    private void startScanDiscoveryPulse() {
+        scanDiscoveryPulseActive = true;
+        scanPulseBright = false;
+        getMapView().removeCallbacks(scanDiscoveryPulseRunnable);
+        // Keep scan pulse independent from touch/ripple pressed-state behavior.
+        stopConnectButtonPulse(false);
+        getMapView().post(scanDiscoveryPulseRunnable);
+    }
+
+    private void stopScanDiscoveryPulse() {
+        if (!scanDiscoveryPulseActive) {
+            return;
+        }
+        scanDiscoveryPulseActive = false;
+        getMapView().removeCallbacks(scanDiscoveryPulseRunnable);
+        if (!btManager.isConnecting() && !btManager.isConnected()) {
+            stopConnectButtonPulse(true);
+        }
     }
 
     private void stopConnectButtonPulse(boolean restoreBackground) {
@@ -789,6 +842,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         connectPulseAnimator = null;
         if (animator != null) {
             animator.cancel();
+        }
+        if (btnScan != null) {
+            btnScan.setAlpha(1f);
         }
         connectPulseDrawable = null;
         if (restoreBackground && btnScan != null) {
@@ -831,12 +887,12 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (device != null) {
             Context ctx = getMapView().getContext();
             BluetoothDeviceRegistry.recordConnection(ctx, device, false);
-            BluetoothDeviceRegistry.setMeshConnectTargetAddress(ctx, device.getAddress());
         }
         String display = device != null
                 ? resolveDeviceDisplayName(getMapView().getContext(), device)
                 : "MeshCore";
         getMapView().post(() -> {
+            stopScanDiscoveryPulse();
             stopConnectButtonPulse(true);
             MeshStatusOverlay.setConnected(true);
             updateConnectionUI(true, display);
@@ -850,6 +906,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     @Override
     public void onDisconnected(String reason) {
         getMapView().post(() -> {
+            stopScanDiscoveryPulse();
             stopConnectButtonPulse(true);
             MeshStatusOverlay.setConnected(false);
             pendingManualMeshGpsUpdate = false;
@@ -864,6 +921,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     @Override
     public void onError(String error) {
         getMapView().post(() -> {
+            stopScanDiscoveryPulse();
             stopConnectButtonPulse(true);
             MeshStatusOverlay.setConnected(false);
             appendLog("Error: " + error);
@@ -882,11 +940,18 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             }
         }
         foundDevices.add(device);
+        if (!scanFoundAnyDevice) {
+            scanFoundAnyDevice = true;
+            getMapView().post(() -> appendLog("MeshCore node discovered; finishing scan..."));
+        }
     }
 
     @Override
     public void onScanComplete() {
-        getMapView().post(this::showDevicePicker);
+        getMapView().post(() -> {
+            stopScanDiscoveryPulse();
+            showDevicePicker();
+        });
     }
 
     @Override

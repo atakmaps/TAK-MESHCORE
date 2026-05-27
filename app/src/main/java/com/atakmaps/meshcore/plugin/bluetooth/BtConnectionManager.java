@@ -12,6 +12,7 @@ import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
@@ -34,7 +35,9 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -146,9 +149,13 @@ public class BtConnectionManager {
     private static final int MAX_RECONNECT_ATTEMPTS = 5;
     private static final String ACTION_BLUETOOTH_PAIRING_SETTINGS =
             "android.settings.BLUETOOTH_PAIRING_SETTINGS";
+    private static final long SCAN_PHASE_FILTERED_MS = 4500L;
+    private static final long SCAN_PHASE_FALLBACK_MS = 5500L;
 
     private final HandlerThread ioThread = new HandlerThread("MeshCore-MeshBLE-IO");
     private Handler ioHandler;
+    private final AtomicInteger scanSessionCounter = new AtomicInteger(0);
+    private volatile int activeScanSessionId = 0;
     private final Runnable periodicMessagePoll = new Runnable() {
         @Override
         public void run() {
@@ -217,7 +224,9 @@ public class BtConnectionManager {
     }
 
     /**
-     * Enumerates bonded BLE devices and starts an active BLE scan for MeshCore UART service.
+     * Starts a two-phase BLE scan:
+     *  1) UUID-filtered scan for Mesh UART/Meshtastic services
+     *  2) If phase 1 finds nothing, fallback to unfiltered scan gated by mesh heuristics
      */
     public void startScan() {
         if (btAdapter == null) {
@@ -233,45 +242,36 @@ public class BtConnectionManager {
             return;
         }
 
-        stopScanInternal();
+        stopScanInternal(true);
         scanCompleteNotified.set(false);
         synchronized (seenScanAddresses) {
             seenScanAddresses.clear();
-        }
-
-        Set<BluetoothDevice> pairedDevices = btAdapter.getBondedDevices();
-        if (pairedDevices != null) {
-            for (BluetoothDevice device : pairedDevices) {
-                if (device == null) {
-                    continue;
-                }
-                String name = device.getName();
-                if (!isLikelyMeshName(name)) {
-                    continue;
-                }
-                String address = device.getAddress();
-                boolean isNew = true;
-                if (address != null) {
-                    synchronized (seenScanAddresses) {
-                        if (seenScanAddresses.contains(address)) {
-                            isNew = false;
-                        } else {
-                            seenScanAddresses.add(address);
-                        }
-                    }
-                }
-                if (isNew) {
-                    Log.i(TAG, "Bonded Mesh candidate: "
-                            + (name != null ? name : address) + " [" + address + "]");
-                    notifyDeviceFound(device);
-                }
-            }
         }
 
         bleScanner = btAdapter.getBluetoothLeScanner();
         if (bleScanner == null) {
             notifyScanComplete();
             return;
+        }
+        int sessionId = scanSessionCounter.incrementAndGet();
+        activeScanSessionId = sessionId;
+        startScanPhase(sessionId, true);
+    }
+
+    private void startScanPhase(int sessionId, boolean filteredPhase) {
+        if (bleScanner == null || sessionId != activeScanSessionId) {
+            return;
+        }
+        stopScanInternal(false);
+
+        List<ScanFilter> filters = new ArrayList<>();
+        if (filteredPhase) {
+            filters.add(new ScanFilter.Builder()
+                    .setServiceUuid(new ParcelUuid(UUID_UART_SERVICE))
+                    .build());
+            filters.add(new ScanFilter.Builder()
+                    .setServiceUuid(new ParcelUuid(UUID_MESHTASTIC_SERVICE))
+                    .build());
         }
         ScanSettings settings = new ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
@@ -303,21 +303,35 @@ public class BtConnectionManager {
             public void onScanFailed(int errorCode) {
                 Log.w(TAG, "BLE scan failed: " + errorCode);
                 notifyError("BLE scan failed: " + errorCode);
+                stopScanInternal(true);
                 if (scanCompleteNotified.compareAndSet(false, true)) {
                     notifyScanComplete();
                 }
             }
         };
         try {
-            bleScanner.startScan(null, settings, scanCallback);
+            bleScanner.startScan(filters, settings, scanCallback);
             ioHandler.postDelayed(() -> {
-                stopScanInternal();
+                if (sessionId != activeScanSessionId) {
+                    return;
+                }
+                boolean foundAny;
+                synchronized (seenScanAddresses) {
+                    foundAny = !seenScanAddresses.isEmpty();
+                }
+                if (filteredPhase && !foundAny) {
+                    Log.i(TAG, "Filtered BLE scan found no Mesh nodes; falling back to heuristic scan");
+                    startScanPhase(sessionId, false);
+                    return;
+                }
+                stopScanInternal(true);
                 if (scanCompleteNotified.compareAndSet(false, true)) {
                     notifyScanComplete();
                 }
-            }, 8000L);
+            }, filteredPhase ? SCAN_PHASE_FILTERED_MS : SCAN_PHASE_FALLBACK_MS);
         } catch (Exception e) {
             Log.w(TAG, "BLE scan start failed", e);
+            stopScanInternal(true);
             if (scanCompleteNotified.compareAndSet(false, true)) {
                 notifyScanComplete();
             }
@@ -875,12 +889,19 @@ public class BtConnectionManager {
     }
 
     private void stopScanInternal() {
+        stopScanInternal(true);
+    }
+
+    private void stopScanInternal(boolean invalidateSession) {
         if (bleScanner != null && scanCallback != null) {
             try {
                 bleScanner.stopScan(scanCallback);
             } catch (Exception ignored) {}
         }
         scanCallback = null;
+        if (invalidateSession) {
+            activeScanSessionId = 0;
+        }
     }
 
     private void closeGattInternal() {

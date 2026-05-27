@@ -10,7 +10,6 @@ import com.atakmap.android.maps.PointMapItem;
 import com.atakmap.android.maps.MapView;
 import com.atakmap.app.preferences.ToolsPreferenceFragment;
 import com.atakmap.coremap.maps.coords.GeoPoint;
-import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.chat.ChatBridge;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
@@ -134,7 +133,6 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         cotBridge.setRelayOutgoingSa(false);
         cotBridge.startOutgoingRelay();
 
-        view.postDelayed(() -> autoConnectLastMesh(context), 3500L);
         Log.i(TAG, "MeshCore plugin initialized");
     }
 
@@ -226,32 +224,6 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             return false;
         }
         return !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001);
-    }
-
-    private void autoConnectLastMesh(Context context) {
-        try {
-            if (btConnectionManager == null
-                    || btConnectionManager.isConnected()
-                    || btConnectionManager.isConnecting()) {
-                return;
-            }
-            String tgt = BluetoothDeviceRegistry.getMeshConnectTargetAddress(context);
-            if (tgt == null || tgt.isEmpty()) {
-                Log.d(TAG, "Auto-connect mesh: no saved address");
-                return;
-            }
-            android.bluetooth.BluetoothAdapter adapter =
-                    android.bluetooth.BluetoothAdapter.getDefaultAdapter();
-            if (adapter == null || !adapter.isEnabled()) {
-                Log.d(TAG, "Auto-connect mesh: Bluetooth unavailable");
-                return;
-            }
-            android.bluetooth.BluetoothDevice device = adapter.getRemoteDevice(tgt);
-            Log.i(TAG, "Auto-connecting to MeshCore target: " + tgt);
-            btConnectionManager.connect(device);
-        } catch (Exception e) {
-            Log.w(TAG, "Auto-connect mesh failed: " + e.getMessage());
-        }
     }
 
     @Override
