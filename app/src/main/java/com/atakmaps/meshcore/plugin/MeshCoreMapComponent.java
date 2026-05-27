@@ -6,8 +6,10 @@ import android.util.Log;
 
 import com.atakmap.android.dropdown.DropDownMapComponent;
 import com.atakmap.android.ipc.AtakBroadcast;
+import com.atakmap.android.maps.PointMapItem;
 import com.atakmap.android.maps.MapView;
 import com.atakmap.app.preferences.ToolsPreferenceFragment;
+import com.atakmap.coremap.maps.coords.GeoPoint;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.chat.ChatBridge;
@@ -41,6 +43,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
     private MeshCoreDropDownReceiver dropDownReceiver;
     private EncryptionManager encryptionManager;
     private final Runnable postConnectBeaconRunnable = this::sendPostConnectBeacon;
+    private final Runnable waitForPositionBeaconRunnable = this::waitForPositionThenScheduleBeacon;
 
     @Override
     public void onCreate(Context context, Intent intent, MapView view) {
@@ -140,8 +143,26 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             return;
         }
         mapView.removeCallbacks(postConnectBeaconRunnable);
-        mapView.postDelayed(postConnectBeaconRunnable, POST_CONNECT_BEACON_DELAY_MS);
-        Log.d(TAG, "Scheduled post-connect beacon in 30 seconds");
+        mapView.removeCallbacks(waitForPositionBeaconRunnable);
+        if (hasValidSelfPosition()) {
+            mapView.postDelayed(postConnectBeaconRunnable, POST_CONNECT_BEACON_DELAY_MS);
+            Log.d(TAG, "Scheduled post-connect beacon in 30 seconds");
+            return;
+        }
+        mapView.postDelayed(waitForPositionBeaconRunnable, 2_000L);
+        Log.d(TAG, "Post-connect beacon waiting for valid self position");
+    }
+
+    private void waitForPositionThenScheduleBeacon() {
+        if (mapView == null || btConnectionManager == null || !btConnectionManager.isConnected()) {
+            return;
+        }
+        if (hasValidSelfPosition()) {
+            mapView.postDelayed(postConnectBeaconRunnable, POST_CONNECT_BEACON_DELAY_MS);
+            Log.d(TAG, "Valid self position acquired; post-connect beacon in 30 seconds");
+            return;
+        }
+        mapView.postDelayed(waitForPositionBeaconRunnable, 2_000L);
     }
 
     private void cancelPostConnectBeacon() {
@@ -149,6 +170,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             return;
         }
         mapView.removeCallbacks(postConnectBeaconRunnable);
+        mapView.removeCallbacks(waitForPositionBeaconRunnable);
     }
 
     private void sendPostConnectBeacon() {
@@ -167,6 +189,10 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             }
             com.atakmap.coremap.maps.coords.GeoPoint gp =
                     ((com.atakmap.android.maps.PointMapItem) self).getPoint();
+            if (gp == null || !gp.isValid() || !isValidCoordinate(gp.getLatitude(), gp.getLongitude())) {
+                Log.w(TAG, "Skipping post-connect beacon: self position still invalid");
+                return;
+            }
             cotBridge.sendPositionOverRadio(
                     gp.getLatitude(),
                     gp.getLongitude(),
@@ -178,6 +204,28 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         } catch (Exception e) {
             Log.w(TAG, "Post-connect beacon failed: " + e.getMessage());
         }
+    }
+
+    private boolean hasValidSelfPosition() {
+        if (mapView == null) {
+            return false;
+        }
+        PointMapItem self = mapView.getSelfMarker();
+        if (self == null) {
+            return false;
+        }
+        GeoPoint gp = self.getPoint();
+        return gp != null && gp.isValid() && isValidCoordinate(gp.getLatitude(), gp.getLongitude());
+    }
+
+    private boolean isValidCoordinate(double lat, double lon) {
+        if (Double.isNaN(lat) || Double.isNaN(lon)) {
+            return false;
+        }
+        if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+            return false;
+        }
+        return !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001);
     }
 
     private void autoConnectLastMesh(Context context) {

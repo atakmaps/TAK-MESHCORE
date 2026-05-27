@@ -19,13 +19,11 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.ParcelUuid;
-import android.preference.PreferenceManager;
 import android.provider.Settings;
 import android.util.Base64;
 import android.util.Log;
@@ -74,8 +72,10 @@ public class BtConnectionManager {
     private static final byte CMD_DEVICE_QUERY = 0x16;
     private static final byte CMD_DEVICE_QUERY_ARG = 0x03;
     private static final byte CMD_GET_CHANNEL = 0x1F;
+    private static final byte CMD_SET_CHANNEL = 0x20;
     private static final byte CMD_GET_GPS_STATE = 0x28;
     private static final byte CMD_SET_SETTING_TEXT = 0x29;
+    private static final byte CMD_SEND_CHANNEL_DATA = 0x3E;
 
     // Companion notifications
     private static final byte RESP_CHANNEL_MSG = 0x08;
@@ -86,6 +86,7 @@ public class BtConnectionManager {
     private static final byte RESP_CONTACT_MSG_V3 = 0x10;
     private static final byte RESP_CHANNEL_INFO = 0x12;
     private static final byte RESP_SETTING_TEXT = 0x15;
+    private static final byte RESP_CHANNEL_DATA_RECV = 0x1B;
     private static final byte RESP_NO_MORE_MSGS = 0x0A;
     private static final byte PUSH_MESSAGES_WAITING = (byte) 0x83;
 
@@ -93,6 +94,17 @@ public class BtConnectionManager {
     private static final int MAX_RAW_AX25_CHUNK = 57; // 57 bytes -> 76 Base64 chars
     private static final String ENV_PREFIX = "UVAX1|";
     private static final String COMPANION_APP_ID = "meshcore-flutter";
+    private static final int ATAK_CHANNEL_INDEX = 7;
+    private static final String ATAK_CHANNEL_NAME = "ATAK_DATA";
+    private static final byte[] ATAK_CHANNEL_SECRET = new byte[]{
+            (byte) 0xA3, (byte) 0x74, (byte) 0x1E, (byte) 0x6A,
+            (byte) 0x52, (byte) 0x9C, (byte) 0xCF, (byte) 0x31,
+            (byte) 0xD0, (byte) 0x4B, (byte) 0x89, (byte) 0xFE,
+            (byte) 0x17, (byte) 0x63, (byte) 0xB8, (byte) 0x2D
+    };
+    private static final int ATAK_DATA_TYPE_AX25 = 0xFF01;
+    private static final int ATAK_DATA_TYPE_RAW = 0xFF02;
+    private static final int OUT_PATH_FLOOD = 0xFF;
 
     private final Context context;
     private final PacketRouter packetRouter;
@@ -103,7 +115,6 @@ public class BtConnectionManager {
     private final AtomicBoolean scanCompleteNotified = new AtomicBoolean(false);
     private final AtomicLong lastIoActivityMs = new AtomicLong(0L);
     private final AtomicInteger outboundMsgId = new AtomicInteger(1);
-    private final AtomicInteger activeMeshChannel = new AtomicInteger(0);
     private final Set<String> seenScanAddresses = new HashSet<>();
 
     private final CopyOnWriteArrayList<ConnectionListener> listeners =
@@ -622,6 +633,7 @@ public class BtConnectionManager {
             return false;
         }
 
+        int channel = getMeshChannelIndex();
         int msgId = outboundMsgId.getAndIncrement() & 0x7fffffff;
         int total = (ax25Frame.length + MAX_RAW_AX25_CHUNK - 1) / MAX_RAW_AX25_CHUNK;
         Log.d(TAG, "sendKissFrame over mesh bytes=" + ax25Frame.length + " chunks=" + total);
@@ -636,8 +648,9 @@ public class BtConnectionManager {
                 Log.w(TAG, "Mesh payload too long, dropping frame");
                 return false;
             }
-            Log.d(TAG, "chunk " + (i + 1) + "/" + total + " textLen=" + payload.length());
-            enqueueCommand(buildSendChannelMessageCommand(getMeshChannelIndex(), payload));
+            byte[] payloadBytes = payload.getBytes(StandardCharsets.UTF_8);
+            Log.d(TAG, "chunk " + (i + 1) + "/" + total + " datagramBytes=" + payloadBytes.length);
+            enqueueCommand(buildSendChannelDataCommand(channel, ATAK_DATA_TYPE_AX25, payloadBytes));
         }
         packetRouter.notifyPacketTransmitted();
         return true;
@@ -655,7 +668,10 @@ public class BtConnectionManager {
         if (payload.length() > MAX_MESH_MESSAGE_LEN) {
             return false;
         }
-        enqueueCommand(buildSendChannelMessageCommand(getMeshChannelIndex(), payload));
+        enqueueCommand(buildSendChannelDataCommand(
+                getMeshChannelIndex(),
+                ATAK_DATA_TYPE_RAW,
+                payload.getBytes(StandardCharsets.UTF_8)));
         return true;
     }
 
@@ -968,6 +984,22 @@ public class BtConnectionManager {
         return new byte[]{CMD_GET_CHANNEL, (byte) (idx & 0xFF)};
     }
 
+    private byte[] buildSetChannelCommand(int idx, String name, byte[] secret) {
+        byte[] out = new byte[1 + 1 + 32 + 16];
+        out[0] = CMD_SET_CHANNEL;
+        out[1] = (byte) (idx & 0xFF);
+        byte[] nameBytes = name != null
+                ? name.getBytes(StandardCharsets.UTF_8)
+                : new byte[0];
+        int nameLen = Math.min(32, nameBytes.length);
+        System.arraycopy(nameBytes, 0, out, 2, nameLen);
+        if (secret != null) {
+            int secLen = Math.min(16, secret.length);
+            System.arraycopy(secret, 0, out, 34, secLen);
+        }
+        return out;
+    }
+
     private byte[] buildSendChannelMessageCommand(int channel, String text) {
         byte[] msg = text.getBytes(StandardCharsets.UTF_8);
         ByteBuffer buf = ByteBuffer.allocate(7 + msg.length);
@@ -981,21 +1013,23 @@ public class BtConnectionManager {
         return buf.array();
     }
 
+    private byte[] buildSendChannelDataCommand(int channel, int dataType, byte[] payload) {
+        int payloadLen = payload != null ? payload.length : 0;
+        ByteBuffer buf = ByteBuffer.allocate(6 + payloadLen);
+        buf.order(ByteOrder.LITTLE_ENDIAN);
+        buf.put(CMD_SEND_CHANNEL_DATA);
+        buf.put((byte) Math.max(0, Math.min(7, channel)));
+        buf.put((byte) OUT_PATH_FLOOD);
+        buf.put((byte) (dataType & 0xFF));
+        buf.put((byte) ((dataType >> 8) & 0xFF));
+        if (payloadLen > 0) {
+            buf.put(payload);
+        }
+        return buf.array();
+    }
+
     private int getMeshChannelIndex() {
-        int discovered = activeMeshChannel.get();
-        if (discovered >= 0 && discovered <= 7) {
-            return discovered;
-        }
-        try {
-            SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
-            String val = prefs.getString("meshatak_mesh_channel", "0");
-            int i = Integer.parseInt(val);
-            if (i < 0) return 0;
-            if (i > 7) return 7;
-            return i;
-        } catch (Exception ignored) {
-            return 0;
-        }
+        return ATAK_CHANNEL_INDEX;
     }
 
     private void handleCompanionPacket(byte[] pkt) {
@@ -1025,6 +1059,11 @@ public class BtConnectionManager {
         }
         if (t == RESP_DEVICE_INFO) {
             logDeviceInfo(pkt);
+            return;
+        }
+        if (t == RESP_CHANNEL_DATA_RECV) {
+            handleChannelData(pkt);
+            enqueueCommand(buildGetNextMessageCommand());
             return;
         }
         String message = null;
@@ -1061,6 +1100,28 @@ public class BtConnectionManager {
         return text.substring(p).trim();
     }
 
+    private void handleChannelData(byte[] pkt) {
+        if (pkt == null || pkt.length < 9) {
+            return;
+        }
+        int dataType = ((pkt[7] & 0xFF) << 8) | (pkt[6] & 0xFF);
+        int dataLen = pkt[8] & 0xFF;
+        int available = pkt.length - 9;
+        if (available <= 0 || dataLen <= 0) {
+            return;
+        }
+        int copyLen = Math.min(dataLen, available);
+        if (dataType != ATAK_DATA_TYPE_AX25 && dataType != ATAK_DATA_TYPE_RAW) {
+            return;
+        }
+        String text = new String(pkt, 9, copyLen, StandardCharsets.UTF_8);
+        String routed = extractRoutableEnvelope(text);
+        if (routed != null) {
+            Log.d(TAG, "RX mesh datagram env len=" + routed.length());
+            handleMeshMessage(routed);
+        }
+    }
+
     private void applyChannelInfo(byte[] pkt) {
         if (pkt == null || pkt.length < 50) {
             return;
@@ -1075,11 +1136,8 @@ public class BtConnectionManager {
         String name = (nul >= 0 ? raw.substring(0, nul) : raw).trim();
         String secretFp = channelSecretFingerprint(pkt, 34, 16);
         Log.d(TAG, "Channel slot " + idx + " name='" + name + "' secretFp=" + secretFp);
-        if (!name.isEmpty()) {
-            int old = activeMeshChannel.getAndSet(idx);
-            if (old != idx) {
-                Log.i(TAG, "Auto-selected MeshCore channel " + idx + " (" + name + ")");
-            }
+        if (idx == ATAK_CHANNEL_INDEX) {
+            Log.i(TAG, "ATAK channel slot " + idx + " name='" + name + "' secretFp=" + secretFp);
         }
     }
 
@@ -1317,6 +1375,10 @@ public class BtConnectionManager {
             notifyConnected(lastDevice);
             enqueueCommand(buildAppStartCommand());
             enqueueCommand(buildDeviceQueryCommand());
+            enqueueCommand(buildSetChannelCommand(
+                    ATAK_CHANNEL_INDEX,
+                    ATAK_CHANNEL_NAME,
+                    ATAK_CHANNEL_SECRET));
             for (int i = 0; i < 8; i++) {
                 enqueueCommand(buildGetChannelInfoCommand(i));
             }
