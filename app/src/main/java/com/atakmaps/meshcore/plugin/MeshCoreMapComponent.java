@@ -85,6 +85,17 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             @Override
             public void onConnected(android.bluetooth.BluetoothDevice device) {
                 MeshStatusOverlay.setConnected(true);
+                if (cotBridge != null) {
+                    cotBridge.setBtManager(btConnectionManager);
+                    cotBridge.refreshSendableMapItems();
+                    if (mapView != null) {
+                        mapView.post(() -> {
+                            if (cotBridge != null) {
+                                cotBridge.refreshSendableMapItems();
+                            }
+                        });
+                    }
+                }
                 schedulePostConnectBeacon();
             }
 
@@ -112,6 +123,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
 
         dropDownReceiver = new MeshCoreDropDownReceiver(
                 view, pluginContext, btConnectionManager, contactTracker, cotBridge);
+        dropDownReceiver.setEncryptionManager(encryptionManager);
         packetRouter.setPacketCountListener(dropDownReceiver);
 
         AtakBroadcast.DocumentedIntentFilter filter =
@@ -127,6 +139,9 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                         new SettingsFragment(context)));
         view.post(() -> MeshStatusOverlay.install(pluginContext));
         MeshStatusOverlay.setConnected(btConnectionManager.isConnected());
+        if (btConnectionManager.isConnected() && cotBridge != null) {
+            cotBridge.refreshSendableMapItems();
+        }
         contactTracker.start();
         chatBridge.setRelayOutgoing(true);
         chatBridge.startOutgoingRelay();

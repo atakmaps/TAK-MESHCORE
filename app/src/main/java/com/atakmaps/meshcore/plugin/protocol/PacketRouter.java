@@ -211,6 +211,11 @@ public class PacketRouter {
 
                     // Notify ChatBridge so any pending/failed messages for this peer are sent.
                     chatBridge.onPeerActivity(gps.callsign);
+                    MapView pingMv = MapView.getMapView();
+                    if (pingMv != null) {
+                        PingReplyNotifier.maybeNotifyPingReply(
+                                pingMv.getContext(), gps.callsign);
+                    }
                 }
                 break;
 
@@ -227,6 +232,10 @@ public class PacketRouter {
                 String pingCall = new String(pingBytes, java.nio.charset.StandardCharsets.US_ASCII).trim();
                 java.util.Arrays.fill(pingBytes, (byte) 0);
                 Log.d(TAG, "Ping from: " + pingCall);
+                MapView pingMv = MapView.getMapView();
+                if (pingMv != null) {
+                    PingReplyNotifier.notifyPingReceived(pingMv.getContext(), pingCall);
+                }
                 contactTracker.handlePing(pingCall);
                 chatBridge.onPeerActivity(callsign);
                 if (!callsign.equalsIgnoreCase(pingCall)) {
@@ -546,8 +555,13 @@ public class PacketRouter {
         java.util.Arrays.fill(msgBytes, (byte) 0);
 
         Log.d(TAG, "Chat mid=" + messageId + " from " + sender + " [" + room + "] len=" + message.length());
-        chatBridge.injectRadioMessage(sender, room, message, messageId);
-        chatBridge.sendRadioChatAck(messageId, MeshCorePacket.ACK_KIND_DELIVERED);
+        boolean accepted = chatBridge.injectRadioMessage(sender, room, message, messageId);
+        if (accepted) {
+            chatBridge.sendRadioChatAck(messageId, MeshCorePacket.ACK_KIND_DELIVERED);
+        } else {
+            Log.d(TAG, "Skipping DELIVERED ACK for non-local chat mid=" + messageId
+                    + " room=" + room + " sender=" + sender);
+        }
     }
 
     /**

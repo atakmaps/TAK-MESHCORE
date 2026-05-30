@@ -32,6 +32,7 @@ import com.atakmap.android.dropdown.DropDownReceiver;
 import com.atakmap.android.ipc.AtakBroadcast;
 import com.atakmap.android.maps.MetaDataHolder2;
 import com.atakmap.android.maps.MapView;
+import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
 import com.atakmaps.meshcore.plugin.beacon.SmartBeacon;
 import com.atakmaps.meshcore.plugin.beacon.SmartBeaconSettingsDialog;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry;
@@ -40,9 +41,13 @@ import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
 import com.atakmaps.meshcore.plugin.contacts.RadioContact;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
+import com.atakmaps.meshcore.plugin.crypto.EncryptionManager;
+import com.atakmaps.meshcore.plugin.protocol.MeshCorePacket;
 import com.atakmaps.meshcore.plugin.protocol.PacketRouter;
+import com.atakmaps.meshcore.plugin.protocol.PingReplyNotifier;
 import com.atakmaps.meshcore.plugin.ui.MeshStatusOverlay;
 import com.atakmaps.meshcore.plugin.ui.SettingsFragment;
+import com.atakmaps.meshcore.plugin.util.CallsignUtil;
 
 import java.util.ArrayList;
 import java.util.LinkedList;
@@ -69,6 +74,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private final BtConnectionManager btManager;
     private final ContactTracker contactTracker;
     private final CotBridge cotBridge;
+    private EncryptionManager encryptionManager;
 
     private View rootView;
     private View statusDot;
@@ -86,6 +92,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnDisconnect;
     private Button btnSettings;
     private Button btnSendBeacon;
+    private Button btnSendPing;
     private Button btnBeaconSettings;
     private Button btnPluginSettings;
     private Button btnSmartBeaconSettings;
@@ -198,6 +205,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         contactTracker.setListener(this);
     }
 
+    public void setEncryptionManager(EncryptionManager encryptionManager) {
+        this.encryptionManager = encryptionManager;
+    }
+
     @Override
     public void onReceive(Context context, Intent intent) {
         if (SHOW_PLUGIN.equals(intent.getAction())) {
@@ -273,6 +284,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnDisconnect = rootView.findViewById(getId("btn_disconnect"));
         btnSettings = rootView.findViewById(getId("btn_settings"));
         btnSendBeacon = rootView.findViewById(getId("btn_send_beacon"));
+        btnSendPing = rootView.findViewById(getId("btn_send_ping"));
         btnBeaconSettings = rootView.findViewById(getId("btn_beacon_settings"));
         btnPluginSettings = rootView.findViewById(getId("btn_plugin_settings"));
         btnSmartBeaconSettings = rootView.findViewById(getId("btn_smart_beacon_settings"));
@@ -313,6 +325,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (btnSendBeacon != null) {
             btnSendBeacon.setOnClickListener(v -> sendManualBeacon());
+        }
+        if (btnSendPing != null) {
+            btnSendPing.setOnClickListener(v -> sendPing());
         }
         if (btnBeaconSettings != null) {
             btnBeaconSettings.setOnClickListener(v -> showSettingsDialog());
@@ -427,6 +442,32 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 0f,
                 -1);
         appendLog("Beacon sent");
+    }
+
+    private void sendPing() {
+        if (!btManager.isConnected()) {
+            appendLog("Not connected");
+            return;
+        }
+        try {
+            String callsign = getMapView().getSelfMarker().getMetaString("callsign", "UNKNOWN");
+            MeshCorePacket packet = MeshCorePacket.createPingPacket(
+                    CallsignUtil.toRadioCallsign(callsign));
+            byte[] packetBytes = packet.encode();
+            if (encryptionManager != null && encryptionManager.isEnabled()) {
+                packetBytes = encryptionManager.encrypt(packetBytes);
+                if (packetBytes == null) {
+                    appendLog("Ping encryption failed");
+                    return;
+                }
+            }
+            Ax25Frame frame = Ax25Frame.createMeshCoreFrame(callsign, 0, packetBytes);
+            btManager.sendKissFrame(frame.encode());
+            PingReplyNotifier.notePingSent(getMapView().getContext());
+            appendLog("Ping sent over MeshCore");
+        } catch (Exception e) {
+            appendLog("Ping failed: " + e.getMessage());
+        }
     }
 
     private void showSettingsDialog() {

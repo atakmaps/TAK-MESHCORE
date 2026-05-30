@@ -229,13 +229,13 @@ public class ChatBridge {
      * @param message              Message body
      * @param radioPacketMessageId TYPE_CHAT payload id ({@code putInt}); 0 if unknown (APRS path).
      */
-    public void injectRadioMessage(String fromCallsign, String toCallsign,
+    public boolean injectRadioMessage(String fromCallsign, String toCallsign,
                                    String message, int radioPacketMessageId) {
         if (cotBridge == null) {
             Log.w(TAG, "CotBridge not set — cannot inject chat");
-            return;
+            return false;
         }
-        if (message == null || message.isEmpty()) return;
+        if (message == null || message.isEmpty()) return false;
 
         // Gateway envelope: preserve full TAK destination identifiers across 6-byte RF room limits.
         String gatewayToUid = null;
@@ -273,6 +273,24 @@ public class ChatBridge {
         // used sender ANDROID-VETTE as both ends (GeoChat.ANDROID-VETTE.ANDROID-VETTE).
         // Detect RF dest == configured local callsign (or its AX.25 form) FIRST, then use sender UID.
         if (!"All Chat Rooms".equalsIgnoreCase(chatRoom)) {
+            boolean keepGroupThread = isLikelyGroupConversationThread(chatRoom);
+            boolean destinationLooksSelf = inboundRfDestinationLooksLikeSelf(
+                    gatewayToUid, gatewayRoom, chatRoom, toCallsign);
+
+            // Direct RF chat is not routed/hopped: if this packet is explicitly addressed to
+            // another peer, do not inject it locally or mutate Contacts.
+            if (!keepGroupThread && !destinationLooksSelf) {
+                String destUid = cotBridge.resolveBtechUidForId(chatRoom);
+                String selfUid = null;
+                try {
+                    selfUid = MapView.getDeviceUid();
+                } catch (Exception ignored) {
+                }
+                Log.d(TAG, "Inbound DM ignored (not for this device): from=" + fromCallsign
+                        + " room=" + chatRoom + " destUid=" + destUid + " selfUid=" + selfUid);
+                return false;
+            }
+
             String destUid = cotBridge.resolveBtechUidForId(chatRoom);
             String senderUid = cotBridge.resolveBtechUidForId(fromCallsign);
             // APRS senders are intentionally not registered as ATAK Contacts; synthesize an
@@ -299,7 +317,6 @@ public class ChatBridge {
             }
 
             boolean peerThreadResolved = false;
-            boolean keepGroupThread = isLikelyGroupConversationThread(chatRoom);
             if (rfDestinationLooksLikeSelf(chatRoom.trim())
                     && senderUid != null && !senderUid.isEmpty()
                     && (selfUid == null || !selfUid.equals(senderUid))) {
@@ -356,6 +373,43 @@ public class ChatBridge {
 
         cotBridge.injectChatCot(fromCallsign, message, chatRoom,
                 radioPacketMessageId);
+        return true;
+    }
+
+    private boolean inboundRfDestinationLooksLikeSelf(String gatewayToUid,
+                                                      String gatewayRoom,
+                                                      String chatRoom,
+                                                      String wireToCallsign) {
+        String selfUid = null;
+        try {
+            selfUid = MapView.getDeviceUid();
+        } catch (Exception ignored) {
+        }
+        if (gatewayToUid != null && selfUid != null
+                && selfUid.equalsIgnoreCase(gatewayToUid.trim())) {
+            return true;
+        }
+        if (gatewayToUid != null && !gatewayToUid.trim().isEmpty()
+                && rfDestinationLooksLikeSelf(gatewayToUid.trim())) {
+            return true;
+        }
+        if (gatewayRoom != null && !gatewayRoom.trim().isEmpty()
+                && rfDestinationLooksLikeSelf(gatewayRoom.trim())) {
+            return true;
+        }
+        if (chatRoom != null && selfUid != null
+                && chatRoom.trim().equalsIgnoreCase(selfUid)) {
+            return true;
+        }
+        if (chatRoom != null && !chatRoom.trim().isEmpty()
+                && rfDestinationLooksLikeSelf(chatRoom.trim())) {
+            return true;
+        }
+        if (wireToCallsign != null && !wireToCallsign.trim().isEmpty()
+                && rfDestinationLooksLikeSelf(wireToCallsign.trim())) {
+            return true;
+        }
+        return false;
     }
 
     /** True if the RF payload "chat room" equals this operator's callsign or its AX.25 form. */
@@ -394,6 +448,18 @@ public class ChatBridge {
                 }
             }
         } catch (Exception ignored) {
+        }
+        if (r.startsWith(ANDROID_UID_PREFIX)) {
+            String bare = r.substring(ANDROID_UID_PREFIX.length());
+            if (loc.equalsIgnoreCase(bare)) {
+                return true;
+            }
+            try {
+                if (CallsignUtil.toRadioCallsign(loc).equalsIgnoreCase(bare)) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
         }
         return false;
     }
@@ -1569,21 +1635,38 @@ public class ChatBridge {
     }
 
     /**
-     * Notify peer over RF that their chat frame was received (GeoChat delivered).
+     * Wait for follow-up RF traffic (sender CoT relay, OPENRL guard, etc.) to clear
+     * before keying a compact chat ACK — reduces mesh drops from on-channel collisions.
+     */
+    private static final long RF_CHAT_ACK_DELIVERED_DELAY_MS = 5000L;
+    private static final long RF_CHAT_ACK_READ_DELAY_MS = 5000L;
+
+    /**
+     * Notify peer over RF that their chat frame was received (GeoChat delivered/read).
      */
     public void sendRadioChatAck(int wireMessageId, byte ackKind) {
-        sendRadioChatAck(wireMessageId, ackKind, 0);
+        if (!relayOutgoing || btManager == null || !btManager.isConnected()) {
+            return;
+        }
+        long delayMs = ackKind == MeshCorePacket.ACK_KIND_READ
+                ? RF_CHAT_ACK_READ_DELAY_MS
+                : RF_CHAT_ACK_DELIVERED_DELAY_MS;
+        Log.d(TAG, "Scheduling radio chat ACK kind=" + ackKind + " mid=" + wireMessageId
+                + " in " + (delayMs / 1000) + "s");
+        android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        h.postDelayed(() -> sendRadioChatAckWhenReady(wireMessageId, ackKind, 0), delayMs);
     }
 
-    private void sendRadioChatAck(int wireMessageId, byte ackKind, int deferAttempt) {
-        if (!relayOutgoing || btManager == null || !btManager.isConnected()) {
+    private void sendRadioChatAckWhenReady(int wireMessageId, byte ackKind, int deferAttempt) {
+        if (disposed || !relayOutgoing || btManager == null || !btManager.isConnected()) {
             return;
         }
         if (com.atakmaps.meshcore.plugin.protocol.RfTxArbitrator.get().shouldDeferRfChatAck()) {
             if (deferAttempt < 24) {
                 android.os.Handler h = new android.os.Handler(
                         android.os.Looper.getMainLooper());
-                h.postDelayed(() -> sendRadioChatAck(wireMessageId, ackKind, deferAttempt + 1),
+                h.postDelayed(() -> sendRadioChatAckWhenReady(wireMessageId, ackKind,
+                                deferAttempt + 1),
                         400L);
             } else {
                 Log.w(TAG, "Chat ACK deferred too long; dropping mid=" + wireMessageId);

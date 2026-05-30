@@ -19,9 +19,13 @@ import com.atakmap.android.util.IconUtilities;
 import com.atakmap.android.ipc.AtakBroadcast;
 import com.atakmap.android.icons.UserIcon;
 import com.atakmap.android.maps.MapView;
+import com.atakmap.android.maps.MapEvent;
+import com.atakmap.android.maps.MapEventDispatcher;
+import com.atakmap.android.maps.MapItem;
 import com.atakmap.comms.CommsLogger;
 import com.atakmap.comms.CommsMapComponent;
 import com.atakmap.coremap.maps.assets.Icon;
+import com.atakmap.android.importexport.CotEventFactory;
 import com.atakmap.coremap.cot.event.CotDetail;
 import com.atakmap.coremap.cot.event.CotEvent;
 
@@ -38,6 +42,7 @@ import com.atakmaps.meshcore.plugin.protocol.RfSlottedCoTScheduler;
 import com.atakmaps.meshcore.plugin.protocol.RfTxArbitrator;
 import com.atakmaps.meshcore.plugin.protocol.MeshCorePacket;
 import com.atakmaps.meshcore.plugin.protocol.PacketFragmenter;
+import com.atakmaps.meshcore.plugin.protocol.PingReplyNotifier;
 import com.atakmaps.meshcore.plugin.ui.SettingsFragment;
 import com.atakmaps.meshcore.plugin.MeshCoreContactHandler;
 
@@ -90,6 +95,7 @@ public class CotBridge {
     private EncryptionManager encryptionManager;
     private CommsMapComponent.PreSendProcessor preSendProcessor;
     private BroadcastReceiver localCotBroadcastReceiver;
+    private MapEventDispatcher.MapEventDispatchListener sharedMapItemListener;
 
     /** Catches outbound GeoChat: ATAK sends via CotMapComponent external dispatcher, not PreSend. */
     private CommsLogger outboundCommsLogger;
@@ -262,6 +268,99 @@ public class CotBridge {
         }
         return btechContactUids.contains(trimmed)
                 || btechContactUids.contains(trimmed.toUpperCase(Locale.US));
+    }
+
+    public boolean isRadioConnected() {
+        return btManager != null && btManager.isConnected();
+    }
+
+    private static boolean isRelayableMapCotType(String type) {
+        if (type == null || type.isEmpty()) {
+            return false;
+        }
+        return type.startsWith("b-m-p")
+                || type.startsWith("b-m-r")
+                || type.startsWith("a-f-")
+                || type.startsWith("a-h-")
+                || type.startsWith("a-n-")
+                || type.startsWith("a-u-")
+                || type.startsWith("a-p-")
+                || type.startsWith("u-")
+                || type.startsWith("b-r-f-h")
+                || type.startsWith("t-x-d-d");
+    }
+
+    private boolean isSelfPliBeacon(CotEvent event) {
+        if (event == null) {
+            return false;
+        }
+        String type = event.getType();
+        if (type == null || !type.startsWith("a-f-")) {
+            return false;
+        }
+        if (type.contains("-U-C")) {
+            return true;
+        }
+        String uid = event.getUID();
+        if (uid == null || uid.isEmpty()) {
+            return false;
+        }
+        String localUid = cachedLocalDeviceUidForGeoChat;
+        if (localUid == null || localUid.isEmpty()) {
+            try {
+                localUid = MapView.getDeviceUid();
+            } catch (Exception ignored) {
+            }
+        }
+        return uid.equals(localUid);
+    }
+
+    private boolean shouldRelayBroadcastMapCot(CotEvent event, String[] toUIDs) {
+        if (event == null) {
+            return false;
+        }
+        if (toUIDs != null && toUIDs.length > 0) {
+            return false;
+        }
+        String type = event.getType();
+        if (!isRelayableMapCotType(type)) {
+            return false;
+        }
+        return !isSelfPliBeacon(event);
+    }
+
+    private boolean shouldRelayMapCotToContactUids(String[] toUIDs) {
+        if (toUIDs == null || toUIDs.length == 0) {
+            return false;
+        }
+        String self = null;
+        try {
+            self = MapView.getDeviceUid();
+        } catch (Exception ignored) {
+        }
+        for (String uid : toUIDs) {
+            if (uid == null || uid.trim().isEmpty()) {
+                continue;
+            }
+            String trimmed = uid.trim();
+            if (ALL_CHAT_ROOMS.equalsIgnoreCase(trimmed)) {
+                continue;
+            }
+            if (self != null && self.equalsIgnoreCase(trimmed)) {
+                continue;
+            }
+            if (isBtechContactUid(trimmed)) {
+                return true;
+            }
+            try {
+                Contact c = Contacts.getInstance().getContactByUuid(trimmed);
+                if (c instanceof IndividualContact) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
     }
 
     private static final String ANDROID_UID_PREFIX = "ANDROID-";
@@ -602,6 +701,10 @@ public class CotBridge {
                 markInboundInjectSkipOutboundRelay(event.getUID());
                 dispatchCotEvent(event);
                 maybeRelayInboundRadioCotToTak(event);
+                MapView pingMv = MapView.getMapView();
+                if (pingMv != null) {
+                    PingReplyNotifier.maybeNotifyPingReply(pingMv.getContext(), callsign);
+                }
             } else {
                 Log.w(TAG, "Invalid position CoT for " + callsign);
             }
@@ -709,6 +812,11 @@ public class CotBridge {
                     dispatchCotEvent(event);
                 }
                 maybeRelayInboundRadioCotToTak(event);
+                MapView pingMv = MapView.getMapView();
+                if (pingMv != null) {
+                    PingReplyNotifier.maybeNotifyPingReplyFromCot(
+                            pingMv.getContext(), event);
+                }
             }
         } catch (Exception e) {
             Log.e(TAG, "Error injecting compressed CoT", e);
@@ -1511,6 +1619,7 @@ public class CotBridge {
             @Override
             public void logSend(CotEvent event, String dest) {
                 maybeRelayGeoChatFromCommsLogger(event);
+                maybeRelayMapCotFromCommsLogger(event, dest);
             }
 
             @Override
@@ -1547,6 +1656,17 @@ public class CotBridge {
             Log.d(TAG, "Registered local COT_PLACED/COT_DELETED relay receiver");
         } catch (Exception e) {
             Log.w(TAG, "Failed to register local COT relay receiver", e);
+        }
+
+        sharedMapItemListener = event -> maybeRelaySharedMapItem(event);
+        try {
+            mapView.getMapEventDispatcher().addMapEventListener(
+                    MapEvent.ITEM_PERSIST, sharedMapItemListener);
+            mapView.getMapEventDispatcher().addMapEventListener(
+                    MapEvent.ITEM_SHARED, sharedMapItemListener);
+            Log.d(TAG, "Registered ITEM_PERSIST/ITEM_SHARED relay listener");
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to register shared map item relay listener", e);
         }
 
         preSendProcessor = (event, toUIDs) -> {
@@ -1653,6 +1773,21 @@ public class CotBridge {
                         return;
                     }
                 }
+                new Thread(() -> sendCotOverRadio(event)).start();
+                return;
+            }
+
+            if (isRelayableMapCotType(type) && shouldRelayMapCotToContactUids(toUIDs)) {
+                Log.d(TAG, "Relaying contact-targeted map CoT to radio: type=" + type
+                        + " uid=" + event.getUID()
+                        + " toUIDs=" + java.util.Arrays.toString(toUIDs));
+                new Thread(() -> sendCotOverRadio(event)).start();
+                return;
+            }
+
+            if (shouldRelayBroadcastMapCot(event, toUIDs)) {
+                Log.d(TAG, "Relaying broadcast map CoT to radio: type=" + type
+                        + " uid=" + event.getUID());
                 new Thread(() -> sendCotOverRadio(event)).start();
                 return;
             }
@@ -1833,6 +1968,69 @@ public class CotBridge {
         }
     }
 
+    private void maybeRelayMapCotFromCommsLogger(CotEvent event, String dest) {
+        if (btManager == null || !btManager.isConnected()) return;
+        if (event == null || dest == null || !"broadcast".equalsIgnoreCase(dest.trim())) return;
+        if (!shouldRelayBroadcastMapCot(event, null)) return;
+        String uid = event.getUID();
+        if (uid != null && shouldSkipOutboundRelayWasInboundInject(uid)) return;
+        if (isDuplicateLocalRelay(event)) return;
+        Log.d(TAG, "Outbound map broadcast (CommsLogger) relay: type=" + event.getType()
+                + " uid=" + uid);
+        new Thread(() -> sendCotOverRadio(event)).start();
+    }
+
+    private void maybeRelaySharedMapItem(MapEvent event) {
+        if (event == null || btManager == null || !btManager.isConnected()) return;
+
+        String eventType = event.getType();
+        if (!MapEvent.ITEM_PERSIST.equals(eventType)
+                && !MapEvent.ITEM_SHARED.equals(eventType)) {
+            return;
+        }
+
+        Class<?> from = event.getFrom();
+        if (from == null
+                || !ContactPresenceDropdown.class.getName().equals(from.getName())) {
+            return;
+        }
+
+        Bundle extras = event.getExtras();
+        if (extras == null || !extras.getBoolean("dontSend", false)) {
+            return;
+        }
+        if (extras.getBoolean("internal", true)) {
+            return;
+        }
+        String[] toUIDs = extras.getStringArray("toUIDs");
+        if (toUIDs != null && toUIDs.length > 0) {
+            return;
+        }
+
+        MapItem item = event.getItem();
+        if (item == null) return;
+
+        CotEvent cotEvent;
+        try {
+            cotEvent = CotEventFactory.createCotEvent(item);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to build CoT for shared map item uid=" + item.getUID(), e);
+            return;
+        }
+        if (cotEvent == null || !isRelayableMapCotType(cotEvent.getType())) {
+            return;
+        }
+
+        String uid = cotEvent.getUID();
+        if (uid != null && shouldSkipOutboundRelayWasInboundInject(uid)) return;
+        if (isDuplicateLocalRelay(cotEvent)) return;
+
+        markMapItemSendable(uid);
+        Log.d(TAG, "Shared map item broadcast relay: type=" + cotEvent.getType()
+                + " uid=" + uid + " via=" + eventType);
+        new Thread(() -> sendCotOverRadio(cotEvent)).start();
+    }
+
     /**
      * Full {@code b-t-f} with contact {@code hierarchy} — slotted to reduce RF collisions.
      */
@@ -1872,7 +2070,6 @@ public class CotBridge {
 
     private void maybeRelayLocalCotBroadcast(Intent intent) {
         if (intent == null) return;
-        if (!relayOutgoingSa) return;
         if (btManager == null || !btManager.isConnected()) return;
 
         final String action = intent.getAction();
@@ -1885,24 +2082,111 @@ public class CotBridge {
         if (cotXml == null || cotXml.isEmpty()) {
             cotXml = intent.getStringExtra("cot");
         }
-        if (cotXml == null || cotXml.isEmpty()) return;
 
-        CotEvent event;
-        try {
-            event = CotEvent.parse(cotXml);
-        } catch (Exception ignored) {
-            return;
+        CotEvent event = null;
+        if (cotXml != null && !cotXml.isEmpty()) {
+            try {
+                event = CotEvent.parse(cotXml);
+            } catch (Exception ignored) {
+            }
+        }
+        if (event == null) {
+            String uid = intent.getStringExtra("uid");
+            if (uid != null && !uid.isEmpty() && mapView != null) {
+                MapItem item = mapView.getRootGroup().deepFindUID(uid);
+                if (item != null) {
+                    try {
+                        event = CotEventFactory.createCotEvent(item);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
         }
         if (event == null) return;
-        if (!shouldRelayLocalMapCot(event, action)) return;
 
-        String uid = event.getUID();
+        final CotEvent relayEvent = event;
+        if (isRelayableMapCotType(relayEvent.getType())) {
+            markMapItemSendable(relayEvent.getUID());
+        }
+        if (!shouldRelayLocalMapCot(relayEvent, action)) return;
+
+        String uid = relayEvent.getUID();
         if (uid != null && shouldSkipOutboundRelayWasInboundInject(uid)) return;
-        if (isDuplicateLocalRelay(event)) return;
+        if (isDuplicateLocalRelay(relayEvent)) return;
 
         Log.d(TAG, "Local map CoT relay over RF: action=" + action
-                + " type=" + event.getType() + " uid=" + uid);
-        new Thread(() -> sendCotOverRadio(event)).start();
+                + " type=" + relayEvent.getType() + " uid=" + uid);
+        new Thread(() -> sendCotOverRadio(relayEvent)).start();
+    }
+
+    private void runOnMapView(Runnable action) {
+        if (action == null || mapView == null) {
+            return;
+        }
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            action.run();
+        } else {
+            mapView.post(action);
+        }
+    }
+
+    public void markMapItemSendable(String uid) {
+        if (uid == null || uid.trim().isEmpty() || mapView == null) {
+            return;
+        }
+        if (!isRadioConnected()) {
+            return;
+        }
+        final String trimmed = uid.trim();
+        runOnMapView(() -> {
+            try {
+                com.atakmap.android.maps.MapItem item =
+                        mapView.getRootGroup().deepFindUID(trimmed);
+                if (item == null) {
+                    return;
+                }
+                if (!item.getMetaBoolean("sendable", false)) {
+                    item.setMetaBoolean("sendable", true);
+                    Log.d(TAG, "Marked map item sendable uid=" + trimmed
+                            + " type=" + item.getType());
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "markMapItemSendable failed uid=" + trimmed, e);
+            }
+        });
+    }
+
+    public void refreshSendableMapItems() {
+        if (!isRadioConnected() || mapView == null) {
+            return;
+        }
+        runOnMapView(() -> {
+            try {
+                refreshSendableMapItems(mapView.getRootGroup());
+            } catch (Exception e) {
+                Log.w(TAG, "refreshSendableMapItems failed", e);
+            }
+        });
+    }
+
+    private void refreshSendableMapItems(com.atakmap.android.maps.MapGroup group) {
+        if (group == null) {
+            return;
+        }
+        for (com.atakmap.android.maps.MapItem item : group.getItems()) {
+            if (item == null) {
+                continue;
+            }
+            String type = item.getType();
+            if (type != null && isRelayableMapCotType(type)) {
+                if (!item.getMetaBoolean("sendable", false)) {
+                    item.setMetaBoolean("sendable", true);
+                }
+            }
+        }
+        for (com.atakmap.android.maps.MapGroup child : group.getChildGroups()) {
+            refreshSendableMapItems(child);
+        }
     }
 
     private boolean shouldRelayLocalMapCot(CotEvent event, String action) {
@@ -1910,26 +2194,18 @@ public class CotBridge {
         String type = event.getType();
         if (type == null || type.isEmpty()) return false;
 
-        // Chat has its own dedicated compact relay path; avoid duplicate chat TX.
         if ("b-t-f".equals(type) || "b-t-f-r".equals(type) || "b-t-f-d".equals(type)) {
             return false;
         }
 
-        // Skip local/self PLI updates; beacon path is authoritative.
-        String uid = event.getUID();
-        String localUid = null;
-        try { localUid = MapView.getDeviceUid(); } catch (Exception ignored) {}
-        if (uid != null && uid.equals(localUid) && type.startsWith("a-f-")) {
+        if (isSelfPliBeacon(event)) {
             return false;
         }
 
-        // Explicitly include point/route updates and delete tombstones.
-        return type.startsWith("b-m-p")
-                || type.startsWith("b-m-r")
-                || type.startsWith("a-f-")
-                || type.startsWith("u-")
-                || type.startsWith("t-x-d-d")
-                || "com.atakmap.android.maps.COT_DELETED".equals(action);
+        if ("com.atakmap.android.maps.COT_DELETED".equals(action)) {
+            return true;
+        }
+        return isRelayableMapCotType(type);
     }
 
     private boolean isDuplicateLocalRelay(CotEvent event) {
@@ -2014,6 +2290,17 @@ public class CotBridge {
                 Log.w(TAG, "unregister localCotBroadcastReceiver", e);
             }
             localCotBroadcastReceiver = null;
+        }
+        if (sharedMapItemListener != null && mapView != null) {
+            try {
+                mapView.getMapEventDispatcher().removeMapEventListener(
+                        MapEvent.ITEM_PERSIST, sharedMapItemListener);
+                mapView.getMapEventDispatcher().removeMapEventListener(
+                        MapEvent.ITEM_SHARED, sharedMapItemListener);
+            } catch (Exception e) {
+                Log.w(TAG, "unregister sharedMapItemListener", e);
+            }
+            sharedMapItemListener = null;
         }
         if (outboundCommsLogger != null) {
             try {

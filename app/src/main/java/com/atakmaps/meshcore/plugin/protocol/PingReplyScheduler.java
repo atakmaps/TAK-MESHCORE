@@ -89,6 +89,7 @@ public final class PingReplyScheduler {
                     gp.getLatitude(), gp.getLongitude(),
                     gp.getAltitude(), (float) speedMs, (float) course, -1);
             Log.d(TAG, "Ping reply sent (slotted)");
+            PingReplyNotifier.notifyPingReplySent(context);
         } catch (Exception e) {
             Log.w(TAG, "Ping reply transmit failed: " + e.getMessage());
         }
