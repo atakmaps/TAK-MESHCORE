@@ -96,6 +96,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnBeaconSettings;
     private Button btnPluginSettings;
     private Button btnSmartBeaconSettings;
+    private Button btnMeshSendAdvert;
     private Switch switchSmartBeacon;
     private Switch switchMeshEnableGps;
     private Button btnUpdateGpsFromMeshcore;
@@ -288,6 +289,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnBeaconSettings = rootView.findViewById(getId("btn_beacon_settings"));
         btnPluginSettings = rootView.findViewById(getId("btn_plugin_settings"));
         btnSmartBeaconSettings = rootView.findViewById(getId("btn_smart_beacon_settings"));
+        btnMeshSendAdvert = rootView.findViewById(getId("btn_meshcore_send_advert"));
         switchSmartBeacon = rootView.findViewById(getId("switch_smart_beacon"));
         switchMeshEnableGps = rootView.findViewById(getId("switch_mesh_enable_gps"));
         btnUpdateGpsFromMeshcore = rootView.findViewById(getId("btn_update_gps_from_meshcore"));
@@ -342,6 +344,19 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             btnSmartBeaconSettings.setOnClickListener(v ->
                     SmartBeaconSettingsDialog.show(getMapView().getContext(),
                             () -> appendLog("Smart beacon settings updated")));
+        }
+        if (btnMeshSendAdvert != null) {
+            btnMeshSendAdvert.setOnClickListener(v -> {
+                if (!btManager.isConnected()) {
+                    appendLog("Connect to MeshCore before sending advert");
+                    return;
+                }
+                if (btManager.sendSelfAdvert()) {
+                    appendLog("Requested MeshCore self advert");
+                } else {
+                    appendLog("Failed to request self advert");
+                }
+            });
         }
         if (switchMeshEnableGps != null) {
             switchMeshEnableGps.setOnCheckedChangeListener((buttonView, isChecked) -> {

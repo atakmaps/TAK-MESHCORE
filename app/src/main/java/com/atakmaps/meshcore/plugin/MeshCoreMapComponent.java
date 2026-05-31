@@ -2,10 +2,15 @@ package com.atakmaps.meshcore.plugin;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.preference.PreferenceManager;
 import android.util.Log;
 
 import com.atakmap.android.dropdown.DropDownMapComponent;
 import com.atakmap.android.ipc.AtakBroadcast;
+import com.atakmap.android.maps.MapEvent;
+import com.atakmap.android.maps.MapEventDispatcher;
+import com.atakmap.android.maps.MapItem;
 import com.atakmap.android.maps.PointMapItem;
 import com.atakmap.android.maps.MapView;
 import com.atakmap.app.preferences.ToolsPreferenceFragment;
@@ -15,6 +20,7 @@ import com.atakmaps.meshcore.plugin.chat.ChatBridge;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
 import com.atakmaps.meshcore.plugin.crypto.EncryptionManager;
+import com.atakmaps.meshcore.plugin.mesh.MeshDetailsDropDownReceiver;
 import com.atakmaps.meshcore.plugin.protocol.PacketRouter;
 import com.atakmaps.meshcore.plugin.ui.MeshStatusOverlay;
 import com.atakmaps.meshcore.plugin.ui.SettingsFragment;
@@ -30,6 +36,8 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
     public static final String PLUGIN_PACKAGE = "com.atakmaps.meshcore.plugin";
     public static final String ACTION_BEACON_INTERVAL_CHANGED =
             "com.atakmaps.meshcore.plugin.BEACON_INTERVAL_CHANGED";
+    private static final String PREF_MESH_SHOW_REPEATERS = "uvpro_mesh_show_repeaters";
+    private static final String PREF_MESH_SHOW_NODES = "uvpro_mesh_show_nodes";
 
     private Context pluginContext;
     private MapView mapView;
@@ -40,7 +48,9 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
     private ChatBridge chatBridge;
     private ContactTracker contactTracker;
     private MeshCoreDropDownReceiver dropDownReceiver;
+    private MeshDetailsDropDownReceiver meshDetailsDropDownReceiver;
     private EncryptionManager encryptionManager;
+    private MapEventDispatcher.MapEventDispatchListener mapItemClickListener;
     private final Runnable postConnectBeaconRunnable = this::sendPostConnectBeacon;
     private final Runnable waitForPositionBeaconRunnable = this::waitForPositionThenScheduleBeacon;
 
@@ -81,6 +91,28 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         packetRouter.setEncryptionManager(encryptionManager);
 
         btConnectionManager = new BtConnectionManager(context, packetRouter);
+        btConnectionManager.addMeshAdvertListener(advert -> {
+            if (advert == null || cotBridge == null || mapView == null) {
+                return;
+            }
+            SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(mapView.getContext());
+            boolean showRepeaters = prefs.getBoolean(PREF_MESH_SHOW_REPEATERS, true);
+            boolean showNodes = prefs.getBoolean(PREF_MESH_SHOW_NODES, true);
+            boolean isRepeater = advert.advertType == 0x02;
+            if ((isRepeater && !showRepeaters) || (!isRepeater && !showNodes)) {
+                return;
+            }
+            String uidPrefix = isRepeater ? "MESHCORE-RPTR-" : "MESHCORE-NODE-";
+            String pub = advert.pubKeyHex != null ? advert.pubKeyHex : "";
+            String uid = uidPrefix + pub;
+            String advertName = (advert.name != null && !advert.name.trim().isEmpty())
+                    ? advert.name.trim() : uid;
+            String details = "Name: " + advertName + "\n"
+                    + "Pubkey: " + pub + "\n"
+                    + "Type: " + (isRepeater ? "Repeater" : "Node");
+            cotBridge.upsertMeshAdvertMarker(uid, advertName, details,
+                    advert.latitude, advert.longitude, isRepeater);
+        });
         btConnectionManager.addListener(new BtConnectionManager.ConnectionListener() {
             @Override
             public void onConnected(android.bluetooth.BluetoothDevice device) {
@@ -130,6 +162,12 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 new AtakBroadcast.DocumentedIntentFilter();
         filter.addAction(MeshCoreDropDownReceiver.SHOW_PLUGIN);
         registerDropDownReceiver(dropDownReceiver, filter);
+        meshDetailsDropDownReceiver = new MeshDetailsDropDownReceiver(view, pluginContext, cotBridge);
+        AtakBroadcast.DocumentedIntentFilter meshDetailsFilter =
+                new AtakBroadcast.DocumentedIntentFilter();
+        meshDetailsFilter.addAction(MeshDetailsDropDownReceiver.SHOW_MESH_DETAILS);
+        registerDropDownReceiver(meshDetailsDropDownReceiver, meshDetailsFilter);
+        setupMeshMapItemClickListener();
         ToolsPreferenceFragment.register(
                 new ToolsPreferenceFragment.ToolPreference(
                         "MeshCore Settings",
@@ -241,6 +279,36 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         return !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001);
     }
 
+    private void setupMeshMapItemClickListener() {
+        if (mapView == null || mapItemClickListener != null) {
+            return;
+        }
+        mapItemClickListener = event -> {
+            try {
+                if (event == null || !MapEvent.ITEM_CLICK.equals(event.getType())) {
+                    return;
+                }
+                MapItem item = event.getItem();
+                if (item == null || !CotBridge.isUvproMeshMarker(item)) {
+                    return;
+                }
+                Intent details = new Intent(MeshDetailsDropDownReceiver.SHOW_MESH_DETAILS);
+                details.putExtra(MeshDetailsDropDownReceiver.EXTRA_TARGET_UID, item.getUID());
+                AtakBroadcast.getInstance().sendBroadcast(details);
+                AtakBroadcast.getInstance().sendBroadcast(
+                        new Intent("com.atakmap.android.maps.HIDE_MENU"));
+            } catch (Exception e) {
+                Log.w(TAG, "Mesh details launch failed", e);
+            }
+        };
+        try {
+            mapView.getMapEventDispatcher().addMapEventListener(
+                    MapEvent.ITEM_CLICK, mapItemClickListener);
+        } catch (Exception e) {
+            Log.w(TAG, "Mesh map click listener registration failed", e);
+        }
+    }
+
     @Override
     protected void onDestroyImpl(Context context, MapView view) {
         try {
@@ -248,7 +316,19 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 dropDownReceiver.dispose();
                 dropDownReceiver = null;
             }
+            if (meshDetailsDropDownReceiver != null) {
+                meshDetailsDropDownReceiver.dispose();
+                meshDetailsDropDownReceiver = null;
+            }
         } catch (Exception ignored) {
+        }
+        if (mapItemClickListener != null && view != null) {
+            try {
+                view.getMapEventDispatcher().removeMapEventListener(
+                        MapEvent.ITEM_CLICK, mapItemClickListener);
+            } catch (Exception ignored) {
+            }
+            mapItemClickListener = null;
         }
         ToolsPreferenceFragment.unregister(SettingsFragment.TOOL_SETTINGS_KEY);
         cancelPostConnectBeacon();

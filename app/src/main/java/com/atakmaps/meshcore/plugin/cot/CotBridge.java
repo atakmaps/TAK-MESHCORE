@@ -80,6 +80,12 @@ public class CotBridge {
 
     /** Multi-line APRS packet metadata for {@link com.atakmaps.meshcore.plugin.aprs.AprsDetailsDropDownReceiver}. */
     public static final String META_UVPRO_APRS_DETAILS = "uvpro_aprs_details";
+    /** Marker flag for MeshCore repeater advert points (not APRS contacts/messages). */
+    public static final String META_UVPRO_MESH_REPEATER = "uvpro_mesh_repeater";
+    /** Marker flag for MeshCore node advert points. */
+    public static final String META_UVPRO_MESH_NODE = "uvpro_mesh_node";
+    /** Multi-line MeshCore details text for custom details panel. */
+    public static final String META_UVPRO_MESH_DETAILS = "uvpro_mesh_details";
     private static final long STALE_GRACE_MS = 30_000L;
     private static final long MIN_CONTACT_STALE_MS = 60_000L;
     /** Inbound APRS / radio peers: ATAK uses CoT stale as marker TTL; keep ≥ 2h for sparse beacons. */
@@ -1326,6 +1332,60 @@ public class CotBridge {
      */
     public static boolean isUvproAprsMarker(com.atakmap.android.maps.MapItem item) {
         return item != null && item.getMetaBoolean(META_UVPRO_APRS, false);
+    }
+
+    public static boolean isUvproMeshMarker(com.atakmap.android.maps.MapItem item) {
+        return item != null
+                && (item.getMetaBoolean(META_UVPRO_MESH_REPEATER, false)
+                || item.getMetaBoolean(META_UVPRO_MESH_NODE, false));
+    }
+
+    public void upsertMeshAdvertMarker(String uid, String callsign, String detailsText,
+                                       double latitude, double longitude, boolean isRepeater) {
+        if (uid == null || uid.trim().isEmpty() || this.mapView == null) {
+            return;
+        }
+        final String targetUid = uid.trim();
+        Runnable apply = () -> {
+            try {
+                com.atakmap.android.maps.MapItem item =
+                        this.mapView.getRootGroup().deepFindUID(targetUid);
+                if (!(item instanceof com.atakmap.android.maps.Marker)) {
+                    com.atakmap.android.maps.Marker marker = new com.atakmap.android.maps.Marker(targetUid);
+                    marker.setType("a-f-G-U-C");
+                    marker.setMetaString("entry", "user");
+                    marker.setMetaBoolean("addToObjList", true);
+                    marker.setMetaString("menu", "menus/default_item_w_type.xml");
+                    this.mapView.getRootGroup().addItem(marker);
+                    item = marker;
+                }
+                if (item instanceof com.atakmap.android.maps.PointMapItem
+                        && !Double.isNaN(latitude) && !Double.isNaN(longitude)
+                        && latitude >= -90.0 && latitude <= 90.0
+                        && longitude >= -180.0 && longitude <= 180.0) {
+                    ((com.atakmap.android.maps.PointMapItem) item).setPoint(
+                            new com.atakmap.coremap.maps.coords.GeoPoint(latitude, longitude));
+                }
+                String title = (callsign != null && !callsign.trim().isEmpty())
+                        ? callsign.trim() : targetUid;
+                item.setTitle(title);
+                item.setMetaString("callsign", title);
+                item.setMetaBoolean(META_UVPRO_MESH_REPEATER, isRepeater);
+                item.setMetaBoolean(META_UVPRO_MESH_NODE, !isRepeater);
+                if (detailsText != null && !detailsText.trim().isEmpty()) {
+                    item.setMetaString(META_UVPRO_MESH_DETAILS, detailsText.trim());
+                }
+                item.setMetaBoolean("sendable", false);
+                item.persist(this.mapView.getMapEventDispatcher(), null, this.getClass());
+            } catch (Exception e) {
+                Log.w(TAG, "upsertMeshAdvertMarker failed uid=" + targetUid, e);
+            }
+        };
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            apply.run();
+        } else {
+            this.mapView.post(apply);
+        }
     }
 
     /**

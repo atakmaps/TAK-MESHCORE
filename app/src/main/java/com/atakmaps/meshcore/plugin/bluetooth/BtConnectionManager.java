@@ -70,10 +70,12 @@ public class BtConnectionManager {
 
     // MeshCore companion commands
     private static final byte CMD_APP_START = 0x01;
+    private static final byte CMD_SEND_SELF_ADVERT = 0x07;
     private static final byte CMD_SEND_CHANNEL_MSG = 0x03;
     private static final byte CMD_GET_NEXT_MSG = 0x0A;
     private static final byte CMD_DEVICE_QUERY = 0x16;
     private static final byte CMD_DEVICE_QUERY_ARG = 0x03;
+    private static final byte CMD_GET_CONTACT_BY_KEY = 0x1E;
     private static final byte CMD_GET_CHANNEL = 0x1F;
     private static final byte CMD_SET_CHANNEL = 0x20;
     private static final byte CMD_GET_GPS_STATE = 0x28;
@@ -92,6 +94,10 @@ public class BtConnectionManager {
     private static final byte RESP_CHANNEL_DATA_RECV = 0x1B;
     private static final byte RESP_NO_MORE_MSGS = 0x0A;
     private static final byte PUSH_MESSAGES_WAITING = (byte) 0x83;
+    private static final byte PUSH_CODE_LOG_RX_DATA = (byte) 0x88;
+    private static final byte PUSH_CODE_ADVERT = (byte) 0x80;
+    private static final byte PUSH_CODE_NEW_ADVERT = (byte) 0x8A;
+    private static final byte RESP_CODE_CONTACT = 0x03;
 
     private static final int MAX_MESH_MESSAGE_LEN = 130; // leave room below 133 chars
     private static final int MAX_RAW_AX25_CHUNK = 57; // 57 bytes -> 76 Base64 chars
@@ -128,6 +134,8 @@ public class BtConnectionManager {
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<MeshStateListener> meshStateListeners =
             new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<MeshAdvertListener> meshAdvertListeners =
+            new CopyOnWriteArrayList<>();
 
     private final Map<Integer, ChunkAccumulator> chunkBuffers = new ConcurrentHashMap<>();
     private final ArrayDeque<byte[]> writeQueue = new ArrayDeque<>();
@@ -142,6 +150,7 @@ public class BtConnectionManager {
     private BluetoothDevice lastDevice;
     private volatile Boolean meshGpsEnabled = null;
     private volatile MeshLocationFix latestSelfLocation = null;
+    private volatile String selfPubKeyHex = "";
     private BluetoothDevice pendingBondDevice;
     private BroadcastReceiver bondReceiver;
     private final AtomicBoolean bondReceiverRegistered = new AtomicBoolean(false);
@@ -186,6 +195,36 @@ public class BtConnectionManager {
     public interface MeshStateListener {
         void onMeshGpsStateChanged(boolean enabled);
         void onMeshSelfLocationUpdated(MeshLocationFix fix);
+    }
+
+    public interface MeshAdvertListener {
+        void onMeshAdvert(MeshAdvert advert);
+    }
+
+    public static final class MeshAdvert {
+        public final int advertType;
+        public final String pubKeyHex;
+        public final String name;
+        public final long advertTimestampSec;
+        public final double latitude;
+        public final double longitude;
+        public final boolean hasPosition;
+
+        public MeshAdvert(int advertType,
+                          String pubKeyHex,
+                          String name,
+                          long advertTimestampSec,
+                          double latitude,
+                          double longitude,
+                          boolean hasPosition) {
+            this.advertType = advertType;
+            this.pubKeyHex = pubKeyHex;
+            this.name = name;
+            this.advertTimestampSec = advertTimestampSec;
+            this.latitude = latitude;
+            this.longitude = longitude;
+            this.hasPosition = hasPosition;
+        }
     }
 
     public static final class MeshLocationFix {
@@ -792,12 +831,26 @@ public class BtConnectionManager {
         meshStateListeners.remove(listener);
     }
 
+    public void addMeshAdvertListener(MeshAdvertListener listener) {
+        if (listener != null) {
+            meshAdvertListeners.add(listener);
+        }
+    }
+
+    public void removeMeshAdvertListener(MeshAdvertListener listener) {
+        meshAdvertListeners.remove(listener);
+    }
+
     public Boolean getMeshGpsEnabled() {
         return meshGpsEnabled;
     }
 
     public MeshLocationFix getLatestSelfLocation() {
         return latestSelfLocation;
+    }
+
+    public String getSelfPubKeyHex() {
+        return selfPubKeyHex != null ? selfPubKeyHex : "";
     }
 
     public void queryMeshGpsEnabled() {
@@ -824,6 +877,14 @@ public class BtConnectionManager {
             return;
         }
         enqueueCommand(buildAppStartCommand());
+    }
+
+    public boolean sendSelfAdvert() {
+        if (!connected.get()) {
+            return false;
+        }
+        enqueueCommand(new byte[]{CMD_SEND_SELF_ADVERT});
+        return true;
     }
 
     public void addBeforeDisconnectHook(Runnable hook) {
@@ -879,6 +940,15 @@ public class BtConnectionManager {
         for (MeshStateListener l : meshStateListeners) {
             try {
                 l.onMeshSelfLocationUpdated(fix);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void notifyMeshAdvert(MeshAdvert advert) {
+        for (MeshAdvertListener l : meshAdvertListeners) {
+            try {
+                l.onMeshAdvert(advert);
             } catch (Exception ignored) {
             }
         }
@@ -1001,6 +1071,16 @@ public class BtConnectionManager {
         return new byte[]{CMD_GET_NEXT_MSG};
     }
 
+    private byte[] buildGetContactByKeyCommand(byte[] advertFrame) {
+        if (advertFrame == null || advertFrame.length < 33) {
+            return null;
+        }
+        byte[] out = new byte[33];
+        out[0] = CMD_GET_CONTACT_BY_KEY;
+        System.arraycopy(advertFrame, 1, out, 1, 32);
+        return out;
+    }
+
     private byte[] buildGetChannelInfoCommand(int idx) {
         return new byte[]{CMD_GET_CHANNEL, (byte) (idx & 0xFF)};
     }
@@ -1063,6 +1143,11 @@ public class BtConnectionManager {
             enqueueCommand(buildGetNextMessageCommand());
             return;
         }
+        if (t == PUSH_CODE_LOG_RX_DATA) {
+            // Firmware indicates additional queued records are available.
+            enqueueCommand(buildGetNextMessageCommand());
+            return;
+        }
         if (t == RESP_NO_MORE_MSGS) {
             return;
         }
@@ -1084,6 +1169,19 @@ public class BtConnectionManager {
         }
         if (t == RESP_CHANNEL_DATA_RECV) {
             handleChannelData(pkt);
+            enqueueCommand(buildGetNextMessageCommand());
+            return;
+        }
+        if (t == PUSH_CODE_NEW_ADVERT || t == PUSH_CODE_ADVERT || t == RESP_CODE_CONTACT) {
+            if (t == PUSH_CODE_NEW_ADVERT || t == PUSH_CODE_ADVERT) {
+                MeshAdvert advert = parseMeshAdvert(pkt);
+                if (advert != null) {
+                    notifyMeshAdvert(advert);
+                    if (t == PUSH_CODE_ADVERT) {
+                        requestFullContactForAdvert(pkt);
+                    }
+                }
+            }
             enqueueCommand(buildGetNextMessageCommand());
             return;
         }
@@ -1175,6 +1273,7 @@ public class BtConnectionManager {
             ByteBuffer bb = ByteBuffer.wrap(pkt).order(ByteOrder.LITTLE_ENDIAN);
             int latE6 = bb.getInt(36);
             int lonE6 = bb.getInt(40);
+            selfPubKeyHex = bytesToHex(pkt, 4, 32);
             long freqHz = ((long) bb.getInt(48)) & 0xFFFFFFFFL;
             long bwHz = ((long) bb.getInt(52)) & 0xFFFFFFFFL;
             int sf = pkt[56] & 0xFF;
@@ -1246,6 +1345,69 @@ public class BtConnectionManager {
         int n = off;
         while (n < end && src[n] != 0) n++;
         return new String(src, off, n - off, StandardCharsets.UTF_8).trim();
+    }
+
+    private String bytesToHex(byte[] src, int off, int len) {
+        if (src == null || off < 0 || len <= 0 || src.length < off + len) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(len * 2);
+        for (int i = off; i < off + len; i++) {
+            int b = src[i] & 0xFF;
+            if (b < 0x10) sb.append('0');
+            sb.append(Integer.toHexString(b));
+        }
+        return sb.toString();
+    }
+
+    private MeshAdvert parseMeshAdvert(byte[] pkt) {
+        try {
+            if (pkt == null || pkt.length < 46) {
+                return null;
+            }
+            int advertType = pkt[1] & 0xFF;
+            String pubKeyHex = bytesToHex(pkt, 1, 32);
+            int nameStart = 33;
+            int nameEnd = nameStart;
+            while (nameEnd < pkt.length && pkt[nameEnd] != 0) {
+                nameEnd++;
+            }
+            String name = new String(pkt, nameStart, Math.max(0, nameEnd - nameStart),
+                    StandardCharsets.UTF_8).trim();
+
+            ByteBuffer bb = ByteBuffer.wrap(pkt).order(ByteOrder.LITTLE_ENDIAN);
+            long tsSec = 0L;
+            if (pkt.length >= 44) {
+                tsSec = ((long) bb.getInt(40)) & 0xFFFFFFFFL;
+            }
+            double lat = Double.NaN;
+            double lon = Double.NaN;
+            boolean hasPosition = false;
+            if (pkt.length >= 52) {
+                int latE6 = bb.getInt(44);
+                int lonE6 = bb.getInt(48);
+                lat = latE6 / 1_000_000.0;
+                lon = lonE6 / 1_000_000.0;
+                hasPosition = !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001)
+                        && lat >= -90.0 && lat <= 90.0
+                        && lon >= -180.0 && lon <= 180.0;
+            }
+            return new MeshAdvert(advertType, pubKeyHex, name, tsSec, lat, lon, hasPosition);
+        } catch (Exception e) {
+            Log.w(TAG, "Mesh advert parse failed", e);
+            return null;
+        }
+    }
+
+    private void requestFullContactForAdvert(byte[] advertFrame) {
+        try {
+            byte[] cmd = buildGetContactByKeyCommand(advertFrame);
+            if (cmd != null) {
+                enqueueCommand(cmd);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to request full contact for advert refresh", e);
+        }
     }
 
     private String channelSecretFingerprint(byte[] frame, int off, int len) {
