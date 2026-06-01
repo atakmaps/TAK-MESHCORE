@@ -59,7 +59,7 @@ public class MeshDetailsDropDownReceiver extends DropDownReceiver
             return;
         }
         MapItem item = getMapView().getRootGroup().deepFindUID(uid);
-        if (item == null || !CotBridge.isUvproMeshMarker(item)) {
+        if (item == null || !CotBridge.isMeshcoreMeshMarker(item)) {
             return;
         }
 
@@ -109,7 +109,7 @@ public class MeshDetailsDropDownReceiver extends DropDownReceiver
         if (bodyView == null || item == null) {
             return;
         }
-        String body = item.getMetaString(CotBridge.META_UVPRO_MESH_DETAILS, "");
+        String body = item.getMetaString(CotBridge.META_MESHCORE_MESH_DETAILS, "");
         if (body == null || body.trim().isEmpty()) {
             body = "No MeshCore details captured yet.\n\n"
                     + "Wait for the next advert from this node.";

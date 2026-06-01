@@ -8,7 +8,7 @@ import com.atakmaps.meshcore.plugin.R;
  */
 public final class MeshFavoriteConnector extends Connector {
 
-    public static final String CONNECTOR_TYPE = "connector.uvpro.mesh_favorite";
+    public static final String CONNECTOR_TYPE = "connector.meshcore.mesh_favorite";
     public static final String CONTACT_ACTION =
             "com.atakmaps.meshcore.plugin.action.MESH_FAVORITE_CONTACT";
     private static final String PACKAGE = "com.atakmaps.meshcore.plugin";
@@ -30,6 +30,6 @@ public final class MeshFavoriteConnector extends Connector {
 
     @Override
     public String getIconUri() {
-        return "android.resource://" + PACKAGE + "/" + R.drawable.ic_uvpro;
+        return "android.resource://" + PACKAGE + "/" + R.drawable.ic_meshcore;
     }
 }

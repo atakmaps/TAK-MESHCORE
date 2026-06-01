@@ -9,7 +9,7 @@ import com.atakmaps.meshcore.plugin.chat.ChatBridge;
  */
 public final class MeshSendMessageConnector extends Connector {
 
-    public static final String CONNECTOR_TYPE = "connector.uvpro.mesh_send_message";
+    public static final String CONNECTOR_TYPE = "connector.meshcore.mesh_send_message";
     private static final String PACKAGE = "com.atakmaps.meshcore.plugin";
 
     @Override
@@ -29,6 +29,6 @@ public final class MeshSendMessageConnector extends Connector {
 
     @Override
     public String getIconUri() {
-        return "android.resource://" + PACKAGE + "/" + R.drawable.ic_uvpro;
+        return "android.resource://" + PACKAGE + "/" + R.drawable.ic_meshcore;
     }
 }

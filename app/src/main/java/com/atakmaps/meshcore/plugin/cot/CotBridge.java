@@ -3,7 +3,6 @@ package com.atakmaps.meshcore.plugin.cot;
 import android.content.Context;
 import android.content.Intent;
 import android.content.BroadcastReceiver;
-import android.graphics.Bitmap;
 import android.util.Log;
 
 import android.os.Bundle;
@@ -15,22 +14,18 @@ import com.atakmap.android.contact.Contacts;
 import com.atakmap.android.contact.IndividualContact;
 import com.atakmap.android.contact.PluginConnector;
 import com.atakmap.android.cot.CotMapComponent;
-import com.atakmap.android.util.IconUtilities;
 import com.atakmap.android.ipc.AtakBroadcast;
-import com.atakmap.android.icons.UserIcon;
 import com.atakmap.android.maps.MapView;
 import com.atakmap.android.maps.MapEvent;
 import com.atakmap.android.maps.MapEventDispatcher;
 import com.atakmap.android.maps.MapItem;
 import com.atakmap.comms.CommsLogger;
 import com.atakmap.comms.CommsMapComponent;
-import com.atakmap.coremap.maps.assets.Icon;
 import com.atakmap.android.importexport.CotEventFactory;
 import com.atakmap.coremap.cot.event.CotDetail;
 import com.atakmap.coremap.cot.event.CotEvent;
 
 import com.atakmaps.meshcore.plugin.BuildConfig;
-import com.atakmaps.meshcore.plugin.ax25.AprsSymbolMapper;
 import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
 import com.atakmaps.meshcore.plugin.beacon.SmartBeacon;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
@@ -75,20 +70,15 @@ public class CotBridge {
     public static final String ACTION_COT_MARKER_DETAILS =
             "com.atakmap.android.cotdetails.COTINFO";
 
-    /** Set on map items created from inbound APRS position reports. */
-    public static final String META_UVPRO_APRS = "uvpro_aprs";
-
-    /** Multi-line APRS packet metadata for {@link com.atakmaps.meshcore.plugin.aprs.AprsDetailsDropDownReceiver}. */
-    public static final String META_UVPRO_APRS_DETAILS = "uvpro_aprs_details";
-    /** Marker flag for MeshCore repeater advert points (not APRS contacts/messages). */
-    public static final String META_UVPRO_MESH_REPEATER = "uvpro_mesh_repeater";
+    /** Marker flag for MeshCore repeater advert points. */
+    public static final String META_MESHCORE_MESH_REPEATER = "meshcore_mesh_repeater";
     /** Marker flag for MeshCore node advert points. */
-    public static final String META_UVPRO_MESH_NODE = "uvpro_mesh_node";
+    public static final String META_MESHCORE_MESH_NODE = "meshcore_mesh_node";
     /** Multi-line MeshCore details text for custom details panel. */
-    public static final String META_UVPRO_MESH_DETAILS = "uvpro_mesh_details";
+    public static final String META_MESHCORE_MESH_DETAILS = "meshcore_mesh_details";
     private static final long STALE_GRACE_MS = 30_000L;
     private static final long MIN_CONTACT_STALE_MS = 60_000L;
-    /** Inbound APRS / radio peers: ATAK uses CoT stale as marker TTL; keep ≥ 2h for sparse beacons. */
+    /** Inbound radio peers: ATAK uses CoT stale as marker TTL; keep ≥ 2h for sparse beacons. */
     private static final long MIN_INBOUND_RADIO_STALE_MS = 2 * 60 * 60_000L;
 
     private final Context pluginContext;
@@ -135,9 +125,6 @@ public class CotBridge {
     private final Map<String, Long> recentLocalRelayKeys = new ConcurrentHashMap<>();
     private static final long LOCAL_RELAY_DEDUPE_MS = 1500L;
     private static final long INBOUND_CHAT_NOTIFY_DEDUPE_MS = 7000L;
-    private static final int APRS_ICON_TARGET_PX = 52;
-    /** Cache upscaled APRS icons by iconset path to avoid per-refresh bitmap work. */
-    private final Map<String, Icon> aprsUpscaledIconCache = new ConcurrentHashMap<>();
     /** Avoid duplicate user alerts when redundant RF GeoChat CoT arrives. */
     private final Map<String, Long> inboundChatNotifyUntil = new ConcurrentHashMap<>();
 
@@ -240,7 +227,7 @@ public class CotBridge {
     }
 
     /**
-     * Register a contact UID as a UV-PRO radio endpoint.
+     * Register a contact UID as a MeshCore radio endpoint.
      * This is used to route ATAK "send to contact" actions to the radio link
      * without globally relaying all CoT.
      */
@@ -633,7 +620,7 @@ public class CotBridge {
      * Inject a position CoT event into ATAK from radio GPS data.
      *
      * @param senderTeamFromPeer ATAK {@code locationTeam} from the transmitting node
-     *                           (embedded in GPS packet). If null or empty (legacy/APRS path),
+     *                           (embedded in GPS packet). If null or empty,
      *                           falls back to {@code "Cyan"} so we do not apply the
      *                           <em>receiver's</em> team tint to peers.
      */
@@ -641,42 +628,19 @@ public class CotBridge {
                                   double alt, double speed, double course,
                                   String senderTeamFromPeer) {
         injectPositionCot(callsign, lat, lon, alt, speed, course,
-                senderTeamFromPeer, null, null, null, null);
+                senderTeamFromPeer, null, null);
     }
 
     public void injectPositionCot(String callsign, double lat, double lon,
                                   double alt, double speed, double course,
                                   String senderTeamFromPeer, String cotTypeOverride) {
         injectPositionCot(callsign, lat, lon, alt, speed, course,
-                senderTeamFromPeer, cotTypeOverride, null, null, null);
-    }
-
-    public void injectPositionCot(String callsign, double lat, double lon,
-                                  double alt, double speed, double course,
-                                  String senderTeamFromPeer,
-                                  Character aprsSymbolTable,
-                                  Character aprsSymbolCode) {
-        injectPositionCot(callsign, lat, lon, alt, speed, course,
-                senderTeamFromPeer, null, aprsSymbolTable, aprsSymbolCode, null);
-    }
-
-    /**
-     * Injects position CoT with optional remarks (e.g. APRS telemetry summary at last fix).
-     */
-    public void injectPositionCot(String callsign, double lat, double lon,
-                                  double alt, double speed, double course,
-                                  String senderTeamFromPeer,
-                                  Character aprsSymbolTable,
-                                  Character aprsSymbolCode,
-                                  String remarksInner) {
-        injectPositionCot(callsign, lat, lon, alt, speed, course,
-                senderTeamFromPeer, null, aprsSymbolTable, aprsSymbolCode, remarksInner);
+                senderTeamFromPeer, cotTypeOverride, null);
     }
 
     private void injectPositionCot(String callsign, double lat, double lon,
                                    double alt, double speed, double course,
                                    String senderTeamFromPeer, String cotTypeOverride,
-                                   Character aprsSymbolTable, Character aprsSymbolCode,
                                    String remarksInner) {
         try {
             String teamForCot = senderTeamFromPeer != null && !senderTeamFromPeer.trim().isEmpty()
@@ -687,8 +651,6 @@ public class CotBridge {
                     callsign, lat, lon, alt, speed, course, teamForCot,
                     resolveInboundContactStaleMs(),
                     cotTypeOverride,
-                    aprsSymbolTable,
-                    aprsSymbolCode,
                     remarksInner);
 
             if (event != null && event.isValid()) {
@@ -794,7 +756,7 @@ public class CotBridge {
     }
 
     /**
-     * Inject a compressed CoT XML received from another UV-PRO node.
+     * Inject a compressed CoT XML received from another MeshCore node.
      */
     public void injectCompressedCot(byte[] compressed) {
         try {
@@ -886,7 +848,7 @@ public class CotBridge {
      * Inject a chat CoT event into ATAK.
      */
     /**
-     * @param radioPacketMessageId UV-PRO wire id ({@literal >} 0 distinguishes duplicate ATAK merges); 0 = unknown
+     * @param radioPacketMessageId MeshCore wire id ({@literal >} 0 distinguishes duplicate ATAK merges); 0 = unknown
      */
     public void injectChatCot(String senderCallsign, String message,
                               String chatRoom, int radioPacketMessageId) {
@@ -1082,8 +1044,29 @@ public class CotBridge {
             }
         }
 
+        // Never seed/synthesize a contact for our own device UID. Inbound delivered/read receipts
+        // (b-t-f-d / b-t-f-r) carry the local device UID as the sender; seeding it would create a
+        // stray self-contact with a hex UID name in the Contacts list.
+        String localDeviceUid = cachedLocalDeviceUidForGeoChat;
+        if (localDeviceUid == null) {
+            try {
+                localDeviceUid = MapView.getDeviceUid();
+            } catch (Exception ignored) {
+            }
+        }
+        if (localDeviceUid != null && !localDeviceUid.trim().isEmpty()) {
+            String lu = localDeviceUid.trim();
+            if ((senderUid != null && senderUid.trim().equalsIgnoreCase(lu))
+                    || (linkUid != null && linkUid.trim().equalsIgnoreCase(lu))) {
+                return;
+            }
+        }
+
         String canonical = ChatBridge.resolveCanonicalPeerUid(callsign, senderUid, linkUid);
         if (canonical == null || canonical.isEmpty()) {
+            return;
+        }
+        if (localDeviceUid != null && canonical.trim().equalsIgnoreCase(localDeviceUid.trim())) {
             return;
         }
 
@@ -1212,7 +1195,7 @@ public class CotBridge {
 
     /**
      * Send a CoT event out over the radio link.
-     * The CoT XML is gzipped and sent as an UV-PRO packet.
+     * The CoT XML is gzipped and sent as an MeshCore packet.
      */
     /** Max compressed CoT size to send over RF. Larger items flood the channel. */
     private static final int MAX_COT_COMPRESSED_BYTES = 4096;
@@ -1327,17 +1310,72 @@ public class CotBridge {
         }
     }
 
-    /**
-     * True for map markers injected from inbound APRS (see {@link #META_UVPRO_APRS}).
-     */
-    public static boolean isUvproAprsMarker(com.atakmap.android.maps.MapItem item) {
-        return item != null && item.getMetaBoolean(META_UVPRO_APRS, false);
+    public static boolean isMeshcoreMeshMarker(com.atakmap.android.maps.MapItem item) {
+        return item != null
+                && (item.getMetaBoolean(META_MESHCORE_MESH_REPEATER, false)
+                || item.getMetaBoolean(META_MESHCORE_MESH_NODE, false));
     }
 
-    public static boolean isUvproMeshMarker(com.atakmap.android.maps.MapItem item) {
-        return item != null
-                && (item.getMetaBoolean(META_UVPRO_MESH_REPEATER, false)
-                || item.getMetaBoolean(META_UVPRO_MESH_NODE, false));
+    /**
+     * Promote MeshCore advert markers as contact-card capable ATAK contacts.
+     * Keeps pinwheel contact card action enabled and updates display metadata.
+     * Does NOT auto-create an IndividualContact (map item metadata + routing IDs only).
+     */
+    public void promoteMeshContactMapItem(String uid, String displayName) {
+        if (uid == null || uid.isEmpty() || this.mapView == null) {
+            return;
+        }
+        Runnable work = () -> {
+            try {
+                com.atakmap.android.maps.MapItem item =
+                        this.mapView.getRootGroup().deepFindUID(uid);
+                if (item != null) {
+                    item.setMetaString("menu", "menus/default_item_w_type.xml");
+                    item.setMetaBoolean("sendable", true);
+                    if (displayName != null && !displayName.trim().isEmpty()) {
+                        item.setTitle(displayName.trim());
+                    }
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "promoteMeshContactMapItem map metadata failed uid=" + uid, e);
+            }
+            try {
+                registerBtechContactUid(uid);
+                if (displayName != null && !displayName.trim().isEmpty()) {
+                    registerBtechContactId(displayName.trim(), uid);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "promoteMeshContactMapItem contacts failed uid=" + uid, e);
+            }
+        };
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            work.run();
+        } else {
+            this.mapView.post(work);
+        }
+    }
+
+    /** Store Mesh summary/details on a marker for the one-page Mesh details dropdown. */
+    public void setMeshMarkerDetails(String uid, String detailsText) {
+        if (uid == null || uid.isEmpty() || this.mapView == null) {
+            return;
+        }
+        Runnable apply = () -> {
+            try {
+                com.atakmap.android.maps.MapItem item =
+                        this.mapView.getRootGroup().deepFindUID(uid);
+                if (item != null && detailsText != null && !detailsText.trim().isEmpty()) {
+                    item.setMetaString(META_MESHCORE_MESH_DETAILS, detailsText.trim());
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "setMeshMarkerDetails failed uid=" + uid, e);
+            }
+        };
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            apply.run();
+        } else {
+            this.mapView.post(apply);
+        }
     }
 
     public void upsertMeshAdvertMarker(String uid, String callsign, String detailsText,
@@ -1370,10 +1408,10 @@ public class CotBridge {
                         ? callsign.trim() : targetUid;
                 item.setTitle(title);
                 item.setMetaString("callsign", title);
-                item.setMetaBoolean(META_UVPRO_MESH_REPEATER, isRepeater);
-                item.setMetaBoolean(META_UVPRO_MESH_NODE, !isRepeater);
+                item.setMetaBoolean(META_MESHCORE_MESH_REPEATER, isRepeater);
+                item.setMetaBoolean(META_MESHCORE_MESH_NODE, !isRepeater);
                 if (detailsText != null && !detailsText.trim().isEmpty()) {
-                    item.setMetaString(META_UVPRO_MESH_DETAILS, detailsText.trim());
+                    item.setMetaString(META_MESHCORE_MESH_DETAILS, detailsText.trim());
                 }
                 item.setMetaBoolean("sendable", false);
                 item.persist(this.mapView.getMapEventDispatcher(), null, this.getClass());
@@ -1389,187 +1427,6 @@ public class CotBridge {
     }
 
     /**
-     * Opens the APRS metadata panel (packet comment, symbol, telemetry — not generic CoT point UI).
-     */
-    public void openAprsDetailsPanel(com.atakmap.android.maps.MapItem item) {
-        if (item == null || this.mapView == null) {
-            return;
-        }
-        final String uid = item.getUID();
-        Runnable open = () -> {
-            try {
-                Intent details = new Intent(
-                        com.atakmaps.meshcore.plugin.aprs.AprsDetailsDropDownReceiver.SHOW_APRS_DETAILS);
-                details.putExtra(
-                        com.atakmaps.meshcore.plugin.aprs.AprsDetailsDropDownReceiver.EXTRA_TARGET_UID, uid);
-                AtakBroadcast.getInstance().sendBroadcast(details);
-                AtakBroadcast.getInstance().sendBroadcast(
-                        new Intent("com.atakmap.android.maps.HIDE_MENU"));
-                Log.d(TAG, "Opened APRS details panel uid=" + uid);
-            } catch (Exception e) {
-                Log.w(TAG, "openAprsDetailsPanel failed uid=" + uid, e);
-            }
-        };
-        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-            open.run();
-        } else {
-            this.mapView.post(open);
-        }
-    }
-
-    /**
-     * Store formatted APRS metadata on the map marker for the details panel.
-     */
-    public void setAprsMarkerDetails(String uid, String detailsText) {
-        if (uid == null || uid.isEmpty() || this.mapView == null) {
-            return;
-        }
-        Runnable apply = () -> {
-            try {
-                com.atakmap.android.maps.MapItem item =
-                        this.mapView.getRootGroup().deepFindUID(uid);
-                if (item != null) {
-                    item.setMetaBoolean(META_UVPRO_APRS, true);
-                    if (detailsText != null && !detailsText.trim().isEmpty()) {
-                        item.setMetaString(META_UVPRO_APRS_DETAILS, detailsText.trim());
-                    }
-                    Intent refresh = new Intent(
-                            com.atakmaps.meshcore.plugin.aprs.AprsDetailsDropDownReceiver.REFRESH_APRS_DETAILS);
-                    refresh.putExtra(
-                            com.atakmaps.meshcore.plugin.aprs.AprsDetailsDropDownReceiver.EXTRA_TARGET_UID, uid);
-                    AtakBroadcast.getInstance().sendBroadcast(refresh);
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "setAprsMarkerDetails failed uid=" + uid, e);
-            }
-            markAprsMapItem(uid);
-        };
-        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-            apply.run();
-        } else {
-            this.mapView.post(apply);
-        }
-    }
-
-    /**
-     * Tag a marker as UV-PRO APRS (call after position inject when iconset may be absent).
-     */
-    public void markAprsMapItem(String uid) {
-        if (uid == null || uid.isEmpty() || this.mapView == null) {
-            return;
-        }
-        Runnable tag = () -> {
-            try {
-                com.atakmap.android.maps.MapItem item =
-                        this.mapView.getRootGroup().deepFindUID(uid);
-                if (item != null) {
-                    item.setMetaBoolean(META_UVPRO_APRS, true);
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "markAprsMapItem failed uid=" + uid, e);
-            }
-            applyAprsMarkerPresentation(uid);
-        };
-        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-            tag.run();
-        } else {
-            this.mapView.post(tag);
-        }
-    }
-
-    /**
-     * After CoT import: APRS usericon markers get stable icon/label rendering.
-     */
-    private void applyAprsMarkerPresentation(String uid) {
-        if (uid == null || uid.isEmpty() || this.mapView == null) {
-            return;
-        }
-        try {
-            com.atakmap.android.maps.MapItem item =
-                    this.mapView.getRootGroup().deepFindUID(uid);
-            if (!(item instanceof com.atakmap.android.maps.Marker)) {
-                return;
-            }
-            String iconPath = item.getMetaString(UserIcon.IconsetPath, "");
-            boolean aprs = item.getMetaBoolean(META_UVPRO_APRS, false)
-                    || (!iconPath.isEmpty()
-                    && iconPath.startsWith(AprsSymbolMapper.ICONSET_UID));
-            if (!aprs) {
-                return;
-            }
-            item.setMetaBoolean(META_UVPRO_APRS, true);
-            com.atakmap.android.maps.Marker marker =
-                    (com.atakmap.android.maps.Marker) item;
-            applyAprsUpscaledIcon(marker, iconPath);
-            marker.setShowLabel(true);
-            marker.setMinLabelRenderResolution(0.0d);
-            marker.setMaxLabelRenderResolution(0.1d);
-            marker.setMetaString("menu", "menus/default_item_w_type.xml");
-        } catch (Exception e) {
-            Log.w(TAG, "applyAprsMarkerPresentation failed uid=" + uid, e);
-        }
-    }
-
-    /**
-     * UserIcon PNGs from APRS iconset can render small at some DPI/zoom combinations.
-     * Replace marker icon with an upscaled bitmap for better readability.
-     */
-    private void applyAprsUpscaledIcon(com.atakmap.android.maps.Marker marker, String iconPath) {
-        if (marker == null || iconPath == null || iconPath.isEmpty()) {
-            return;
-        }
-        try {
-            Icon cached = aprsUpscaledIconCache.get(iconPath);
-            if (cached == null) {
-                UserIcon userIcon = UserIcon.GetIconFromIconsetPath(
-                        iconPath, true, this.mapView.getContext());
-                if (userIcon == null || userIcon.getBitMap() == null) {
-                    return;
-                }
-                Bitmap src = userIcon.getBitMap();
-                int srcW = Math.max(1, src.getWidth());
-                int srcH = Math.max(1, src.getHeight());
-                float scale = Math.max(
-                        (float) APRS_ICON_TARGET_PX / (float) srcW,
-                        (float) APRS_ICON_TARGET_PX / (float) srcH);
-                int outW = Math.max(APRS_ICON_TARGET_PX, Math.round(srcW * scale));
-                int outH = Math.max(APRS_ICON_TARGET_PX, Math.round(srcH * scale));
-                Bitmap scaled = Bitmap.createScaledBitmap(src, outW, outH, true);
-                String encoded = IconUtilities.encodeBitmap(scaled);
-                if (encoded == null || encoded.isEmpty()) {
-                    return;
-                }
-                cached = new Icon.Builder().setImageUri(0, encoded).build();
-                aprsUpscaledIconCache.put(iconPath, cached);
-            }
-            marker.setMetaBoolean("adapt_marker_icon", false);
-            marker.setIcon(cached);
-        } catch (Exception e) {
-            Log.w(TAG, "applyAprsUpscaledIcon failed path=" + iconPath, e);
-        }
-    }
-
-    /**
-     * APRS map markers must not appear in ATAK's Contacts list (map + details panel only).
-     */
-    private void removeAprsFromContactsPane(String uid) {
-        if (uid == null || uid.isEmpty()) {
-            return;
-        }
-        try {
-            Contact existing = Contacts.getInstance().getContactByUuid(uid);
-            if (existing != null) {
-                Contacts.getInstance().removeContact(existing);
-                btechContactUids.remove(uid);
-                btechIdToUid.entrySet().removeIf(e -> uid.equals(e.getValue()));
-                Log.d(TAG, "Removed APRS from Contacts pane uid=" + uid);
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "removeAprsFromContactsPane failed uid=" + uid, e);
-        }
-    }
-
-    /**
      * Dispatch a CotEvent into ATAK's internal processing.
      */
     private void dispatchCotEvent(CotEvent event) {
@@ -1577,7 +1434,6 @@ public class CotBridge {
         try {
             CotMapComponent.getInternalDispatcher().dispatch(event);
             Log.d(TAG, "Dispatched CoT event: " + event.getUID());
-            applyAprsMarkerPresentation(event.getUID());
             applyRadioMarkerLabelPresentation(event.getUID());
 
             if (BuildConfig.DEBUG) {

@@ -20,11 +20,11 @@ public final class NetSlotConfig {
 
     private static final String TAG = "MeshCore.NetSlot";
 
-    public static final String PREF_SLOT_COUNT = "uvpro_ping_slot_count";
-    public static final String PREF_SLOT_TIME_SEC = "uvpro_ping_slot_time_sec";
-    public static final String PREF_ADMIN_SETTINGS_ENABLED = "uvpro_admin_settings_enabled";
-    public static final String PREF_NET_SLOT_CONFIG_SEQ = "uvpro_net_slot_config_seq";
-    public static final String PREF_LAST_NET_SLOT_ISSUER = "uvpro_last_net_slot_issuer";
+    public static final String PREF_SLOT_COUNT = "meshcore_ping_slot_count";
+    public static final String PREF_SLOT_TIME_SEC = "meshcore_ping_slot_time_sec";
+    public static final String PREF_ADMIN_SETTINGS_ENABLED = "meshcore_admin_settings_enabled";
+    public static final String PREF_NET_SLOT_CONFIG_SEQ = "meshcore_net_slot_config_seq";
+    public static final String PREF_LAST_NET_SLOT_ISSUER = "meshcore_last_net_slot_issuer";
 
     public static final int DEFAULT_SLOT_COUNT = 20;
     public static final float DEFAULT_SLOT_TIME_SEC = 2.5f;

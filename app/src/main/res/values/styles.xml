@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Pill-shaped buttons (rounded ends), matching the Beacon section -->
-    <style name="UvproPillButton">
-        <item name="android:background">@drawable/bg_uvpro_pill_button</item>
+    <style name="MeshcorePillButton">
+        <item name="android:background">@drawable/bg_meshcore_pill_button</item>
         <item name="android:textColor">#FFFFFFFF</item>
         <item name="android:textAllCaps">false</item>
         <item name="android:minHeight">40dp</item>
@@ -15,7 +15,7 @@
     </style>
 
     <!-- Full-width primary actions: beacon, plugin settings, radio silence, load repeater -->
-    <style name="UvproPillButton.Beacon">
+    <style name="MeshcorePillButton.Beacon">
         <item name="android:textSize">15sp</item>
     </style>
 </resources>

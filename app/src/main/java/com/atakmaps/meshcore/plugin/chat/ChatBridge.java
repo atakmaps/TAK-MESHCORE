@@ -22,7 +22,6 @@ import com.atakmap.coremap.cot.event.CotDetail;
 import com.atakmap.android.preference.AtakPreferences;
 
 import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
-import com.atakmaps.meshcore.plugin.aprs.AprsMessageTransmitter;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
 import com.atakmaps.meshcore.plugin.crypto.EncryptionManager;
@@ -38,7 +37,6 @@ import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.HashSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -53,7 +51,7 @@ import java.util.concurrent.TimeUnit;
  *
  * Outbound (ATAK → radio):
  *   - Listens for GeoChat send intents from ATAK
- *   - Packages as UVPro chat packets and sends to radio
+ *   - Packages as MeshCore chat packets and sends to radio
  *
  * GeoChat in ATAK uses CoT events with type "b-t-f" (bits-text-free).
  * The actual message text is in detail/remarks inner text.
@@ -68,6 +66,8 @@ public class ChatBridge {
     /** RF payload wrapper for non-radio destination gatewaying (B -> A -> TAK). */
     private static final String GW_PREFIX = "__UVGW__|";
     private static final String ANDROID_UID_PREFIX = "ANDROID-";
+    private static final String MESH_NODE_UID_PREFIX = "MESHCORE-NODE-";
+    private static final String MESH_RPTR_UID_PREFIX = "MESHCORE-RPTR-";
 
     /**
      * Broadcast action for outbound GeoChat to a contact whose delivery path uses
@@ -120,7 +120,6 @@ public class ChatBridge {
      */
     private final Set<String> pendingUnreadConversationUids = ConcurrentHashMap.newKeySet();
     private volatile boolean unreadVisibilityPollRunning;
-    private static final Set<String> aprsConversationUids = ConcurrentHashMap.newKeySet();
 
     private volatile boolean disposed;
 
@@ -227,7 +226,7 @@ public class ChatBridge {
      * @param fromCallsign         Sender callsign (may be AX.25-truncated)
      * @param toCallsign           Destination (callsign or room name) from the wire
      * @param message              Message body
-     * @param radioPacketMessageId TYPE_CHAT payload id ({@code putInt}); 0 if unknown (APRS path).
+     * @param radioPacketMessageId TYPE_CHAT payload id ({@code putInt}); 0 if unknown.
      */
     public boolean injectRadioMessage(String fromCallsign, String toCallsign,
                                    String message, int radioPacketMessageId) {
@@ -247,6 +246,14 @@ public class ChatBridge {
             gatewayRoom = gw.chatRoom;
             Log.d(TAG, "Inbound RF gateway envelope toUid=" + gatewayToUid
                     + " room=" + gatewayRoom);
+        }
+
+        // Display: the transport truncates the sender callsign to 6 chars (e.g. JESTER_15 -> JSTR15).
+        // Resolve it back to the full callsign of a known peer so the UI shows/threads the full name.
+        String resolvedFrom = resolveFullCallsignForWireForm(fromCallsign);
+        if (resolvedFrom != null && !resolvedFrom.isEmpty()) {
+            Log.d(TAG, "Inbound chat sender " + fromCallsign + " -> full callsign " + resolvedFrom);
+            fromCallsign = resolvedFrom;
         }
 
         // Determine chat room — if destination is a specific callsign,
@@ -293,16 +300,13 @@ public class ChatBridge {
 
             String destUid = cotBridge.resolveBtechUidForId(chatRoom);
             String senderUid = cotBridge.resolveBtechUidForId(fromCallsign);
-            // APRS senders are intentionally not registered as ATAK Contacts; synthesize an
-            // ANDROID-* UID so GeoChat can thread and badge them like normal conversations.
+            // Synthesize an ANDROID-* UID for unregistered senders so GeoChat can thread and
+            // badge them like normal conversations.
             if ((senderUid == null || senderUid.isEmpty()) && fromCallsign != null) {
                 senderUid = syntheticAndroidUid(fromCallsign);
             }
             if (senderUid != null && senderUid.startsWith(ANDROID_UID_PREFIX)) {
                 ensurePluginChatContact(fromCallsign, senderUid);
-                if (radioPacketMessageId == 0) {
-                    markAprsContactUid(senderUid);
-                }
                 cotBridge.registerBtechContactUid(senderUid);
                 if (fromCallsign != null && !fromCallsign.trim().isEmpty()) {
                     cotBridge.registerBtechContactId(fromCallsign, senderUid);
@@ -405,11 +409,249 @@ public class ChatBridge {
                 && rfDestinationLooksLikeSelf(chatRoom.trim())) {
             return true;
         }
+        if (inboundDestinationMatchesLocalMeshPubKey(chatRoom)) {
+            return true;
+        }
         if (wireToCallsign != null && !wireToCallsign.trim().isEmpty()
                 && rfDestinationLooksLikeSelf(wireToCallsign.trim())) {
             return true;
         }
+        if (inboundDestinationMatchesLocalMeshPubKey(gatewayToUid)) {
+            return true;
+        }
+        if (inboundDestinationMatchesLocalMeshPubKey(gatewayRoom)) {
+            return true;
+        }
+        if (inboundDestinationMatchesLocalMeshPubKey(wireToCallsign)) {
+            return true;
+        }
         return false;
+    }
+
+    private boolean inboundDestinationMatchesLocalMeshPubKey(String rawDestination) {
+        String candidate = extractMeshPublicKeyCandidate(rawDestination);
+        if (candidate.isEmpty()) {
+            return false;
+        }
+        String local = getLocalMeshPublicKey();
+        return !local.isEmpty() && candidate.equalsIgnoreCase(local);
+    }
+
+    private String getLocalMeshPublicKey() {
+        if (btManager == null) {
+            return "";
+        }
+        String key = btManager.getSelfPubKeyHex();
+        if (key == null) {
+            return "";
+        }
+        String trimmed = key.trim().toUpperCase(Locale.US);
+        return isLikelyMeshPublicKey(trimmed) ? trimmed : "";
+    }
+
+    private static String extractMeshPublicKeyCandidate(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String value = raw.trim().toUpperCase(Locale.US);
+        if (value.isEmpty()) {
+            return "";
+        }
+        if (value.startsWith(MESH_NODE_UID_PREFIX)) {
+            String suffix = value.substring(MESH_NODE_UID_PREFIX.length()).trim();
+            return isLikelyMeshPublicKey(suffix) ? suffix : "";
+        }
+        if (value.startsWith(MESH_RPTR_UID_PREFIX)) {
+            String suffix = value.substring(MESH_RPTR_UID_PREFIX.length()).trim();
+            return isLikelyMeshPublicKey(suffix) ? suffix : "";
+        }
+        return isLikelyMeshPublicKey(value) ? value : "";
+    }
+
+    private static boolean isLikelyMeshPublicKey(String key) {
+        if (key == null || key.length() != 64) {
+            return false;
+        }
+        for (int i = 0; i < key.length(); i++) {
+            char c = key.charAt(i);
+            boolean hex = (c >= '0' && c <= '9')
+                    || (c >= 'A' && c <= 'F')
+                    || (c >= 'a' && c <= 'f');
+            if (!hex) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * AX.25 wire destination: prefer a MeshCore pubkey extracted from the UID/room hints (or a raw
+     * 64-hex string) before falling back to a 6-char radio callsign derived from the ATAK callsign.
+     */
+    private String resolveRfWireDestination(String toUidHint, String displayCallsignHint) {
+        String meshKey = extractMeshPublicKeyCandidate(toUidHint);
+        if (meshKey.isEmpty()) {
+            meshKey = extractMeshPublicKeyCandidate(displayCallsignHint);
+        }
+        if (!meshKey.isEmpty()) {
+            return meshKey;
+        }
+        String hint = displayCallsignHint != null ? displayCallsignHint.trim() : "";
+        if (hint.isEmpty() && toUidHint != null) {
+            hint = toUidHint.trim();
+        }
+        if (hint.isEmpty()) {
+            return "";
+        }
+        String upper = hint.toUpperCase(Locale.US);
+        if (upper.startsWith(ANDROID_UID_PREFIX)) {
+            hint = upper.substring(ANDROID_UID_PREFIX.length());
+        }
+        String radio = CallsignUtil.toRadioCallsign(hint);
+        if (radio != null && !radio.trim().isEmpty()) {
+            return radio.trim().toUpperCase(Locale.US);
+        }
+        return upper.length() > 6 ? upper.substring(0, 6) : upper;
+    }
+
+    /**
+     * Send an outbound ATAK GeoChat to a MeshCore node as a native pubkey-to-pubkey DM
+     * ({@code CMD_SEND_TXT_MSG}) instead of the proprietary {@code 0xFF01} AX.25 channel datagram
+     * (which native MeshCore clients reject as "Unhandled"). Returns true if handled here.
+     */
+    private boolean trySendNativeMeshDm(String destUidHint, String roomHint, String message) {
+        if (btManager == null || !btManager.isConnected()) {
+            return false;
+        }
+        if (message == null || message.trim().isEmpty()) {
+            return false;
+        }
+        String pubKey = extractMeshPublicKeyCandidate(destUidHint);
+        if (pubKey.isEmpty()) {
+            pubKey = extractMeshPublicKeyCandidate(roomHint);
+        }
+        if (pubKey.isEmpty()) {
+            return false;
+        }
+        boolean ok = btManager.sendContactTextMessage(pubKey, message.trim());
+        if (ok) {
+            Log.d(TAG, "Outbound GeoChat sent as native MeshCore DM pubkeyPrefix="
+                    + pubKey.substring(0, Math.min(12, pubKey.length())) + " len=" + message.trim().length());
+        }
+        return ok;
+    }
+
+    /**
+     * Inject an inbound native MeshCore DM ({@code RESP_CONTACT_MSG}) into ATAK GeoChat. The native
+     * frame carries only the sender's 6-byte pubkey prefix, so resolve the full
+     * {@code MESHCORE-NODE-<pubkey>} contact when known; otherwise thread under the prefix.
+     */
+    public boolean injectInboundMeshDm(String senderPubKeyPrefixHex, String text) {
+        if (cotBridge == null || text == null || text.trim().isEmpty()) {
+            return false;
+        }
+        String prefix = senderPubKeyPrefixHex == null
+                ? "" : senderPubKeyPrefixHex.trim().toUpperCase(Locale.US);
+        if (prefix.isEmpty()) {
+            return false;
+        }
+        String senderUid = resolveExistingMeshContactUidByPubKeyPrefix(prefix);
+        if (senderUid == null || senderUid.trim().isEmpty()) {
+            Log.w(TAG, "Dropping inbound native MeshCore DM from unknown prefix=" + prefix
+                    + " (not in mesh contacts)");
+            return false;
+        }
+        String fromCallsign = meshNodeDisplayForInboundPrefix(prefix, senderUid);
+        cotBridge.registerBtechContactUid(senderUid);
+        cotBridge.registerBtechContactId(fromCallsign, senderUid);
+        int mid = (prefix + "|" + text.trim()).hashCode() & 0x7fffffff;
+        if (mid == 0) {
+            mid = 1;
+        }
+        Log.d(TAG, "Inbound native MeshCore DM from " + fromCallsign
+                + " (" + senderUid + ") len=" + text.trim().length());
+        return injectRadioMessage(fromCallsign, localCallsign, text.trim(), mid);
+    }
+
+    private String resolveExistingMeshContactUidByPubKeyPrefix(String prefixUpper) {
+        try {
+            java.util.List<Contact> all = Contacts.getInstance().getAllContacts();
+            if (all != null) {
+                for (Contact c : all) {
+                    if (c == null) {
+                        continue;
+                    }
+                    String uid = c.getUID();
+                    if (uid == null) {
+                        continue;
+                    }
+                    String u = uid.toUpperCase(Locale.US);
+                    if ((u.startsWith(MESH_NODE_UID_PREFIX) || u.startsWith(MESH_RPTR_UID_PREFIX))
+                            && extractMeshPublicKeyCandidate(u).startsWith(prefixUpper)) {
+                        if (c instanceof IndividualContact) {
+                            IndividualContact ic = (IndividualContact) c;
+                            if (ic.getConnector(com.atakmaps.meshcore.plugin.contacts.MeshSendMessageConnector.CONNECTOR_TYPE) != null
+                                    || ic.getConnector(com.atakmaps.meshcore.plugin.contacts.MeshFavoriteConnector.CONNECTOR_TYPE) != null) {
+                                return uid;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private String meshNodeDisplayForUid(String uid) {
+        try {
+            Contact c = Contacts.getInstance().getContactByUuid(uid);
+            if (c != null && c.getName() != null && !c.getName().trim().isEmpty()) {
+                return c.getName().trim();
+            }
+        } catch (Exception ignored) {
+        }
+        return uid;
+    }
+
+    private String meshNodeDisplayForInboundPrefix(String prefixUpper, String senderUid) {
+        String byUid = meshNodeDisplayForUid(senderUid);
+        if (byUid != null && !byUid.trim().isEmpty()) {
+            String clean = byUid.trim();
+            String upper = clean.toUpperCase(Locale.US);
+            if (!upper.startsWith(MESH_NODE_UID_PREFIX) && !upper.startsWith(MESH_RPTR_UID_PREFIX)) {
+                return clean;
+            }
+        }
+        try {
+            MapView mv = MapView.getMapView();
+            if (mv != null && mv.getRootGroup() != null) {
+                java.util.List<MapItem> items = mv.getRootGroup().deepFindItems("type", "a-f-G-U-C");
+                if (items != null) {
+                    for (MapItem item : items) {
+                        if (item == null) {
+                            continue;
+                        }
+                        String uid = item.getUID();
+                        if (uid == null) {
+                            continue;
+                        }
+                        String candidate = extractMeshPublicKeyCandidate(uid);
+                        if (!candidate.isEmpty() && candidate.startsWith(prefixUpper)) {
+                            String call = item.getMetaString("callsign", item.getTitle());
+                            if (call != null) {
+                                call = call.trim();
+                                if (!call.isEmpty()) {
+                                    return call;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return MESH_NODE_UID_PREFIX + prefixUpper;
     }
 
     /** True if the RF payload "chat room" equals this operator's callsign or its AX.25 form. */
@@ -445,9 +687,18 @@ public class ChatBridge {
                         }
                     } catch (Exception ignored2) {
                     }
+                    if (sixCharWireForm(m.trim()).equalsIgnoreCase(r)) {
+                        return true;
+                    }
                 }
             }
         } catch (Exception ignored) {
+        }
+        // The chat packet carries the destination as the first 6 chars of the full callsign
+        // (see MeshCorePacket.createChatPacket), so a full local callsign like "SMOKEY_15"
+        // must still match the truncated wire room "SMOKEY".
+        if (sixCharWireForm(loc).equalsIgnoreCase(r)) {
+            return true;
         }
         if (r.startsWith(ANDROID_UID_PREFIX)) {
             String bare = r.substring(ANDROID_UID_PREFIX.length());
@@ -462,6 +713,58 @@ public class ChatBridge {
             }
         }
         return false;
+    }
+
+    /**
+     * The RF chat transport truncates callsigns to a 6-char field
+     * ({@link com.atakmaps.meshcore.plugin.protocol.MeshCorePacket#createChatPacket} uses
+     * {@code (s + "      ").substring(0,6)}). This reproduces that wire form so a full callsign
+     * (e.g. "SMOKEY_15") can be matched against the truncated value carried on the wire ("SMOKEY").
+     */
+    private static String sixCharWireForm(String s) {
+        if (s == null) {
+            return "";
+        }
+        return (s + "      ").substring(0, 6).trim();
+    }
+
+    /**
+     * Map a 6-char / vowel-compressed RF callsign back to a known full callsign so the UI can
+     * display (and thread) the full callsign instead of the truncated transport form. The full
+     * callsign is already known from the peer's position/advert contact. Returns null if no match.
+     */
+    private String resolveFullCallsignForWireForm(String wireCallsign) {
+        if (wireCallsign == null || wireCallsign.trim().isEmpty()) {
+            return null;
+        }
+        String w = wireCallsign.trim();
+        try {
+            java.util.List<Contact> all = Contacts.getInstance().getAllContacts();
+            if (all != null) {
+                for (Contact c : all) {
+                    if (!(c instanceof IndividualContact)) {
+                        continue;
+                    }
+                    String name = c.getName();
+                    if (name == null || name.trim().isEmpty()) {
+                        continue;
+                    }
+                    String full = name.trim();
+                    if (full.length() <= w.length()) {
+                        continue;
+                    }
+                    try {
+                        if (CallsignUtil.toRadioCallsign(full).equalsIgnoreCase(w)
+                                || sixCharWireForm(full).equalsIgnoreCase(w)) {
+                            return full;
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     private boolean isLikelyGroupConversationThread(String threadIdRaw) {
@@ -501,7 +804,7 @@ public class ChatBridge {
     }
 
     /**
-     * Ensure an ATAK contact exists for APRS GeoChat routing, then return the contact UID.
+     * Ensure an ATAK contact exists for GeoChat routing, then return the contact UID.
      */
     /**
      * One ANDROID-* (or existing) UID per callsign — avoids duplicate JESTER/SMOKEY rows when
@@ -686,117 +989,6 @@ public class ChatBridge {
             Log.w(TAG, "openNativeChatConversation failed uid=" + contactUid, e);
         }
         return false;
-    }
-
-    public static void markAprsContactUid(String contactUid) {
-        if (contactUid == null) {
-            return;
-        }
-        String uid = contactUid.trim().toUpperCase(Locale.US);
-        if (uid.isEmpty()) {
-            return;
-        }
-        if (!uid.startsWith(ANDROID_UID_PREFIX)) {
-            uid = ANDROID_UID_PREFIX + uid;
-        }
-        aprsConversationUids.add(uid);
-    }
-
-    private static boolean isAprsContactUid(String contactUid) {
-        if (contactUid == null) {
-            return false;
-        }
-        String uid = contactUid.trim().toUpperCase(Locale.US);
-        if (uid.isEmpty()) {
-            return false;
-        }
-        if (!uid.startsWith(ANDROID_UID_PREFIX)) {
-            uid = ANDROID_UID_PREFIX + uid;
-        }
-        return aprsConversationUids.contains(uid);
-    }
-
-    /**
-     * True when an inbound APRS message addressee targets this device/operator.
-     * Accepts direct local callsign forms and APRS-configured callsign+SSID forms.
-     */
-    public boolean shouldAcceptAprsDestination(String toCallsignRaw) {
-        String to = normalizeAprsDestination(toCallsignRaw);
-        if (to.isEmpty()) {
-            return false;
-        }
-        if ("ALL".equals(to) || to.startsWith("BLN")) {
-            return true;
-        }
-
-        Set<String> accepted = new HashSet<>();
-        addAprsDestinationVariants(accepted, localCallsign);
-        try {
-            if (mapView != null && mapView.getSelfMarker() != null) {
-                addAprsDestinationVariants(accepted,
-                        mapView.getSelfMarker().getMetaString("callsign", null));
-            }
-        } catch (Exception ignored) {
-        }
-        try {
-            String aprsBase = SettingsFragment.getAprsCallsign(pluginContext);
-            int aprsSsid = SettingsFragment.getAprsSsid(pluginContext);
-            addAprsDestinationVariants(accepted, aprsBase);
-            if (aprsBase != null && !aprsBase.trim().isEmpty() && aprsSsid > 0 && aprsSsid <= 15) {
-                addAprsDestinationVariants(accepted, aprsBase.trim() + "-" + aprsSsid);
-            }
-        } catch (Exception ignored) {
-        }
-        return accepted.contains(to);
-    }
-
-    private static void addAprsDestinationVariants(Set<String> out, String raw) {
-        String n = normalizeAprsDestination(raw);
-        if (n.isEmpty()) {
-            return;
-        }
-        out.add(n);
-        try {
-            String radio = com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(n);
-            String rn = normalizeAprsDestination(radio);
-            if (!rn.isEmpty()) {
-                out.add(rn);
-            }
-        } catch (Exception ignored) {
-        }
-        int dash = n.indexOf('-');
-        if (dash > 0) {
-            String base = normalizeAprsDestination(n.substring(0, dash));
-            if (!base.isEmpty()) {
-                out.add(base);
-                try {
-                    String radioBase = com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(base);
-                    String rb = normalizeAprsDestination(radioBase);
-                    if (!rb.isEmpty()) {
-                        out.add(rb);
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-        }
-    }
-
-    private static String normalizeAprsDestination(String raw) {
-        if (raw == null) {
-            return "";
-        }
-        String s = raw.trim().toUpperCase(Locale.US);
-        if (s.isEmpty()) {
-            return "";
-        }
-        if (s.startsWith(ANDROID_UID_PREFIX)) {
-            s = s.substring(ANDROID_UID_PREFIX.length());
-        }
-        s = s.replaceAll("[^A-Z0-9\\-]", "");
-        if (s.length() > 9) {
-            s = s.substring(0, 9);
-        }
-        return s;
     }
 
     /**
@@ -1189,23 +1381,6 @@ public class ChatBridge {
             Log.i(TAG, "Plugin GeoChat bundle contains paths; relaying compact RF chat fallback");
         }
 
-        if (isAprsContactUid(conversationId)) {
-            if (!SettingsFragment.isValidAprsCallsign(SettingsFragment.getAprsCallsign(pluginContext))) {
-                postAprsCallsignWarning();
-                return true;
-            }
-            String to = AprsMessageTransmitter.normalizeAddressee(conversationId);
-            if (to.isEmpty()) {
-                Log.w(TAG, "APRS relay blocked (invalid chat destination): " + conversationId);
-                return true;
-            }
-            boolean ok = AprsMessageTransmitter.sendMessage(pluginContext, btManager, to, msg);
-            if (!ok) {
-                Log.w(TAG, "APRS relay failed for chat destination: " + to);
-            }
-            return true;
-        }
-
         String lineUid = extractGeoChatLineUidFromBundle(b);
         if (lineUid == null) {
             maybeLogPluginGeoChatBundleKeysMissingUid(b);
@@ -1239,41 +1414,15 @@ public class ChatBridge {
         if (isLikelyGroupConversationThread(conversationId)) {
             // TYPE_CHAT room is 6 bytes on-wire; preserve full group conversationId in payload.
             outbound = wrapGatewayMessage("", conversationId, msg);
+        } else if (!"All Chat Rooms".equalsIgnoreCase(room) && !outbound.startsWith(GW_PREFIX)) {
+            // Mesh-node DM: send as a native MeshCore contact message (pubkey DM), not the
+            // proprietary 0xFF01 AX.25 datagram that native clients reject.
+            if (trySendNativeMeshDm(conversationId, room, msg)) {
+                return true;
+            }
         }
         sendChatOverRadio(localCallsign, room, outbound, lineUid);
         return true;
-    }
-
-    private void postAprsCallsignWarning() {
-        try {
-            new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
-                    android.widget.Toast.makeText(pluginContext,
-                            "Set a valid APRS callsign in Edit APRS Settings first.",
-                            android.widget.Toast.LENGTH_LONG).show());
-        } catch (Exception e) {
-            Log.w(TAG, "Could not show APRS callsign warning", e);
-        }
-    }
-
-    /**
-     * For inbound APRS messages with message IDs ({@code {...}}), send {@code ackNN}.
-     */
-    public boolean sendAprsAckIfRequested(String toCallsignRaw, String messageIdRaw) {
-        String id = messageIdRaw != null ? messageIdRaw.trim() : "";
-        if (id.isEmpty()) {
-            return false;
-        }
-        if (id.length() > 5) {
-            id = id.substring(0, 5);
-        }
-        boolean ok = AprsMessageTransmitter.sendAcknowledgement(
-                pluginContext, btManager, toCallsignRaw, id);
-        if (ok) {
-            Log.d(TAG, "Auto-sent APRS ack id=" + id + " to " + toCallsignRaw);
-        } else {
-            Log.d(TAG, "APRS ack not sent id=" + id + " to " + toCallsignRaw);
-        }
-        return ok;
     }
 
     /**
@@ -1517,6 +1666,16 @@ public class ChatBridge {
 
         if (message == null || message.isEmpty()) {
             return;
+        }
+
+        if (!"All Chat Rooms".equalsIgnoreCase(chatRoom)
+                && !isLikelyGroupConversationThread(chatRoom)
+                && !message.startsWith(GW_PREFIX)) {
+            // Mesh-node DM: send as a native MeshCore contact message (pubkey DM), not the
+            // proprietary 0xFF01 AX.25 datagram that native clients reject.
+            if (trySendNativeMeshDm(chatRoom, chatRoom, message)) {
+                return;
+            }
         }
 
         Log.d(TAG, "Relay outbound GeoChat (compact PreSend/CommsLogger) room=" + chatRoom
@@ -1801,12 +1960,12 @@ public class ChatBridge {
             }
             try {
                 // Persistent system notification in the shade as a record.
-                int notifyId = ("uvpro_fail_" + wireMid).hashCode() & 0x7FFFFFFF;
+                int notifyId = ("meshcore_fail_" + wireMid).hashCode() & 0x7FFFFFFF;
                 NotificationUtil.getInstance().postNotification(
                         notifyId,
                         NotificationUtil.RED,
                         "Message Not Delivered",
-                        "UV-PRO",
+                        "MeshCore",
                         "Message to " + peerDisplay + " will be delivered when user is rediscovered.");
             } catch (Exception e) {
                 Log.e(TAG, "Failed to post delivery failure notification", e);

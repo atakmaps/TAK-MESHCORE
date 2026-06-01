@@ -16,7 +16,7 @@ import java.io.FileOutputStream;
  */
 public final class ContactConnectorIcons {
 
-    private static final String TAG = "UVPro.ContactIcons";
+    private static final String TAG = "MeshCore.ContactIcons";
     private static volatile String positionOnlyIconUri;
 
     private ContactConnectorIcons() {
@@ -56,7 +56,7 @@ public final class ContactConnectorIcons {
             Context cacheCtx = MapView.getMapView() != null
                     ? MapView.getMapView().getContext()
                     : context.getApplicationContext();
-            File dir = new File(cacheCtx.getCacheDir(), "uvpro_icons");
+            File dir = new File(cacheCtx.getCacheDir(), "meshcore_icons");
             if (!dir.exists() && !dir.mkdirs()) {
                 return null;
             }

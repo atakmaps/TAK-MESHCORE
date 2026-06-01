@@ -6,6 +6,7 @@ import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.graphics.drawable.GradientDrawable;
 import android.os.SystemClock;
@@ -17,27 +18,38 @@ import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.atakmap.android.contact.Contact;
+import com.atakmap.android.contact.Contacts;
 import com.atakmap.android.dropdown.DropDown;
 import com.atakmap.android.dropdown.DropDownReceiver;
 import com.atakmap.android.ipc.AtakBroadcast;
+import com.atakmap.android.maps.MapGroup;
+import com.atakmap.android.maps.MapItem;
+import com.atakmap.android.maps.Marker;
 import com.atakmap.android.maps.MetaDataHolder2;
 import com.atakmap.android.maps.MapView;
+import com.atakmap.android.toolbar.ToolManagerBroadcastReceiver;
+import com.atakmap.android.toolbar.widgets.TextContainer;
+import com.atakmap.android.user.MapClickTool;
 import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
 import com.atakmaps.meshcore.plugin.beacon.SmartBeacon;
 import com.atakmaps.meshcore.plugin.beacon.SmartBeaconSettingsDialog;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry.BtDeviceRecord;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
+import com.atakmaps.meshcore.plugin.bluetooth.MeshBleDeviceMatcher;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
 import com.atakmaps.meshcore.plugin.contacts.RadioContact;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
@@ -64,11 +76,43 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         PacketRouter.PacketCountListener {
 
     public static final String SHOW_PLUGIN = "com.atakmaps.meshcore.plugin.SHOW_PLUGIN";
+    private static final String EXTRA_MESH_NODE_POSITION_PICK_RESULT =
+            "mesh_node_position_pick_result";
     private static final String TAG = "MeshCore.UI";
     private static final int MAX_LOG_LINES = 50;
     private static final int COLOR_PILL_BUTTON_PRIMARY = 0xFF455A64;
     private static final int PILL_CORNER_RADIUS_DP = 20;
     private static final int EDIT_SELECTION_STROKE_DP = 3;
+    private static final String PREF_MESH_SHOW_REPEATERS = "meshcore_mesh_show_repeaters";
+    private static final String PREF_MESH_SHOW_NODES = "meshcore_mesh_show_nodes";
+    private static final String PREF_MESH_REPEATER_CACHE = "meshcore_mesh_repeater_cache_v1";
+    private static final String PREF_MESH_NODE_CACHE = "meshcore_mesh_node_cache_v1";
+    private static final String PREF_MESH_SEND_POSITION_WITH_ADVERT =
+            "meshcore_mesh_send_position_with_advert";
+    private static final String PREF_MESH_USE_GPS_FOR_POSITION =
+            "meshcore_mesh_use_gps_for_position";
+    private static final String PREF_MESH_USE_CALLSIGN_LOCATION_FOR_POSITION =
+            "meshcore_mesh_use_callsign_location_for_position";
+    private static final String PREF_MESH_MAP_SET_POSITION_LAT =
+            "meshcore_mesh_map_set_position_lat";
+    private static final String PREF_MESH_MAP_SET_POSITION_LON =
+            "meshcore_mesh_map_set_position_lon";
+    private static final long MESH_CALLSIGN_POSITION_PUSH_INTERVAL_MS = 15_000L;
+    private static final String MESH_NODE_MAP_POSITION_UID = "MESHCORE-NODE-MAP-POSITION";
+    private static final String MESH_NODE_UID_PREFIX = "MESHCORE-NODE-";
+    private static final String MESH_RPTR_UID_PREFIX = "MESHCORE-RPTR-";
+    private static final String ANDROID_MESH_NODE_UID_PREFIX = "ANDROID-MESHCORE-NODE-";
+    private static final String ANDROID_MESH_RPTR_UID_PREFIX = "ANDROID-MESHCORE-RPTR-";
+    private static final double[] MESH_BANDWIDTH_OPTIONS_KHZ = new double[]{
+            7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125.0, 250.0, 500.0
+    };
+    private static final int[] MESH_SPREADING_FACTOR_OPTIONS = new int[]{
+            5, 6, 7, 8, 9, 10, 11, 12
+    };
+    private static final int[] MESH_CODING_RATE_OPTIONS = new int[]{
+            5, 6, 7, 8
+    };
+    private static final int MAX_CHANNEL_LOG_LINES = 80;
 
     private final Context pluginContext;
     private final BtConnectionManager btManager;
@@ -100,6 +144,44 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Switch switchSmartBeacon;
     private Switch switchMeshEnableGps;
     private Button btnUpdateGpsFromMeshcore;
+    private Switch switchMeshShowRepeaters;
+    private Switch switchMeshShowNodes;
+    private Button btnMeshRequestChannels;
+    private TextView meshChannelLogText;
+    private EditText editMeshChannelIndex;
+    private EditText editMeshChannelMessage;
+    private Button btnMeshChannelSend;
+    private Switch switchMeshSendPositionWithAdvert;
+    private Switch switchMeshUseCallsignLocation;
+    private TextView textMeshUseCallsignLocation;
+    private Button btnClearMeshContacts;
+    private Button btnMeshNodeSettings;
+    private Button btnMeshcoreSetNodePositionMap;
+
+    private boolean meshGpsEnableRequested = false;
+    private Boolean meshSendPositionWithAdvertState = null;
+    private boolean meshSendPositionWithAdvertRequested = false;
+    private boolean suppressMeshSendPositionWithAdvertSwitchCallbacks = false;
+    private BtConnectionManager.MeshNodeSettings meshNodeSettingsState;
+    private AlertDialog meshNodeSettingsDialog;
+    private EditText meshNodeSettingsNameField;
+    private EditText meshNodeSettingsFrequencyField;
+    private Spinner meshNodeSettingsBandwidthSpinner;
+    private Spinner meshNodeSettingsSfSpinner;
+    private Spinner meshNodeSettingsCrSpinner;
+    private EditText meshNodeSettingsTxPowerField;
+    private TextView meshNodeSettingsStatus;
+    private ScrollView meshNodeSettingsScrollView;
+    private final Runnable meshCallsignPositionSyncRunnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                pushPhoneLocationToMeshNodeIfNeeded(false);
+            } finally {
+                scheduleMeshCallsignPositionSync();
+            }
+        }
+    };
 
     private final List<BluetoothDevice> foundDevices = new ArrayList<>();
     private final LinkedList<String> logLines = new LinkedList<>();
@@ -145,9 +227,38 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 @Override
                 public void onMeshGpsStateChanged(boolean enabled) {
                     meshGpsEnabledState = enabled;
+                    meshGpsEnableRequested = enabled;
                     getMapView().post(() -> {
+                        setMeshUseGpsForPositionPreference(enabled);
                         updateMeshGpsControlsUi();
-                        appendLog("MeshCore GPS " + (enabled ? "enabled" : "disabled"));
+                        appendLog("Use Meschore GPS for position "
+                                + (enabled ? "enabled" : "disabled"));
+                        if (enabled) {
+                            removeMeshNodeMapPositionMarker(true);
+                        }
+                        scheduleMeshCallsignPositionSync();
+                    });
+                }
+
+                @Override
+                public void onSendPositionWithAdvertChanged(boolean enabled) {
+                    meshSendPositionWithAdvertState = enabled;
+                    meshSendPositionWithAdvertRequested = enabled;
+                    getMapView().post(() -> {
+                        setMeshSendPositionWithAdvertPreference(enabled);
+                        updateMeshGpsControlsUi();
+                        appendLog("Send Position With Advert "
+                                + (enabled ? "enabled" : "disabled"));
+                        scheduleMeshCallsignPositionSync();
+                    });
+                }
+
+                @Override
+                public void onMeshNodeSettingsUpdated(BtConnectionManager.MeshNodeSettings settings) {
+                    meshNodeSettingsState = settings;
+                    getMapView().post(() -> {
+                        refreshMeshNodeSettingsDialogFromState(false);
+                        updateMeshNodeMapPositionMarkerLabel();
                     });
                 }
 
@@ -173,6 +284,35 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                         } else {
                             appendLog("Could not apply MeshCore GPS to ATAK");
                         }
+                    });
+                }
+            };
+    private final LinkedList<String> meshChannelLogLines = new LinkedList<>();
+    private final BtConnectionManager.MeshChannelListener meshChannelListener =
+            new BtConnectionManager.MeshChannelListener() {
+                @Override
+                public void onChannelInfo(BtConnectionManager.MeshChannelInfo info) {
+                    if (info == null) {
+                        return;
+                    }
+                    // Hide the internal ATAK data channel from the user-facing channel list.
+                    if (info.name != null && "ATAK_DATA".equalsIgnoreCase(info.name.trim())) {
+                        return;
+                    }
+                    getMapView().post(() -> appendChannelLog(
+                            "Channel " + info.index + ": "
+                                    + (info.name != null ? info.name : "")));
+                }
+
+                @Override
+                public void onChannelMessage(BtConnectionManager.MeshChannelMessage message) {
+                    if (message == null) {
+                        return;
+                    }
+                    getMapView().post(() -> {
+                        String dir = message.outbound ? ">>" : "<<";
+                        appendChannelLog("[ch " + message.channelIndex + "] " + dir + " "
+                                + (message.text != null ? message.text : ""));
                     });
                 }
             };
@@ -203,6 +343,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         this.cotBridge = cotBridge;
         btManager.addListener(this);
         btManager.addMeshStateListener(meshStateListener);
+        btManager.addMeshChannelListener(meshChannelListener);
         contactTracker.setListener(this);
     }
 
@@ -213,6 +354,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     @Override
     public void onReceive(Context context, Intent intent) {
         if (SHOW_PLUGIN.equals(intent.getAction())) {
+            if (intent.getBooleanExtra(EXTRA_MESH_NODE_POSITION_PICK_RESULT, false)) {
+                handleMeshNodePositionPickResult(intent);
+                return;
+            }
             showDropDown(createView(),
                     HALF_WIDTH, FULL_HEIGHT,
                     FULL_WIDTH, HALF_HEIGHT,
@@ -224,7 +369,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         LayoutInflater inflater = LayoutInflater.from(pluginContext);
         rootView = inflater.inflate(
                 pluginContext.getResources().getIdentifier(
-                        "uvpro_dropdown", "layout", pluginContext.getPackageName()),
+                        "meshcore_dropdown", "layout", pluginContext.getPackageName()),
                 null);
 
         bindViews();
@@ -239,11 +384,27 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (callsignText != null) {
             callsignText.setText(callsign);
         }
+        updateMeshUseCallsignLocationLabel(callsign);
+
+        Context initCtx = getMapView().getContext();
+        meshGpsEnableRequested = getMeshUseGpsForPositionPreference(initCtx);
+        meshSendPositionWithAdvertState = btManager.getSendPositionWithAdvertEnabled();
+        if (meshSendPositionWithAdvertState == null) {
+            meshSendPositionWithAdvertRequested = getMeshSendPositionWithAdvertPreference(initCtx);
+        } else {
+            meshSendPositionWithAdvertRequested =
+                    Boolean.TRUE.equals(meshSendPositionWithAdvertState);
+        }
+        meshNodeSettingsState = btManager.getLatestNodeSettings();
 
         if (btManager.isConnected()) {
             updateConnectionUI(true, btManager.getConnectedDeviceName());
             MeshStatusOverlay.setConnected(true);
             stopConnectButtonPulse(true);
+            btManager.requestSelfInfo();
+            if (meshSendPositionWithAdvertRequested) {
+                btManager.setSendPositionWithAdvertEnabled(true);
+            }
         } else {
             updateConnectionUI(false, null);
             MeshStatusOverlay.setConnected(false);
@@ -261,8 +422,30 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (switchSmartBeacon != null) {
             switchSmartBeacon.setChecked(SmartBeacon.isEnabled(getMapView().getContext()));
         }
+        try {
+            android.content.SharedPreferences meshPrefs =
+                    PreferenceManager.getDefaultSharedPreferences(getMapView().getContext());
+            if (switchMeshShowRepeaters != null) {
+                switchMeshShowRepeaters.setChecked(
+                        meshPrefs.getBoolean(PREF_MESH_SHOW_REPEATERS, true));
+            }
+            if (switchMeshShowNodes != null) {
+                switchMeshShowNodes.setChecked(
+                        meshPrefs.getBoolean(PREF_MESH_SHOW_NODES, true));
+            }
+            if (switchMeshSendPositionWithAdvert != null) {
+                switchMeshSendPositionWithAdvert.setChecked(
+                        getMeshSendPositionWithAdvertPreference(initCtx));
+            }
+            if (switchMeshUseCallsignLocation != null) {
+                switchMeshUseCallsignLocation.setChecked(
+                        isMeshUseCallsignLocationPreferenceEnabled(initCtx));
+            }
+        } catch (Exception ignored) {
+        }
         meshGpsEnabledState = btManager.getMeshGpsEnabled();
         updateMeshGpsControlsUi();
+        scheduleMeshCallsignPositionSync();
         appendLog("MeshCore ready");
         return rootView;
     }
@@ -293,6 +476,27 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         switchSmartBeacon = rootView.findViewById(getId("switch_smart_beacon"));
         switchMeshEnableGps = rootView.findViewById(getId("switch_mesh_enable_gps"));
         btnUpdateGpsFromMeshcore = rootView.findViewById(getId("btn_update_gps_from_meshcore"));
+        switchMeshShowRepeaters = rootView.findViewById(getId("switch_mesh_show_repeaters"));
+        switchMeshShowNodes = rootView.findViewById(getId("switch_mesh_show_nodes"));
+        btnMeshRequestChannels = rootView.findViewById(getId("btn_mesh_request_channels"));
+        meshChannelLogText = rootView.findViewById(getId("text_mesh_channel_log"));
+        editMeshChannelIndex = rootView.findViewById(getId("edit_mesh_channel_index"));
+        editMeshChannelMessage = rootView.findViewById(getId("edit_mesh_channel_message"));
+        btnMeshChannelSend = rootView.findViewById(getId("btn_mesh_channel_send"));
+        switchMeshSendPositionWithAdvert =
+                rootView.findViewById(getId("switch_mesh_send_position_with_advert"));
+        switchMeshUseCallsignLocation =
+                rootView.findViewById(getId("switch_mesh_use_callsign_location"));
+        textMeshUseCallsignLocation =
+                rootView.findViewById(getId("text_mesh_use_callsign_location"));
+        btnClearMeshContacts = rootView.findViewById(getId("btn_clear_mesh_contacts"));
+        btnMeshNodeSettings = rootView.findViewById(getId("btn_mesh_node_settings"));
+        btnMeshcoreSetNodePositionMap =
+                rootView.findViewById(getId("btn_meshcore_set_node_position_map"));
+
+        if (meshChannelLogText != null) {
+            meshChannelLogText.setMovementMethod(new ScrollingMovementMethod());
+        }
 
         if (logText != null) {
             logText.setMovementMethod(new ScrollingMovementMethod());
@@ -351,6 +555,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                     appendLog("Connect to MeshCore before sending advert");
                     return;
                 }
+                pushPhoneLocationToMeshNodeIfNeeded(false);
                 if (btManager.sendSelfAdvert()) {
                     appendLog("Requested MeshCore self advert");
                 } else {
@@ -360,7 +565,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (switchMeshEnableGps != null) {
             switchMeshEnableGps.setOnCheckedChangeListener((buttonView, isChecked) -> {
-                if (suppressMeshGpsSwitchCallbacks) {
+                if (suppressMeshGpsSwitchCallbacks || !buttonView.isPressed()) {
                     return;
                 }
                 if (!btManager.isConnected()) {
@@ -368,28 +573,201 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                     updateMeshGpsControlsUi();
                     return;
                 }
-                meshGpsEnabledState = isChecked;
+                onMeshGpsToggleChanged(isChecked);
+            });
+        }
+        if (switchMeshSendPositionWithAdvert != null) {
+            switchMeshSendPositionWithAdvert.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (suppressMeshSendPositionWithAdvertSwitchCallbacks || !buttonView.isPressed()) {
+                    return;
+                }
+                if (!btManager.isConnected()) {
+                    updateMeshGpsControlsUi();
+                    return;
+                }
+                meshSendPositionWithAdvertRequested = isChecked;
+                if (!isChecked) {
+                    meshSendPositionWithAdvertState = Boolean.FALSE;
+                }
                 updateMeshGpsControlsUi();
-                btManager.setMeshGpsEnabled(isChecked);
-                btManager.queryMeshGpsEnabled();
+                appendLog("Setting Send Position With Advert " + (isChecked ? "ON..." : "OFF..."));
+                setMeshSendPositionWithAdvertPreference(isChecked);
+                btManager.setSendPositionWithAdvertEnabled(isChecked);
+                scheduleMeshCallsignPositionSync();
+                if (isChecked) {
+                    pushPhoneLocationToMeshNodeIfNeeded(true);
+                }
+                btManager.requestSelfInfo();
+            });
+        }
+        if (switchMeshUseCallsignLocation != null) {
+            switchMeshUseCallsignLocation.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (!buttonView.isPressed()) {
+                    return;
+                }
+                setMeshUseCallsignLocationPreference(isChecked);
+                appendLog(isChecked
+                        ? "Node advert position source: ATAK callsign location (dynamic)."
+                        : "Node advert position source: node GPS -> map-set position -> none.");
+                if (isChecked) {
+                    removeMeshNodeMapPositionMarker(true);
+                }
+                scheduleMeshCallsignPositionSync();
+                if (isChecked) {
+                    pushPhoneLocationToMeshNodeIfNeeded(true);
+                }
             });
         }
         if (btnUpdateGpsFromMeshcore != null) {
             btnUpdateGpsFromMeshcore.setOnClickListener(v -> requestManualMeshGpsUpdate());
         }
+        if (btnClearMeshContacts != null) {
+            btnClearMeshContacts.setOnClickListener(v -> confirmClearAllMeshContacts());
+        }
+        if (btnMeshNodeSettings != null) {
+            btnMeshNodeSettings.setOnClickListener(v -> showMeshNodeSettingsDialog());
+        }
+        if (btnMeshcoreSetNodePositionMap != null) {
+            btnMeshcoreSetNodePositionMap.setOnClickListener(v -> startMeshNodePositionMapPick());
+        }
+        if (switchMeshShowRepeaters != null) {
+            switchMeshShowRepeaters.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (!buttonView.isPressed()) {
+                    return;
+                }
+                setMeshBooleanPreference(PREF_MESH_SHOW_REPEATERS, isChecked);
+                appendLog("Show repeaters " + (isChecked ? "enabled" : "disabled"));
+            });
+        }
+        if (switchMeshShowNodes != null) {
+            switchMeshShowNodes.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (!buttonView.isPressed()) {
+                    return;
+                }
+                setMeshBooleanPreference(PREF_MESH_SHOW_NODES, isChecked);
+                appendLog("Show nodes " + (isChecked ? "enabled" : "disabled"));
+            });
+        }
+        if (btnMeshRequestChannels != null) {
+            btnMeshRequestChannels.setOnClickListener(v -> {
+                if (!btManager.isConnected()) {
+                    appendLog("Connect to MeshCore before requesting channels");
+                    return;
+                }
+                btManager.requestAllChannelInfo();
+                appendLog("Requested all channel info");
+            });
+        }
+        if (btnMeshChannelSend != null) {
+            btnMeshChannelSend.setOnClickListener(v -> sendMeshChannelText());
+        }
+    }
+
+    private void setMeshBooleanPreference(String key, boolean value) {
+        try {
+            PreferenceManager.getDefaultSharedPreferences(getMapView().getContext())
+                    .edit().putBoolean(key, value).apply();
+        } catch (Exception e) {
+            Log.w(TAG, "Could not persist " + key, e);
+        }
+    }
+
+    private void sendMeshChannelText() {
+        if (!btManager.isConnected()) {
+            appendLog("Connect to MeshCore before sending channel message");
+            return;
+        }
+        if (editMeshChannelMessage == null) {
+            return;
+        }
+        String text = editMeshChannelMessage.getText().toString().trim();
+        if (text.isEmpty()) {
+            return;
+        }
+        int channelIndex = 0;
+        if (editMeshChannelIndex != null) {
+            try {
+                channelIndex = Integer.parseInt(editMeshChannelIndex.getText().toString().trim());
+            } catch (NumberFormatException ignored) {
+                channelIndex = 0;
+            }
+        }
+        if (btManager.sendChannelText(channelIndex, text)) {
+            editMeshChannelMessage.setText("");
+            appendChannelLog("[ch " + channelIndex + "] >> " + text);
+        } else {
+            appendLog("Failed to send channel message");
+        }
+    }
+
+    private void appendChannelLog(String line) {
+        if (line == null) {
+            return;
+        }
+        meshChannelLogLines.add(line);
+        while (meshChannelLogLines.size() > MAX_CHANNEL_LOG_LINES) {
+            meshChannelLogLines.removeFirst();
+        }
+        if (meshChannelLogText != null) {
+            StringBuilder sb = new StringBuilder();
+            for (String l : meshChannelLogLines) {
+                sb.append(l).append('\n');
+            }
+            meshChannelLogText.setText(sb.toString());
+        }
     }
 
     private void updateMeshGpsControlsUi() {
-        boolean enabled = Boolean.TRUE.equals(meshGpsEnabledState);
+        boolean meshConnected = btManager != null && btManager.isConnected();
         if (switchMeshEnableGps != null) {
             suppressMeshGpsSwitchCallbacks = true;
-            switchMeshEnableGps.setChecked(enabled);
-            suppressMeshGpsSwitchCallbacks = false;
-            switchMeshEnableGps.setEnabled(btManager != null && btManager.isConnected());
+            try {
+                // Node GPS toggle is only meaningful once the node reports a GPS state
+                // (not all nodes have GPS installed).
+                boolean gpsCapabilityKnown = meshGpsEnabledState != null;
+                switchMeshEnableGps.setEnabled(meshConnected && gpsCapabilityKnown);
+                switchMeshEnableGps.setAlpha((meshConnected && gpsCapabilityKnown) ? 1f : 0.45f);
+                switchMeshEnableGps.setChecked(
+                        gpsCapabilityKnown
+                                && (meshGpsEnableRequested
+                                || Boolean.TRUE.equals(meshGpsEnabledState)));
+            } finally {
+                suppressMeshGpsSwitchCallbacks = false;
+            }
         }
+        if (switchMeshSendPositionWithAdvert != null) {
+            suppressMeshSendPositionWithAdvertSwitchCallbacks = true;
+            try {
+                switchMeshSendPositionWithAdvert.setEnabled(meshConnected);
+                switchMeshSendPositionWithAdvert.setChecked(
+                        meshSendPositionWithAdvertRequested
+                                || Boolean.TRUE.equals(meshSendPositionWithAdvertState));
+            } finally {
+                suppressMeshSendPositionWithAdvertSwitchCallbacks = false;
+            }
+        }
+        if (switchMeshUseCallsignLocation != null) {
+            switchMeshUseCallsignLocation.setEnabled(meshConnected);
+        }
+        boolean meshGpsOn = meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState);
+        boolean gpsDrivenActionsEnabled = meshConnected && meshGpsOn;
         if (btnUpdateGpsFromMeshcore != null) {
-            btnUpdateGpsFromMeshcore.setVisibility(enabled ? View.VISIBLE : View.GONE);
+            btnUpdateGpsFromMeshcore.setVisibility(View.VISIBLE);
+            btnUpdateGpsFromMeshcore.setEnabled(gpsDrivenActionsEnabled);
+            btnUpdateGpsFromMeshcore.setAlpha(gpsDrivenActionsEnabled ? 1f : 0.45f);
         }
+        if (btnMeshcoreSetNodePositionMap != null) {
+            btnMeshcoreSetNodePositionMap.setEnabled(meshConnected);
+        }
+    }
+
+    private void updateMeshUseCallsignLocationLabel(String callsign) {
+        if (textMeshUseCallsignLocation == null) {
+            return;
+        }
+        String safe = (callsign == null || callsign.trim().isEmpty())
+                ? "UNKNOWN" : callsign.trim();
+        textMeshUseCallsignLocation.setText("Use " + safe + " location for position");
     }
 
     private void requestManualMeshGpsUpdate() {
@@ -722,7 +1100,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         List<BtDeviceRecord> favs = BluetoothDeviceRegistry.getFavoritesSorted(ctx);
         List<BtDeviceRecord> meshFavs = new ArrayList<>();
         for (BtDeviceRecord r : favs) {
-            if (isLikelyMeshRecord(r)) {
+            if (MeshBleDeviceMatcher.isKnownMeshRecord(r)) {
                 meshFavs.add(r);
             }
         }
@@ -774,29 +1152,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
     }
 
-    private boolean isLikelyMeshRecord(BtDeviceRecord record) {
-        if (record == null) {
-            return false;
-        }
-        String[] hints = {
-                "meshcore", "meshtastic", "wismesh", "rak", "heltec", "lilygo",
-                "seeed", "seed", "sensecap", "t-echo", "tdeck", "t-deck", "mesh"
-        };
-        String[] candidates = new String[]{
-                record.customName,
-                record.lastSystemName,
-                BluetoothDeviceRegistry.getDisplayTitle(record)
-        };
-        for (String candidate : candidates) {
-            if (candidate == null) continue;
-            String n = candidate.toLowerCase(Locale.US);
-            for (String hint : hints) {
-                if (n.contains(hint)) return true;
-            }
-        }
-        return false;
-    }
-
     private String resolveDeviceDisplayName(Context ctx, BluetoothDevice device) {
         try {
             BtDeviceRecord r = BluetoothDeviceRegistry.find(ctx, device.getAddress());
@@ -815,7 +1170,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             return null;
         }
         BtDeviceRecord r = BluetoothDeviceRegistry.find(ctx, target);
-        if (r == null || !r.favorite || !isLikelyMeshRecord(r)) {
+        if (r == null || !r.favorite) {
             // Guard against stale/accidental targets so new users stay in scan mode.
             BluetoothDeviceRegistry.setMeshConnectTargetAddress(ctx, "");
             return null;
@@ -951,11 +1306,21 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             stopScanDiscoveryPulse();
             stopConnectButtonPulse(true);
             MeshStatusOverlay.setConnected(true);
+            Context ctx = getMapView().getContext();
+            meshGpsEnableRequested = getMeshUseGpsForPositionPreference(ctx);
+            meshSendPositionWithAdvertState = null;
+            meshSendPositionWithAdvertRequested = getMeshSendPositionWithAdvertPreference(ctx);
+            meshNodeSettingsState = null;
             updateConnectionUI(true, display);
             updateMeshGpsControlsUi();
             refreshFavoriteStrip();
             appendLog("Connected to " + display);
             btManager.queryMeshGpsEnabled();
+            btManager.requestSelfInfo();
+            if (meshSendPositionWithAdvertRequested) {
+                btManager.setSendPositionWithAdvertEnabled(true);
+            }
+            scheduleMeshCallsignPositionSync();
         });
     }
 
@@ -968,8 +1333,15 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             pendingManualMeshGpsUpdate = false;
             pendingManualMeshGpsSinceMs = 0L;
             getMapView().removeCallbacks(manualMeshGpsTimeoutRunnable);
+            meshGpsEnabledState = null;
+            meshGpsEnableRequested = getMeshUseGpsForPositionPreference(getMapView().getContext());
+            meshSendPositionWithAdvertState = null;
+            meshSendPositionWithAdvertRequested =
+                    getMeshSendPositionWithAdvertPreference(getMapView().getContext());
+            meshNodeSettingsState = null;
             updateConnectionUI(false, null);
             updateMeshGpsControlsUi();
+            scheduleMeshCallsignPositionSync();
             appendLog("Disconnected: " + reason);
         });
     }
@@ -1037,8 +1409,774 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         getMapView().post(this::updatePacketCount);
     }
 
+    private void onMeshGpsToggleChanged(boolean isChecked) {
+        if (btManager == null || !btManager.isConnected()) {
+            return;
+        }
+        if (meshGpsEnabledState == null) {
+            updateMeshGpsControlsUi();
+            return;
+        }
+        meshGpsEnableRequested = isChecked;
+        setMeshUseGpsForPositionPreference(isChecked);
+        if (!isChecked) {
+            meshGpsEnabledState = Boolean.FALSE;
+        }
+        updateMeshGpsControlsUi();
+        appendLog("Setting Use Meschore GPS for position " + (isChecked ? "ON..." : "OFF..."));
+        if (isChecked) {
+            removeMeshNodeMapPositionMarker(true);
+        }
+        scheduleMeshCallsignPositionSync();
+        btManager.setMeshGpsEnabled(isChecked);
+        btManager.queryMeshGpsEnabled();
+        if (!isChecked) {
+            pushPhoneLocationToMeshNodeIfNeeded(false);
+        }
+    }
+
+    /**
+     * Advert position priority when node GPS is OFF:
+     * 1) dynamic ATAK self/callsign location if enabled, else
+     * 2) map-picked node position, else
+     * 3) no advert position override.
+     */
+    private boolean pushPhoneLocationToMeshNodeIfNeeded(boolean verboseSkipLog) {
+        if (btManager == null || !btManager.isConnected()) {
+            return false;
+        }
+        boolean advertPosOn = meshSendPositionWithAdvertRequested
+                || Boolean.TRUE.equals(meshSendPositionWithAdvertState);
+        if (!advertPosOn) {
+            if (verboseSkipLog) {
+                appendLog("Advert position override skipped (Send Position With Advert is OFF).");
+            }
+            return false;
+        }
+        boolean nodeGpsOn = meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState);
+        if (nodeGpsOn) {
+            if (verboseSkipLog) {
+                appendLog("Advert position source: node GPS.");
+            }
+            return false;
+        }
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        boolean useCallsign = isMeshUseCallsignLocationPreferenceEnabled(ctx);
+        com.atakmap.coremap.maps.coords.GeoPoint gp;
+        String source;
+        if (useCallsign) {
+            gp = getAtakSelfGeoPoint();
+            source = "callsign location";
+        } else {
+            gp = getMeshMapSetPosition(ctx);
+            source = "map-set node position";
+        }
+        if (gp == null || !gp.isValid()) {
+            if (verboseSkipLog) {
+                appendLog("Advert position source unavailable (" + source + ").");
+            }
+            return false;
+        }
+        boolean ok = btManager.setAdvertLatLon(
+                gp.getLatitude(), gp.getLongitude(), gp.getAltitude());
+        if (ok) {
+            appendLog(String.format(Locale.US,
+                    "Pushed %s to node advert: %.5f, %.5f",
+                    source, gp.getLatitude(), gp.getLongitude()));
+        } else if (verboseSkipLog) {
+            appendLog("Advert position push failed.");
+        }
+        return ok;
+    }
+
+    private com.atakmap.coremap.maps.coords.GeoPoint getAtakSelfGeoPoint() {
+        MapView mv = getMapView();
+        if (mv == null || mv.getSelfMarker() == null
+                || !(mv.getSelfMarker() instanceof com.atakmap.android.maps.PointMapItem)) {
+            return null;
+        }
+        return ((com.atakmap.android.maps.PointMapItem) mv.getSelfMarker()).getPoint();
+    }
+
+    private void scheduleMeshCallsignPositionSync() {
+        MapView mv = getMapView();
+        if (mv == null) {
+            return;
+        }
+        mv.removeCallbacks(meshCallsignPositionSyncRunnable);
+        Context ctx = mv.getContext();
+        boolean shouldRun = btManager != null && btManager.isConnected()
+                && isMeshUseCallsignLocationPreferenceEnabled(ctx)
+                && (meshSendPositionWithAdvertRequested
+                || Boolean.TRUE.equals(meshSendPositionWithAdvertState))
+                && !(meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState));
+        if (shouldRun) {
+            mv.postDelayed(meshCallsignPositionSyncRunnable, MESH_CALLSIGN_POSITION_PUSH_INTERVAL_MS);
+        }
+    }
+
+    private void startMeshNodePositionMapPick() {
+        if (btManager == null || !btManager.isConnected()) {
+            Toast.makeText(getMapView().getContext(),
+                    "Connect to a MeshCore node first.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Intent callback = new Intent(SHOW_PLUGIN);
+        callback.putExtra(EXTRA_MESH_NODE_POSITION_PICK_RESULT, true);
+        Intent begin = new Intent(ToolManagerBroadcastReceiver.BEGIN_TOOL);
+        begin.putExtra("tool", MapClickTool.TOOL_NAME);
+        begin.putExtra("callback", callback);
+        begin.putExtra("prompt", "Select node position on map");
+        AtakBroadcast.getInstance().sendBroadcast(begin);
+        appendLog("Pick a map location for node advert position...");
+    }
+
+    private void handleMeshNodePositionPickResult(Intent intent) {
+        com.atakmap.coremap.maps.coords.GeoPoint gp = parseGeoPointFromIntent(intent);
+        if (gp == null || !gp.isValid()) {
+            return;
+        }
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        setMeshMapSetPosition(ctx, gp);
+        createOrUpdateMeshNodeMapPositionMarker(gp);
+        appendLog(String.format(Locale.US, "Saved node map position: %.5f, %.5f",
+                gp.getLatitude(), gp.getLongitude()));
+        if (!isMeshUseCallsignLocationPreferenceEnabled(ctx)
+                && !(meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState))) {
+            pushPhoneLocationToMeshNodeIfNeeded(true);
+        }
+        try {
+            TextContainer.getTopInstance().closePrompt("Select node position on map");
+        } catch (Exception ignored) {
+        }
+    }
+
+    private com.atakmap.coremap.maps.coords.GeoPoint parseGeoPointFromIntent(Intent intent) {
+        if (intent == null) {
+            return null;
+        }
+        String point = intent.getStringExtra("point");
+        if (point == null || point.trim().isEmpty()) {
+            return null;
+        }
+        String[] parts = point.split(",");
+        if (parts.length < 2) {
+            return null;
+        }
+        try {
+            double lat = Double.parseDouble(parts[0].trim());
+            double lon = Double.parseDouble(parts[1].trim());
+            return new com.atakmap.coremap.maps.coords.GeoPoint(lat, lon);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void createOrUpdateMeshNodeMapPositionMarker(com.atakmap.coremap.maps.coords.GeoPoint gp) {
+        MapView mv = getMapView();
+        if (mv == null || mv.getRootGroup() == null || gp == null || !gp.isValid()) {
+            return;
+        }
+        removeMeshNodeMapPositionMarker(false);
+        Marker marker = new Marker(gp, MESH_NODE_MAP_POSITION_UID);
+        marker.setType("b-m-p-s-p-i");
+        String nodeLabel = resolveMeshNodeDisplayName();
+        marker.setTitle(nodeLabel);
+        marker.setMetaString("callsign", nodeLabel);
+        marker.setMetaBoolean("editable", true);
+        marker.setMetaBoolean("movable", false);
+        mv.getRootGroup().addItem(marker);
+    }
+
+    private String resolveMeshNodeDisplayName() {
+        String name = null;
+        if (meshNodeSettingsState != null && meshNodeSettingsState.nodeName != null) {
+            name = meshNodeSettingsState.nodeName.trim();
+        }
+        if (name == null || name.isEmpty()) {
+            name = "Mesh Node";
+        }
+        return name;
+    }
+
+    private void removeMeshNodeMapPositionMarker(boolean clearStoredPosition) {
+        MapView mv = getMapView();
+        if (mv != null && mv.getRootGroup() != null) {
+            removeMapItemByUidRecursive(mv.getRootGroup(), MESH_NODE_MAP_POSITION_UID);
+        }
+        if (clearStoredPosition) {
+            Context ctx = mv != null ? mv.getContext() : pluginContext;
+            clearMeshMapSetPosition(ctx);
+        }
+    }
+
+    private boolean removeMapItemByUidRecursive(MapGroup group, String uid) {
+        if (group == null || uid == null || uid.trim().isEmpty()) {
+            return false;
+        }
+        for (MapItem item : new ArrayList<>(group.getItems())) {
+            if (item != null && uid.equals(item.getUID())) {
+                group.removeItem(item);
+                return true;
+            }
+        }
+        for (MapGroup child : group.getChildGroups()) {
+            if (removeMapItemByUidRecursive(child, uid)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void updateMeshNodeMapPositionMarkerLabel() {
+        MapView mv = getMapView();
+        if (mv == null || mv.getRootGroup() == null) {
+            return;
+        }
+        String label = resolveMeshNodeDisplayName();
+        updateMapItemTitleByUidRecursive(mv.getRootGroup(), MESH_NODE_MAP_POSITION_UID, label);
+    }
+
+    private boolean updateMapItemTitleByUidRecursive(MapGroup group, String uid, String title) {
+        if (group == null || uid == null || uid.trim().isEmpty()) {
+            return false;
+        }
+        for (MapItem item : new ArrayList<>(group.getItems())) {
+            if (item == null || !uid.equals(item.getUID())) {
+                continue;
+            }
+            if (item instanceof Marker) {
+                Marker marker = (Marker) item;
+                marker.setTitle(title);
+                marker.setMetaString("callsign", title);
+            } else {
+                item.setMetaString("callsign", title);
+            }
+            return true;
+        }
+        for (MapGroup child : group.getChildGroups()) {
+            if (updateMapItemTitleByUidRecursive(child, uid, title)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void showMeshNodeSettingsDialog() {
+        if (btManager == null || !btManager.isConnected()) {
+            Toast.makeText(getMapView().getContext(),
+                    "Connect to a MeshCore node first.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (meshNodeSettingsDialog == null) {
+            buildMeshNodeSettingsDialog();
+        }
+        meshNodeSettingsDialog.show();
+        if (meshNodeSettingsScrollView != null) {
+            meshNodeSettingsScrollView.post(() -> {
+                meshNodeSettingsScrollView.scrollTo(0, 0);
+                meshNodeSettingsScrollView.fullScroll(View.FOCUS_UP);
+            });
+        }
+        refreshMeshNodeSettingsDialogFromState(true);
+        appendLog("Polling MeshCore node settings...");
+        btManager.requestSelfInfo();
+    }
+
+    private void buildMeshNodeSettingsDialog() {
+        Context ctx = getMapView().getContext();
+        LinearLayout root = new LinearLayout(ctx);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = dip(ctx, 12);
+        root.setPadding(pad, pad, pad, pad);
+
+        TextView nameLabel = new TextView(ctx);
+        nameLabel.setText("Name");
+        nameLabel.setTextColor(0xFFFFFFFF);
+        root.addView(nameLabel);
+
+        meshNodeSettingsNameField = new EditText(ctx);
+        meshNodeSettingsNameField.setHint("Node name");
+        meshNodeSettingsNameField.setSingleLine(true);
+        root.addView(meshNodeSettingsNameField);
+
+        TextView section = new TextView(ctx);
+        section.setText("Radio Settings");
+        section.setTextColor(0xFF00BCD4);
+        section.setTextSize(14f);
+        LinearLayout.LayoutParams sectionLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sectionLp.topMargin = dip(ctx, 12);
+        root.addView(section, sectionLp);
+
+        TextView freqLabel = new TextView(ctx);
+        freqLabel.setText("Frequency (MHz)");
+        freqLabel.setTextColor(0xFFFFFFFF);
+        LinearLayout.LayoutParams freqLabelLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        freqLabelLp.topMargin = dip(ctx, 6);
+        root.addView(freqLabel, freqLabelLp);
+
+        meshNodeSettingsFrequencyField = new EditText(ctx);
+        meshNodeSettingsFrequencyField.setInputType(
+                InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        meshNodeSettingsFrequencyField.setHint("910.525");
+        meshNodeSettingsFrequencyField.setSingleLine(true);
+        root.addView(meshNodeSettingsFrequencyField);
+
+        TextView bwLabel = new TextView(ctx);
+        bwLabel.setText("Bandwidth");
+        bwLabel.setTextColor(0xFFFFFFFF);
+        LinearLayout.LayoutParams bwLabelLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        bwLabelLp.topMargin = dip(ctx, 6);
+        root.addView(bwLabel, bwLabelLp);
+
+        meshNodeSettingsBandwidthSpinner = new Spinner(ctx);
+        meshNodeSettingsBandwidthSpinner.setAdapter(new ArrayAdapter<>(
+                ctx, android.R.layout.simple_spinner_item, meshBandwidthLabels()));
+        ((ArrayAdapter<?>) meshNodeSettingsBandwidthSpinner.getAdapter())
+                .setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        root.addView(meshNodeSettingsBandwidthSpinner);
+
+        TextView sfLabel = new TextView(ctx);
+        sfLabel.setText("Spreading Factor");
+        sfLabel.setTextColor(0xFFFFFFFF);
+        LinearLayout.LayoutParams sfLabelLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sfLabelLp.topMargin = dip(ctx, 6);
+        root.addView(sfLabel, sfLabelLp);
+
+        meshNodeSettingsSfSpinner = new Spinner(ctx);
+        meshNodeSettingsSfSpinner.setAdapter(new ArrayAdapter<>(
+                ctx, android.R.layout.simple_spinner_item, meshSfLabels()));
+        ((ArrayAdapter<?>) meshNodeSettingsSfSpinner.getAdapter())
+                .setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        root.addView(meshNodeSettingsSfSpinner);
+
+        TextView crLabel = new TextView(ctx);
+        crLabel.setText("Coding Rate");
+        crLabel.setTextColor(0xFFFFFFFF);
+        LinearLayout.LayoutParams crLabelLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        crLabelLp.topMargin = dip(ctx, 6);
+        root.addView(crLabel, crLabelLp);
+
+        meshNodeSettingsCrSpinner = new Spinner(ctx);
+        meshNodeSettingsCrSpinner.setAdapter(new ArrayAdapter<>(
+                ctx, android.R.layout.simple_spinner_item, meshCrLabels()));
+        ((ArrayAdapter<?>) meshNodeSettingsCrSpinner.getAdapter())
+                .setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        root.addView(meshNodeSettingsCrSpinner);
+
+        TextView txPowerLabel = new TextView(ctx);
+        txPowerLabel.setText("Transmit Power (dBm)");
+        txPowerLabel.setTextColor(0xFFFFFFFF);
+        LinearLayout.LayoutParams txPowerLabelLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        txPowerLabelLp.topMargin = dip(ctx, 6);
+        root.addView(txPowerLabel, txPowerLabelLp);
+
+        meshNodeSettingsTxPowerField = new EditText(ctx);
+        meshNodeSettingsTxPowerField.setInputType(
+                InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        meshNodeSettingsTxPowerField.setSingleLine(true);
+        meshNodeSettingsTxPowerField.setHint("22");
+        root.addView(meshNodeSettingsTxPowerField);
+
+        meshNodeSettingsStatus = new TextView(ctx);
+        meshNodeSettingsStatus.setTextColor(0xFF90A4AE);
+        meshNodeSettingsStatus.setTextSize(11f);
+        LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        statusLp.topMargin = dip(ctx, 8);
+        root.addView(meshNodeSettingsStatus, statusLp);
+
+        ScrollView scroll = new ScrollView(ctx);
+        scroll.addView(root, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        meshNodeSettingsScrollView = scroll;
+
+        meshNodeSettingsDialog = new AlertDialog.Builder(ctx)
+                .setTitle("Node Settings")
+                .setView(scroll)
+                .setPositiveButton("Apply", null)
+                .setNeutralButton("Refresh", null)
+                .setNegativeButton("Close", null)
+                .create();
+        meshNodeSettingsDialog.setOnShowListener(dialog -> {
+            Button apply = meshNodeSettingsDialog.getButton(DialogInterface.BUTTON_POSITIVE);
+            if (apply != null) {
+                apply.setOnClickListener(v -> applyMeshNodeSettingsFromDialog());
+            }
+            Button refresh = meshNodeSettingsDialog.getButton(DialogInterface.BUTTON_NEUTRAL);
+            if (refresh != null) {
+                refresh.setOnClickListener(v -> {
+                    appendLog("Polling MeshCore node settings...");
+                    if (btManager != null) {
+                        btManager.requestSelfInfo();
+                    }
+                });
+            }
+        });
+    }
+
+    private void applyMeshNodeSettingsFromDialog() {
+        if (btManager == null || !btManager.isConnected()) {
+            Toast.makeText(getMapView().getContext(),
+                    "MeshCore not connected.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String nodeName = meshNodeSettingsNameField != null
+                ? meshNodeSettingsNameField.getText().toString().trim() : "";
+        String freqRaw = meshNodeSettingsFrequencyField != null
+                ? meshNodeSettingsFrequencyField.getText().toString().trim() : "";
+        String txRaw = meshNodeSettingsTxPowerField != null
+                ? meshNodeSettingsTxPowerField.getText().toString().trim() : "";
+        if (nodeName.isEmpty() || freqRaw.isEmpty() || txRaw.isEmpty()) {
+            Toast.makeText(getMapView().getContext(),
+                    "Name, Frequency, and Transmit Power are required.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        double freqMHz;
+        try {
+            freqMHz = Double.parseDouble(freqRaw);
+        } catch (Exception e) {
+            Toast.makeText(getMapView().getContext(),
+                    "Invalid frequency value.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        int txPowerDbm;
+        try {
+            txPowerDbm = Integer.parseInt(txRaw);
+        } catch (Exception e) {
+            Toast.makeText(getMapView().getContext(),
+                    "Invalid transmit power value.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        double bwKHz = MESH_BANDWIDTH_OPTIONS_KHZ[
+                Math.max(0, meshNodeSettingsBandwidthSpinner != null
+                        ? meshNodeSettingsBandwidthSpinner.getSelectedItemPosition() : 0)];
+        int sf = MESH_SPREADING_FACTOR_OPTIONS[
+                Math.max(0, meshNodeSettingsSfSpinner != null
+                        ? meshNodeSettingsSfSpinner.getSelectedItemPosition() : 0)];
+        int cr = MESH_CODING_RATE_OPTIONS[
+                Math.max(0, meshNodeSettingsCrSpinner != null
+                        ? meshNodeSettingsCrSpinner.getSelectedItemPosition() : 0)];
+
+        boolean nameOk = btManager.setNodeAdvertName(nodeName);
+        boolean radioOk = btManager.setRadioParams(freqMHz, bwKHz, sf, cr);
+        boolean txOk = btManager.setRadioTxPowerDbm(txPowerDbm);
+        if (!nameOk || !radioOk || !txOk) {
+            Toast.makeText(getMapView().getContext(),
+                    "Failed to apply one or more settings.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        appendLog(String.format(Locale.US,
+                "Node settings applied: name=%s freq=%.3f bw=%s sf=%d cr=%d tx=%d dBm",
+                nodeName, freqMHz, trimDouble(bwKHz), sf, cr, txPowerDbm));
+        Toast.makeText(getMapView().getContext(),
+                "Node settings applied.", Toast.LENGTH_SHORT).show();
+        btManager.requestSelfInfo();
+    }
+
+    private void refreshMeshNodeSettingsDialogFromState(boolean initializing) {
+        if (meshNodeSettingsDialog == null || !meshNodeSettingsDialog.isShowing()) {
+            return;
+        }
+        if (meshNodeSettingsState == null) {
+            if (meshNodeSettingsStatus != null) {
+                meshNodeSettingsStatus.setText("Waiting for node settings response...");
+            }
+            return;
+        }
+        if (meshNodeSettingsNameField != null) {
+            meshNodeSettingsNameField.setText(meshNodeSettingsState.nodeName != null
+                    ? meshNodeSettingsState.nodeName : "");
+        }
+        if (meshNodeSettingsFrequencyField != null) {
+            meshNodeSettingsFrequencyField.setText(String.format(
+                    Locale.US, "%.3f", meshNodeSettingsState.frequencyMHz));
+        }
+        if (meshNodeSettingsBandwidthSpinner != null) {
+            meshNodeSettingsBandwidthSpinner.setSelection(
+                    nearestBandwidthIndex(meshNodeSettingsState.bandwidthKHz));
+        }
+        if (meshNodeSettingsSfSpinner != null) {
+            meshNodeSettingsSfSpinner.setSelection(indexOfIntOption(
+                    MESH_SPREADING_FACTOR_OPTIONS, meshNodeSettingsState.spreadingFactor));
+        }
+        if (meshNodeSettingsCrSpinner != null) {
+            meshNodeSettingsCrSpinner.setSelection(indexOfIntOption(
+                    MESH_CODING_RATE_OPTIONS, meshNodeSettingsState.codingRate));
+        }
+        if (meshNodeSettingsTxPowerField != null) {
+            meshNodeSettingsTxPowerField.setText(String.valueOf(meshNodeSettingsState.txPowerDbm));
+        }
+        if (meshNodeSettingsStatus != null) {
+            meshNodeSettingsStatus.setText(String.format(Locale.US,
+                    "Node response: %.3f MHz, %s kHz, SF%d, CR%d, TX %d dBm (max %d)",
+                    meshNodeSettingsState.frequencyMHz,
+                    trimDouble(meshNodeSettingsState.bandwidthKHz),
+                    meshNodeSettingsState.spreadingFactor,
+                    meshNodeSettingsState.codingRate,
+                    meshNodeSettingsState.txPowerDbm,
+                    meshNodeSettingsState.maxTxPowerDbm));
+        }
+        if (!initializing) {
+            appendLog("MeshCore node settings updated from node poll.");
+        }
+    }
+
+    private static String[] meshBandwidthLabels() {
+        String[] out = new String[MESH_BANDWIDTH_OPTIONS_KHZ.length];
+        for (int i = 0; i < MESH_BANDWIDTH_OPTIONS_KHZ.length; i++) {
+            out[i] = trimDouble(MESH_BANDWIDTH_OPTIONS_KHZ[i]) + " kHz";
+        }
+        return out;
+    }
+
+    private static String[] meshSfLabels() {
+        String[] out = new String[MESH_SPREADING_FACTOR_OPTIONS.length];
+        for (int i = 0; i < MESH_SPREADING_FACTOR_OPTIONS.length; i++) {
+            out[i] = "SF" + MESH_SPREADING_FACTOR_OPTIONS[i];
+        }
+        return out;
+    }
+
+    private static String[] meshCrLabels() {
+        String[] out = new String[MESH_CODING_RATE_OPTIONS.length];
+        for (int i = 0; i < MESH_CODING_RATE_OPTIONS.length; i++) {
+            out[i] = "CR" + MESH_CODING_RATE_OPTIONS[i];
+        }
+        return out;
+    }
+
+    private static int indexOfIntOption(int[] options, int value) {
+        for (int i = 0; i < options.length; i++) {
+            if (options[i] == value) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
+    private static int nearestBandwidthIndex(double valueKHz) {
+        int bestIdx = 0;
+        double bestDiff = Double.MAX_VALUE;
+        for (int i = 0; i < MESH_BANDWIDTH_OPTIONS_KHZ.length; i++) {
+            double d = Math.abs(MESH_BANDWIDTH_OPTIONS_KHZ[i] - valueKHz);
+            if (d < bestDiff) {
+                bestDiff = d;
+                bestIdx = i;
+            }
+        }
+        return bestIdx;
+    }
+
+    private static String trimDouble(double v) {
+        if (Math.abs(v - Math.rint(v)) < 0.0001) {
+            return String.format(Locale.US, "%.0f", v);
+        }
+        if (Math.abs(v * 10.0 - Math.rint(v * 10.0)) < 0.0001) {
+            return String.format(Locale.US, "%.1f", v);
+        }
+        if (Math.abs(v * 100.0 - Math.rint(v * 100.0)) < 0.0001) {
+            return String.format(Locale.US, "%.2f", v);
+        }
+        return String.format(Locale.US, "%.3f", v);
+    }
+
+    private boolean getMeshSendPositionWithAdvertPreference(Context ctx) {
+        if (ctx == null) {
+            return true;
+        }
+        return PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean(PREF_MESH_SEND_POSITION_WITH_ADVERT, true);
+    }
+
+    private void setMeshSendPositionWithAdvertPreference(boolean enabled) {
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        if (ctx == null) {
+            return;
+        }
+        PreferenceManager.getDefaultSharedPreferences(ctx)
+                .edit().putBoolean(PREF_MESH_SEND_POSITION_WITH_ADVERT, enabled).apply();
+    }
+
+    private boolean getMeshUseGpsForPositionPreference(Context ctx) {
+        if (ctx == null) {
+            return false;
+        }
+        return PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean(PREF_MESH_USE_GPS_FOR_POSITION, false);
+    }
+
+    private void setMeshUseGpsForPositionPreference(boolean enabled) {
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        if (ctx == null) {
+            return;
+        }
+        PreferenceManager.getDefaultSharedPreferences(ctx)
+                .edit().putBoolean(PREF_MESH_USE_GPS_FOR_POSITION, enabled).apply();
+    }
+
+    private boolean isMeshUseCallsignLocationPreferenceEnabled(Context ctx) {
+        if (ctx == null) {
+            return false;
+        }
+        return PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean(PREF_MESH_USE_CALLSIGN_LOCATION_FOR_POSITION, false);
+    }
+
+    private void setMeshUseCallsignLocationPreference(boolean enabled) {
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        if (ctx == null) {
+            return;
+        }
+        PreferenceManager.getDefaultSharedPreferences(ctx)
+                .edit().putBoolean(PREF_MESH_USE_CALLSIGN_LOCATION_FOR_POSITION, enabled).apply();
+    }
+
+    private void setMeshMapSetPosition(Context ctx, com.atakmap.coremap.maps.coords.GeoPoint gp) {
+        if (ctx == null || gp == null || !gp.isValid()) {
+            return;
+        }
+        PreferenceManager.getDefaultSharedPreferences(ctx).edit()
+                .putString(PREF_MESH_MAP_SET_POSITION_LAT, Double.toString(gp.getLatitude()))
+                .putString(PREF_MESH_MAP_SET_POSITION_LON, Double.toString(gp.getLongitude()))
+                .apply();
+    }
+
+    private com.atakmap.coremap.maps.coords.GeoPoint getMeshMapSetPosition(Context ctx) {
+        if (ctx == null) {
+            return null;
+        }
+        android.content.SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(ctx);
+        String latStr = prefs.getString(PREF_MESH_MAP_SET_POSITION_LAT, null);
+        String lonStr = prefs.getString(PREF_MESH_MAP_SET_POSITION_LON, null);
+        if (latStr == null || lonStr == null) {
+            return null;
+        }
+        try {
+            double lat = Double.parseDouble(latStr);
+            double lon = Double.parseDouble(lonStr);
+            com.atakmap.coremap.maps.coords.GeoPoint gp =
+                    new com.atakmap.coremap.maps.coords.GeoPoint(lat, lon);
+            return gp.isValid() ? gp : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void clearMeshMapSetPosition(Context ctx) {
+        if (ctx == null) {
+            return;
+        }
+        PreferenceManager.getDefaultSharedPreferences(ctx).edit()
+                .remove(PREF_MESH_MAP_SET_POSITION_LAT)
+                .remove(PREF_MESH_MAP_SET_POSITION_LON)
+                .apply();
+    }
+
+    private void confirmClearAllMeshContacts() {
+        MapView mv = getMapView();
+        Context ctx = mv != null ? mv.getContext() : pluginContext;
+        new AlertDialog.Builder(ctx)
+                .setTitle("Clear All Mesh Contacts")
+                .setMessage("This will delete all repeaters and nodes from your map. Are you sure?")
+                .setPositiveButton("Yes", (d, w) -> clearAllMeshContacts())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void clearAllMeshContacts() {
+        MapView mv = getMapView();
+        if (mv == null || mv.getRootGroup() == null) {
+            return;
+        }
+        mv.post(() -> {
+            int removedMarkers = removeMeshItemsRecursive(mv.getRootGroup());
+            int removedContacts = removeMeshContactsFromContactStore();
+            Context ctx = mv.getContext();
+            if (ctx != null) {
+                try {
+                    PreferenceManager.getDefaultSharedPreferences(ctx)
+                            .edit()
+                            .remove(PREF_MESH_REPEATER_CACHE)
+                            .remove(PREF_MESH_NODE_CACHE)
+                            .remove(PREF_MESH_MAP_SET_POSITION_LAT)
+                            .remove(PREF_MESH_MAP_SET_POSITION_LON)
+                            .apply();
+                } catch (Exception ignored) {
+                }
+            }
+            String msg = "Cleared Mesh contacts: " + removedMarkers
+                    + " markers, " + removedContacts + " contacts";
+            appendLog(msg);
+            Toast.makeText(mv.getContext(), msg, Toast.LENGTH_SHORT).show();
+            updateContactCount();
+        });
+    }
+
+    private int removeMeshItemsRecursive(MapGroup group) {
+        if (group == null) {
+            return 0;
+        }
+        int removed = 0;
+        List<MapItem> items = new ArrayList<>(group.getItems());
+        for (MapItem item : items) {
+            if (item == null) {
+                continue;
+            }
+            if (CotBridge.isMeshcoreMeshMarker(item)
+                    || MESH_NODE_MAP_POSITION_UID.equals(item.getUID())) {
+                group.removeItem(item);
+                removed++;
+            }
+        }
+        for (MapGroup child : group.getChildGroups()) {
+            removed += removeMeshItemsRecursive(child);
+        }
+        return removed;
+    }
+
+    private int removeMeshContactsFromContactStore() {
+        int removed = 0;
+        try {
+            Contacts contacts = Contacts.getInstance();
+            List<Contact> all = contacts.getAllContacts();
+            if (all == null) {
+                return 0;
+            }
+            for (Contact c : new ArrayList<>(all)) {
+                if (c == null) {
+                    continue;
+                }
+                String uid = c.getUID();
+                if (uid == null) {
+                    continue;
+                }
+                String u = uid.trim().toUpperCase(Locale.US);
+                if (u.startsWith(MESH_NODE_UID_PREFIX)
+                        || u.startsWith(MESH_RPTR_UID_PREFIX)
+                        || u.startsWith(ANDROID_MESH_NODE_UID_PREFIX)
+                        || u.startsWith(ANDROID_MESH_RPTR_UID_PREFIX)) {
+                    contacts.removeContact(c);
+                    removed++;
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "removeMeshContactsFromContactStore failed", e);
+        }
+        return removed;
+    }
+
     @Override
     public void onDropDownClose() {
+        if (getMapView() != null) {
+            getMapView().removeCallbacks(meshCallsignPositionSyncRunnable);
+        }
     }
 
     @Override
@@ -1061,10 +2199,12 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     public void disposeImpl() {
         btManager.removeListener(this);
         btManager.removeMeshStateListener(meshStateListener);
+        btManager.removeMeshChannelListener(meshChannelListener);
         contactTracker.setListener(null);
         stopConnectButtonPulse(true);
         pendingManualMeshGpsUpdate = false;
         pendingManualMeshGpsSinceMs = 0L;
         getMapView().removeCallbacks(manualMeshGpsTimeoutRunnable);
+        getMapView().removeCallbacks(meshCallsignPositionSyncRunnable);
     }
 }

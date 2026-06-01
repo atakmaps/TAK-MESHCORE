@@ -2,8 +2,6 @@ package com.atakmaps.meshcore.plugin.cot;
 
 import android.util.Log;
 
-import com.atakmaps.meshcore.plugin.ax25.AprsSymbolMapper;
-
 import com.atakmap.coremap.cot.event.CotDetail;
 import com.atakmap.coremap.cot.event.CotEvent;
 import com.atakmap.coremap.cot.event.CotPoint;
@@ -94,24 +92,11 @@ public class CotBuilder {
                                             long staleMillis,
                                             String cotTypeOverride) {
         return buildPositionCot(callsign, lat, lon, alt, speed, course,
-                teamColor, staleMillis, cotTypeOverride, null, null, null);
-    }
-
-    public static CotEvent buildPositionCot(String callsign,
-                                            double lat, double lon,
-                                            double alt, double speed,
-                                            double course, String teamColor,
-                                            long staleMillis,
-                                            String cotTypeOverride,
-                                            Character aprsSymbolTable,
-                                            Character aprsSymbolCode) {
-        return buildPositionCot(callsign, lat, lon, alt, speed, course,
-                teamColor, staleMillis, cotTypeOverride,
-                aprsSymbolTable, aprsSymbolCode, null);
+                teamColor, staleMillis, cotTypeOverride, null);
     }
 
     /**
-     * Full position CoT builder including optional APRS icon and remarks body.
+     * Full position CoT builder including an optional remarks body.
      */
     public static CotEvent buildPositionCot(String callsign,
                                             double lat, double lon,
@@ -119,28 +104,15 @@ public class CotBuilder {
                                             double course, String teamColor,
                                             long staleMillis,
                                             String cotTypeOverride,
-                                            Character aprsSymbolTable,
-                                            Character aprsSymbolCode,
                                             String remarksInner) {
         CotEvent event = new CotEvent();
 
         String normalizedCall = callsign.trim().toUpperCase();
         String uid = "ANDROID-" + normalizedCall;
         event.setUID(uid);
-        String iconsetPath = null;
-        if (aprsSymbolTable != null && aprsSymbolCode != null) {
-            iconsetPath = AprsSymbolMapper.iconsetPath(aprsSymbolTable, aprsSymbolCode);
-        }
-        if (iconsetPath != null) {
-            // APRS usericon supplies the bitmap; use friendly ground unit type so ATAK opens the
-            // full marker details (remarks, track, etc.). Generic a-u-G is treated as minimal UI
-            // (pinwheel only, no properties sheet).
-            event.setType("a-f-G-U-C");
-        } else {
-            event.setType((cotTypeOverride != null && !cotTypeOverride.trim().isEmpty())
-                    ? cotTypeOverride.trim()
-                    : "a-f-G-U-C"); // friendly ground unit combat
-        }
+        event.setType((cotTypeOverride != null && !cotTypeOverride.trim().isEmpty())
+                ? cotTypeOverride.trim()
+                : "a-f-G-U-C"); // friendly ground unit combat
         event.setHow("m-g");          // machine GPS
 
         long now = System.currentTimeMillis();
@@ -163,21 +135,10 @@ public class CotBuilder {
         contact.setAttribute("callsign", normalizedCall);
         detail.addChild(contact);
 
-        if (iconsetPath != null) {
-            CotDetail usericon = new CotDetail("usericon");
-            usericon.setAttribute("iconsetpath", iconsetPath);
-            detail.addChild(usericon);
-        }
-
-        // APRS markers use usericon for the bitmap; omit __group so ATAK does not classify them
-        // as TAK server contacts (team meta). Otherwise "Details" routes to the greyed contact-card
-        // pinwheel path instead of CoT Info where remarks/comment text are shown.
-        if (iconsetPath == null) {
-            CotDetail group = new CotDetail("__group");
-            group.setAttribute("name", teamColor != null ? teamColor : "Cyan");
-            group.setAttribute("role", "Team Member");
-            detail.addChild(group);
-        }
+        CotDetail group = new CotDetail("__group");
+        group.setAttribute("name", teamColor != null ? teamColor : "Cyan");
+        group.setAttribute("role", "Team Member");
+        detail.addChild(group);
 
         // Track element (speed/course)
         if (speed >= 0 || course >= 0) {
@@ -195,7 +156,7 @@ public class CotBuilder {
 
         // Remark with source info
         CotDetail remarks = new CotDetail("remarks");
-        remarks.setAttribute("source", "UV-PRO Radio");
+        remarks.setAttribute("source", "MeshCore");
         if (remarksInner != null && !remarksInner.trim().isEmpty()) {
             remarks.setInnerText(remarksInner.trim());
         }

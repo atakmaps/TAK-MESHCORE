@@ -26,7 +26,7 @@ public class PacketFragmenter {
 
     /**
      * Maximum payload size per AX.25 info field.
-     * AX.25 max is 256, minus our UV-PRO TLV header (3 bytes) and
+     * AX.25 max is 256, minus our MeshCore TLV header (3 bytes) and
      * fragment header (4 bytes), we keep payload at 240 bytes max.
      */
     public static final int MAX_FRAGMENT_PAYLOAD = 240;
@@ -40,7 +40,7 @@ public class PacketFragmenter {
     /**
      * Fragment a payload if it exceeds the maximum frame size.
      *
-     * @param type    UV-PRO packet type
+     * @param type    MeshCore packet type
      * @param payload The full payload to fragment
      * @return List of MeshCorePacket instances ready for AX.25 framing.
      *         If payload fits in one frame, returns a single unfragmented packet.

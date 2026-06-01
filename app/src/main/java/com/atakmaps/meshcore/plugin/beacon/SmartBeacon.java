@@ -5,10 +5,10 @@ import android.content.SharedPreferences;
 import android.preference.PreferenceManager;
 
 /**
- * Smart Beaconing algorithm for AX.25 position reporting via UV-PRO radio.
+ * Smart Beaconing algorithm for AX.25 position reporting via MeshCore radio.
  * Dynamically adjusts the beacon rate based on speed and heading change —
  * similar in concept to the well-known Smart Beacon algorithm but applied
- * to UV-PRO AX.25 packets, not APRS.
+ * to MeshCore AX.25 packets, not APRS.
  *
  * Dynamically adjusts the beacon rate based on speed and heading change:
  *  - Fast/turning  → beacon more frequently (down to fastRate)
@@ -19,14 +19,14 @@ import android.preference.PreferenceManager;
 public class SmartBeacon {
 
     // SharedPreferences keys
-    public static final String KEY_ENABLED        = "uvpro_smart_beacon_enabled";
-    public static final String KEY_LOW_SPEED      = "uvpro_smart_beacon_low_speed";
-    public static final String KEY_HIGH_SPEED     = "uvpro_smart_beacon_high_speed";
-    public static final String KEY_SLOW_RATE      = "uvpro_smart_beacon_slow_rate";
-    public static final String KEY_FAST_RATE      = "uvpro_smart_beacon_fast_rate";
-    public static final String KEY_MIN_TURN_TIME  = "uvpro_smart_beacon_min_turn_time";
-    public static final String KEY_TURN_THRESHOLD = "uvpro_smart_beacon_turn_threshold";
-    public static final String KEY_TURN_SLOPE     = "uvpro_smart_beacon_turn_slope";
+    public static final String KEY_ENABLED        = "meshcore_smart_beacon_enabled";
+    public static final String KEY_LOW_SPEED      = "meshcore_smart_beacon_low_speed";
+    public static final String KEY_HIGH_SPEED     = "meshcore_smart_beacon_high_speed";
+    public static final String KEY_SLOW_RATE      = "meshcore_smart_beacon_slow_rate";
+    public static final String KEY_FAST_RATE      = "meshcore_smart_beacon_fast_rate";
+    public static final String KEY_MIN_TURN_TIME  = "meshcore_smart_beacon_min_turn_time";
+    public static final String KEY_TURN_THRESHOLD = "meshcore_smart_beacon_turn_threshold";
+    public static final String KEY_TURN_SLOPE     = "meshcore_smart_beacon_turn_slope";
 
     // Default parameter values (based on the Smart Beacon algorithm)
     // Default OFF so fixed beacon interval remains authoritative unless explicitly enabled.

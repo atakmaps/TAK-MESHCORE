@@ -3,7 +3,7 @@ package com.atakmaps.meshcore.plugin.contacts;
 /**
  * Data model for a radio contact tracked on the ATAK map.
  *
- * Represents another radio operator seen via APRS, UV-PRO packets,
+ * Represents another radio operator seen via APRS, MeshCore packets,
  * or other radio protocol.
  */
 public class RadioContact {
@@ -59,8 +59,8 @@ public class RadioContact {
     public enum ContactSource {
         /** Standard APRS from any APRS radio */
         APRS,
-        /** UVPro custom protocol from another UVPro user */
-        UVPRO,
+        /** MeshCore custom protocol from another MeshCore user */
+        MESHCORE,
         /** Unknown source */
         UNKNOWN
     }

@@ -10,13 +10,9 @@ import android.preference.PreferenceManager;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
-import android.widget.CompoundButton;
 import android.widget.EditText;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -46,38 +42,26 @@ public class SettingsFragment extends PluginPreferenceFragment
     private static final int COLOR_WHITE = 0xFFFFFFFF;
 
     /** Key registered with {@code ToolsPreferenceFragment} in {@link com.atakmaps.meshcore.plugin.MeshCoreMapComponent}. */
-    public static final String TOOL_SETTINGS_KEY = "uvproPreference";
+    public static final String TOOL_SETTINGS_KEY = "meshcorePreference";
 
-    public static final String PREF_BEACON_INTERVAL = "uvpro_beacon_interval";
-    public static final String PREF_AUTO_RECONNECT = "uvpro_auto_reconnect";
-    public static final String PREF_ENCRYPTION_ENABLED = "uvpro_encryption_enabled";
-    public static final String PREF_ENCRYPTION_PASSPHRASE = "uvpro_encryption_passphrase";
-    public static final String PREF_RETRY_INTERVAL_MIN = "uvpro_retry_interval_min";
-    public static final String PREF_RETRY_MAX = "uvpro_retry_max";
-    public static final String PREF_SA_RELAY_ENABLED = "uvpro_sa_relay_enabled";
-    public static final String PREF_RF_TO_TAK_UPLINK_ENABLED = "uvpro_rf_to_tak_uplink_enabled";
-    public static final String PREF_PING_REPLY_ENABLED = "uvpro_ping_reply_enabled";
+    public static final String PREF_BEACON_INTERVAL = "meshcore_beacon_interval";
+    public static final String PREF_AUTO_RECONNECT = "meshcore_auto_reconnect";
+    public static final String PREF_ENCRYPTION_ENABLED = "meshcore_encryption_enabled";
+    public static final String PREF_ENCRYPTION_PASSPHRASE = "meshcore_encryption_passphrase";
+    public static final String PREF_RETRY_INTERVAL_MIN = "meshcore_retry_interval_min";
+    public static final String PREF_RETRY_MAX = "meshcore_retry_max";
+    public static final String PREF_SA_RELAY_ENABLED = "meshcore_sa_relay_enabled";
+    public static final String PREF_RF_TO_TAK_UPLINK_ENABLED = "meshcore_rf_to_tak_uplink_enabled";
+    public static final String PREF_PING_REPLY_ENABLED = "meshcore_ping_reply_enabled";
 
-    public static final String PREF_APRS_CALLSIGN = "uvpro_aprs_callsign";
-    public static final String PREF_APRS_SSID = "uvpro_aprs_ssid";
-    public static final String PREF_APRS_SYMBOL_TABLE = "uvpro_aprs_symbol_table";
-    public static final String PREF_APRS_SYMBOL_CODE = "uvpro_aprs_symbol_code";
-    public static final String PREF_APRS_ICON_SELECTED = "uvpro_aprs_icon_selected";
-    public static final String PREF_APRS_MESSAGE = "uvpro_aprs_message";
-    public static final String PREF_APRS_TX_ARMED = "uvpro_aprs_tx_armed";
-    public static final String PREF_APRS_DISABLE_ATAK_TRAFFIC = "uvpro_aprs_disable_atak_traffic";
-
-    public static final String KEY_CAT_APRS = "uvpro_cat_aprs";
-    public static final String KEY_APRS_ICON = "uvpro_aprs_icon";
-
-    public static final String KEY_CAT_ADMINISTRATION = "uvpro_cat_administration";
-    public static final String KEY_ADMIN_LEADERSHIP_WARNING = "uvpro_admin_leadership_warning";
-    public static final String KEY_DISTRIBUTE_NET_SLOTS = "uvpro_distribute_net_slots";
-    public static final String KEY_ADMIN_CURRENT_SLOT_STATUS = "uvpro_admin_current_slot_status";
+    public static final String KEY_CAT_ADMINISTRATION = "meshcore_cat_administration";
+    public static final String KEY_ADMIN_LEADERSHIP_WARNING = "meshcore_admin_leadership_warning";
+    public static final String KEY_DISTRIBUTE_NET_SLOTS = "meshcore_distribute_net_slots";
+    public static final String KEY_ADMIN_CURRENT_SLOT_STATUS = "meshcore_admin_current_slot_status";
 
     /** Injected after inflate — some ATAK builds omit custom Pan* prefs from XML. */
-    public static final String KEY_BLUETOOTH_DEVICES = "uvpro_bluetooth_devices";
-    public static final String KEY_CAT_RADIO = "uvpro_cat_radio";
+    public static final String KEY_BLUETOOTH_DEVICES = "meshcore_bluetooth_devices";
+    public static final String KEY_CAT_RADIO = "meshcore_cat_radio";
 
     public static final String DEFAULT_BEACON_INTERVAL = "300";
     public static final boolean DEFAULT_AUTO_RECONNECT = true;
@@ -116,7 +100,6 @@ public class SettingsFragment extends PluginPreferenceFragment
             NetSlotConfig.ensureDefaults(ctx);
         }
         ensureBluetoothDevicesPreference();
-        wireAprsPreferences();
         wireAdministrationPreferences();
     }
 
@@ -135,10 +118,10 @@ public class SettingsFragment extends PluginPreferenceFragment
 
         // Try the radio category first, fall back to the bluetooth category
         PreferenceCategory radio = (PreferenceCategory) findPreference(KEY_CAT_RADIO);
-        android.util.Log.d("MeshCore.Settings", "uvpro_cat_radio lookup: " + radio);
+        android.util.Log.d("MeshCore.Settings", "meshcore_cat_radio lookup: " + radio);
         if (radio == null) {
-            radio = (PreferenceCategory) findPreference("uvpro_cat_bluetooth");
-            android.util.Log.d("MeshCore.Settings", "uvpro_cat_bluetooth fallback: " + radio);
+            radio = (PreferenceCategory) findPreference("meshcore_cat_bluetooth");
+            android.util.Log.d("MeshCore.Settings", "meshcore_cat_bluetooth fallback: " + radio);
         }
         if (radio == null) {
             // Last resort: add directly to the root preference screen
@@ -276,43 +259,6 @@ public class SettingsFragment extends PluginPreferenceFragment
         updateAdminControlsEnabled();
     }
 
-    private void wireAprsPreferences() {
-        Preference iconPref = findPreference(KEY_APRS_ICON);
-        if (iconPref != null) {
-            updateAprsIconSummary(iconPref);
-            iconPref.setOnPreferenceClickListener(p -> {
-                Context ctx = getContext();
-                if (ctx == null) {
-                    ctx = staticPluginContext;
-                }
-                if (ctx != null) {
-                    com.atakmaps.meshcore.plugin.aprs.AprsIconPickerDialog.show(
-                            ctx, staticPluginContext,
-                            () -> updateAprsIconSummary(iconPref));
-                }
-                return true;
-            });
-        }
-    }
-
-    private void updateAprsIconSummary(Preference iconPref) {
-        Context ctx = getContext();
-        if (ctx == null) {
-            ctx = staticPluginContext;
-        }
-        if (ctx == null || iconPref == null) {
-            return;
-        }
-        if (!isAprsIconSelected(ctx)) {
-            iconPref.setSummary("(not set) — tap to choose");
-            return;
-        }
-        char t = getAprsSymbolTable(ctx);
-        char c = getAprsSymbolCode(ctx);
-        iconPref.setSummary(com.atakmaps.meshcore.plugin.aprs.AprsSymbolCatalog.labelFor(t, c)
-                + " (" + t + c + ")");
-    }
-
     private void styleAdminLeadershipWarning() {
         Preference warning = findPreference(KEY_ADMIN_LEADERSHIP_WARNING);
         if (warning != null) {
@@ -387,11 +333,6 @@ public class SettingsFragment extends PluginPreferenceFragment
             pingReplyPref.setSummary(on
                     ? "On — reply to incoming pings with your position"
                     : "Off");
-        }
-
-        Preference aprsIconPref = findPreference(KEY_APRS_ICON);
-        if (aprsIconPref != null) {
-            updateAprsIconSummary(aprsIconPref);
         }
 
         Context ctx = MapView.getMapView() != null
@@ -539,108 +480,11 @@ public class SettingsFragment extends PluginPreferenceFragment
                 .getString(PREF_ENCRYPTION_PASSPHRASE, "");
     }
 
-    public static String getAprsCallsign(Context context) {
-        String cs = getPrefs(context).getString(PREF_APRS_CALLSIGN, "");
-        if (cs == null) {
-            return "";
-        }
-        String out = cs.trim().toUpperCase(java.util.Locale.US);
-        // Accept "CALL-SSID" input in FCC field by normalizing to base callsign.
-        int dash = out.indexOf('-');
-        if (dash > 0) {
-            out = out.substring(0, dash);
-        }
-        return out;
-    }
-
-    public static int getAprsSsid(Context context) {
-        String val = getPrefs(context).getString(PREF_APRS_SSID, "9");
-        try {
-            int ssid = Integer.parseInt(val);
-            if (ssid < 0) {
-                return 0;
-            }
-            if (ssid > 15) {
-                return 15;
-            }
-            return ssid;
-        } catch (NumberFormatException e) {
-            return 9;
-        }
-    }
-
-    public static boolean isAprsIconSelected(Context context) {
-        return getPrefs(context).getBoolean(PREF_APRS_ICON_SELECTED, false);
-    }
-
-    public static char getAprsSymbolTable(Context context) {
-        String s = getPrefs(context).getString(PREF_APRS_SYMBOL_TABLE, "/");
-        if (s == null || s.isEmpty()) {
-            return '/';
-        }
-        return s.charAt(0);
-    }
-
-    public static char getAprsSymbolCode(Context context) {
-        String s = getPrefs(context).getString(PREF_APRS_SYMBOL_CODE, ">");
-        if (s == null || s.isEmpty()) {
-            return '>';
-        }
-        return s.charAt(0);
-    }
-
-    public static String getAprsMessage(Context context) {
-        String m = getPrefs(context).getString(PREF_APRS_MESSAGE, "");
-        return m != null ? m : "";
-    }
-
-    public static boolean isAprsTxArmed(Context context) {
-        return getPrefs(context).getBoolean(PREF_APRS_TX_ARMED, false);
-    }
-
-    public static void setAprsTxArmed(Context context, boolean armed) {
-        getPrefs(context).edit().putBoolean(PREF_APRS_TX_ARMED, armed).apply();
-    }
-
-    public static boolean isAprsDisableAtakTraffic(Context context) {
-        return getPrefs(context).getBoolean(PREF_APRS_DISABLE_ATAK_TRAFFIC, false);
-    }
-
-    public static void setAprsDisableAtakTraffic(Context context, boolean disabled) {
-        getPrefs(context).edit().putBoolean(PREF_APRS_DISABLE_ATAK_TRAFFIC, disabled).apply();
-    }
-
-    /** Ham base call: 1 letter + digit + 1–3 letters, or 2 letters + digit + 1–3 letters. */
-    public static boolean isValidAprsCallsign(String baseCall) {
-        if (baseCall == null) {
-            return false;
-        }
-        String c = baseCall.trim().toUpperCase(java.util.Locale.US);
-        return c.matches("^[A-Z][0-9][A-Z]{1,3}$")
-                || c.matches("^[A-Z]{2}[0-9][A-Z]{1,3}$");
-    }
-
-    public static String formatAprsDisplayCall(Context context) {
-        String base = getAprsCallsign(context);
-        if (!isValidAprsCallsign(base)) {
-            return "(not set)";
-        }
-        int ssid = getAprsSsid(context);
-        return ssid > 0 ? base + "-" + ssid : base;
-    }
-
     /**
      * Opens ATAK Tool Preferences for this plugin (Settings → Tool Preferences → MeshCore).
      */
     public static void openToolPreferences(Context context) {
         launchPluginSettings(TOOL_SETTINGS_KEY, null, context);
-    }
-
-    /**
-     * Opens plugin settings scrolled to the APRS category.
-     */
-    public static void openAprsSettings(Context context) {
-        launchPluginSettings(TOOL_SETTINGS_KEY, KEY_CAT_APRS, context);
     }
 
     private static void launchPluginSettings(String toolKey, String prefKey, Context context) {
@@ -665,189 +509,6 @@ public class SettingsFragment extends PluginPreferenceFragment
                 }
             }
         }
-    }
-
-    /**
-     * APRS outbound fields for the in-panel Plugin Settings dialog.
-     */
-    public static final class AprsSettingsUi {
-        public EditText editCallsign;
-        public Spinner spinnerSsid;
-        public ImageView iconPreview;
-        public TextView iconNotSet;
-        public EditText editMessage;
-        public String[] ssidValues;
-    }
-
-    /**
-     * Adds APRS section to the Plugin Settings dialog (same window as Actions → Plugin Settings).
-     */
-    public static AprsSettingsUi appendAprsSettingsSection(Context mapCtx, Context pluginCtx,
-                                                           LinearLayout layout) {
-        AprsSettingsUi ui = new AprsSettingsUi();
-        if (mapCtx == null || layout == null) {
-            return ui;
-        }
-
-        TextView header = new TextView(mapCtx);
-        header.setText("\nAPRS");
-        header.setTextColor(0xFF00BCD4);
-        header.setTextSize(14);
-        header.setTypeface(Typeface.DEFAULT_BOLD);
-        layout.addView(header);
-
-        TextView labelCall = new TextView(mapCtx);
-        labelCall.setText("FCC Call Sign");
-        labelCall.setTextColor(0xFFAAAAAA);
-        layout.addView(labelCall);
-        ui.editCallsign = new EditText(mapCtx);
-        ui.editCallsign.setText(getAprsCallsign(mapCtx));
-        ui.editCallsign.setInputType(android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
-        ui.editCallsign.setTextColor(0xFFFFFFFF);
-        layout.addView(ui.editCallsign);
-
-        TextView labelSsid = new TextView(mapCtx);
-        labelSsid.setText("\nAPRS suffix (SSID)");
-        labelSsid.setTextColor(0xFFAAAAAA);
-        layout.addView(labelSsid);
-        ui.spinnerSsid = new Spinner(mapCtx);
-        if (pluginCtx != null) {
-            android.content.res.Resources res = pluginCtx.getResources();
-            String pkg = pluginCtx.getPackageName();
-            int labelsId = res.getIdentifier("aprs_ssid_labels", "array", pkg);
-            int valuesId = res.getIdentifier("aprs_ssid_values", "array", pkg);
-            if (labelsId != 0 && valuesId != 0) {
-                String[] labels = res.getStringArray(labelsId);
-                ui.ssidValues = res.getStringArray(valuesId);
-                ArrayAdapter<String> adapter = new ArrayAdapter<>(mapCtx,
-                        android.R.layout.simple_spinner_item, labels) {
-                    @Override
-                    public View getView(int position, View convertView, ViewGroup parent) {
-                        View v = super.getView(position, convertView, parent);
-                        if (v instanceof TextView) {
-                            TextView tv = (TextView) v;
-                            tv.setTextColor(COLOR_WHITE);
-                            tv.setBackgroundColor(COLOR_STD_BLUE);
-                            tv.setPadding(dp(mapCtx, 10), dp(mapCtx, 8),
-                                    dp(mapCtx, 10), dp(mapCtx, 8));
-                        }
-                        return v;
-                    }
-
-                    @Override
-                    public View getDropDownView(int position, View convertView, ViewGroup parent) {
-                        View v = super.getDropDownView(position, convertView, parent);
-                        if (v instanceof TextView) {
-                            TextView tv = (TextView) v;
-                            tv.setTextColor(COLOR_WHITE);
-                            tv.setBackgroundColor(COLOR_STD_BLUE);
-                            tv.setPadding(dp(mapCtx, 12), dp(mapCtx, 10),
-                                    dp(mapCtx, 12), dp(mapCtx, 10));
-                        }
-                        return v;
-                    }
-                };
-                adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-                ui.spinnerSsid.setAdapter(adapter);
-                ui.spinnerSsid.setBackgroundColor(COLOR_STD_BLUE);
-                int ssid = getAprsSsid(mapCtx);
-                if (ssid >= 0 && ssid < labels.length) {
-                    ui.spinnerSsid.setSelection(ssid);
-                }
-            }
-        }
-        layout.addView(ui.spinnerSsid);
-
-        TextView labelIcon = new TextView(mapCtx);
-        labelIcon.setText("\nAPRS icon");
-        labelIcon.setTextColor(0xFFAAAAAA);
-        layout.addView(labelIcon);
-
-        LinearLayout iconRow = new LinearLayout(mapCtx);
-        iconRow.setOrientation(LinearLayout.HORIZONTAL);
-        iconRow.setGravity(Gravity.CENTER_VERTICAL);
-        ui.iconPreview = new ImageView(mapCtx);
-        int iconPx = (int) (40 * mapCtx.getResources().getDisplayMetrics().density);
-        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(iconPx, iconPx);
-        iconLp.setMargins(0, 0, 16, 0);
-        ui.iconPreview.setLayoutParams(iconLp);
-        ui.iconPreview.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        iconRow.addView(ui.iconPreview);
-        ui.iconNotSet = new TextView(mapCtx);
-        ui.iconNotSet.setText("(not set)");
-        ui.iconNotSet.setTextColor(0xFF888888);
-        ui.iconNotSet.setTextSize(12);
-        iconRow.addView(ui.iconNotSet);
-        layout.addView(iconRow);
-
-        Button btnPickIcon = new Button(mapCtx);
-        btnPickIcon.setText("Choose APRS Icon");
-        btnPickIcon.setTextColor(COLOR_WHITE);
-        btnPickIcon.setBackgroundColor(COLOR_STD_BLUE);
-        btnPickIcon.setOnClickListener(v ->
-                com.atakmaps.meshcore.plugin.aprs.AprsIconPickerDialog.show(
-                        mapCtx, pluginCtx, () ->
-                        refreshAprsIconPreviewInDialog(mapCtx, pluginCtx, ui)));
-        layout.addView(btnPickIcon);
-        refreshAprsIconPreviewInDialog(mapCtx, pluginCtx, ui);
-
-        TextView labelMsg = new TextView(mapCtx);
-        labelMsg.setText("\nAPRS message (comment on position)");
-        labelMsg.setTextColor(0xFFAAAAAA);
-        layout.addView(labelMsg);
-        ui.editMessage = new EditText(mapCtx);
-        ui.editMessage.setText(getAprsMessage(mapCtx));
-        ui.editMessage.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
-        ui.editMessage.setTextColor(0xFFFFFFFF);
-        layout.addView(ui.editMessage);
-
-        return ui;
-    }
-
-    private static void refreshAprsIconPreviewInDialog(Context mapCtx, Context pluginCtx,
-                                                         AprsSettingsUi ui) {
-        if (ui == null || ui.iconPreview == null || ui.iconNotSet == null) {
-            return;
-        }
-        if (!isAprsIconSelected(mapCtx)) {
-            ui.iconPreview.setVisibility(View.GONE);
-            ui.iconPreview.setImageDrawable(null);
-            ui.iconNotSet.setVisibility(View.VISIBLE);
-            return;
-        }
-        android.graphics.Bitmap bmp = com.atakmaps.meshcore.plugin.aprs.AprsIconPreviewLoader
-                .loadSelectedIconBitmap(mapCtx, pluginCtx);
-        if (bmp != null) {
-            ui.iconPreview.setImageBitmap(bmp);
-            ui.iconPreview.setVisibility(View.VISIBLE);
-            ui.iconNotSet.setVisibility(View.GONE);
-        } else {
-            ui.iconPreview.setVisibility(View.GONE);
-            ui.iconNotSet.setVisibility(View.VISIBLE);
-            ui.iconNotSet.setText("(not set)");
-        }
-    }
-
-    public static void saveAprsSettingsFromUi(Context ctx, AprsSettingsUi ui) {
-        if (ctx == null || ui == null) {
-            return;
-        }
-        SharedPreferences.Editor editor = getPrefs(ctx).edit();
-        if (ui.editCallsign != null) {
-            editor.putString(PREF_APRS_CALLSIGN,
-                    ui.editCallsign.getText().toString().trim().toUpperCase(java.util.Locale.US));
-        }
-        if (ui.spinnerSsid != null && ui.ssidValues != null) {
-            int pos = ui.spinnerSsid.getSelectedItemPosition();
-            if (pos >= 0 && pos < ui.ssidValues.length) {
-                editor.putString(PREF_APRS_SSID, ui.ssidValues[pos]);
-            }
-        }
-        if (ui.editMessage != null) {
-            editor.putString(PREF_APRS_MESSAGE, ui.editMessage.getText().toString());
-        }
-        editor.apply();
     }
 
     /**

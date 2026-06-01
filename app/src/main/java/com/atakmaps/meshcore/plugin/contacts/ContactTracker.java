@@ -4,7 +4,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
-import com.atakmaps.meshcore.plugin.aprs.AprsTrackManager;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
 
 import java.util.Collection;
@@ -25,7 +24,7 @@ public class ContactTracker {
 
     private static final String TAG = "MeshCore.Contacts";
 
-    /** Time before a contact becomes stale (align with inbound CoT stale, sparse APRS). */
+    /** Time before a contact becomes stale (align with inbound CoT stale, sparse beacons). */
     private static final long STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000L;
 
     /** Time before a contact is marked lost (after stale). */
@@ -41,7 +40,6 @@ public class ContactTracker {
     private final CotBridge cotBridge;
     private final Handler handler;
     private boolean running = false;
-    private AprsTrackManager aprsTrackManager;
 
     /** Listener for contact updates */
     public interface ContactListener {
@@ -59,10 +57,6 @@ public class ContactTracker {
 
     public void setListener(ContactListener listener) {
         this.listener = listener;
-    }
-
-    public void setAprsTrackManager(AprsTrackManager aprsTrackManager) {
-        this.aprsTrackManager = aprsTrackManager;
     }
 
     /**
@@ -113,7 +107,7 @@ public class ContactTracker {
         if (battery >= 0) {
             contact.setBattery(battery);
         }
-        contact.setSource(RadioContact.ContactSource.UVPRO);
+        contact.setSource(RadioContact.ContactSource.MESHCORE);
 
         notifyContactUpdated(contact);
     }
@@ -153,7 +147,7 @@ public class ContactTracker {
 
     /**
      * Liveness only: bump {@link RadioContact#touch} if the contact exists
-     * (e.g. APRS telemetry with no new coordinates).
+     * (e.g. telemetry with no new coordinates).
      */
     public void touchIfPresent(String callsign) {
         String key = normalizeCallsign(callsign);
@@ -253,9 +247,6 @@ public class ContactTracker {
     }
 
     private void notifyContactRemoved(RadioContact contact) {
-        if (aprsTrackManager != null && contact != null) {
-            aprsTrackManager.removeTrack("ANDROID-" + normalizeCallsign(contact.getCallsign()));
-        }
         if (listener != null) {
             handler.post(() -> listener.onContactRemoved(contact));
         }

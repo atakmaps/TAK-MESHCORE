@@ -1,11 +1,11 @@
 package com.atakmaps.meshcore.plugin.ax25;
 
+import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
-import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
@@ -19,27 +19,24 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 
 /**
- * Ensures the APRS iconset package is available for import on ATAK devices.
- *
- * This does not force-import into ATAK internals; it stages the zip into the
- * normal ATAK import folder and prompts the user once.
+ * Ensures the MeshCore iconset package is available for ATAK import.
  */
-public final class AprsIconsetInstaller {
-    private static final String TAG = "MeshCore.Iconset";
-    private static final String ICONSET_UID = AprsSymbolMapper.ICONSET_UID;
-    private static final String ICONSET_ASSET = "APRS-Symbols-APRSdroid.zip";
-    private static final String ICONSET_FILENAME = "APRS.zip";
-    private static final String REMINDER_CHANNEL_ID = "uvpro_aprs_iconset";
-    private static final int REMINDER_NOTIFICATION_ID = 22001;
+public final class MeshcoreIconsetInstaller {
+    private static final String TAG = "MeshCore.MeshIconset";
+    private static final String ICONSET_UID = MeshcoreIconset.ICONSET_UID;
+    private static final String ICONSET_ASSET = "meschore.zip";
+    private static final String ICONSET_FILENAME = "meschore.zip";
+    private static final String REMINDER_CHANNEL_ID = "meshcore_meshcore_iconset";
+    private static final int REMINDER_NOTIFICATION_ID = 22002;
     private static volatile boolean reminderVisible = false;
     private static volatile long lastDialogMs = 0L;
     private static final long DIALOG_THROTTLE_MS = 45_000L;
     private static volatile boolean dialogShowing = false;
     private static final String IMPORT_INSTRUCTION =
             "Select Point Dropper>Gear Icon>Add Iconset\n"
-                    + "Path= /sdcard/atak/tools/import/aprs.zip";
+                    + "Path= /sdcard/atak/tools/import/meschore.zip";
 
-    private AprsIconsetInstaller() {
+    private MeshcoreIconsetInstaller() {
     }
 
     /**
@@ -57,7 +54,7 @@ public final class AprsIconsetInstaller {
 
             boolean staged = stageIconsetZip(pluginContext);
             if (!staged) {
-                Log.w(TAG, "APRS iconset missing and staging failed");
+                Log.w(TAG, "MeshCore iconset missing and staging failed");
             }
             showPersistentReminder(uiContext);
             showInAppDialogReminder(uiContext);
@@ -130,7 +127,7 @@ public final class AprsIconsetInstaller {
                 out.write(buf, 0, n);
             }
             out.flush();
-            Log.i(TAG, "Staged APRS iconset for ATAK import: " + outFile.getAbsolutePath());
+            Log.i(TAG, "Staged MeshCore iconset for ATAK import: " + outFile.getAbsolutePath());
             return true;
         } catch (Exception e) {
             Log.w(TAG, "stageIconsetZip failed: " + e.getMessage(), e);
@@ -161,9 +158,9 @@ public final class AprsIconsetInstaller {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 NotificationChannel channel = new NotificationChannel(
                         REMINDER_CHANNEL_ID,
-                        "UV-PRO APRS Setup",
+                        "MeshCore Setup",
                         NotificationManager.IMPORTANCE_DEFAULT);
-                channel.setDescription("Guidance for APRS iconset import");
+                channel.setDescription("Guidance for MeshCore iconset import");
                 channel.setShowBadge(false);
                 nm.createNotificationChannel(channel);
             }
@@ -187,7 +184,7 @@ public final class AprsIconsetInstaller {
                     .setOngoing(true)
                     .setAutoCancel(false)
                     .setOnlyAlertOnce(true)
-                    .setContentTitle("APRS iconset import required")
+                    .setContentTitle("MeshCore iconset import required")
                     .setContentText("Select Point Dropper>Gear Icon>Add Iconset");
             if (pi != null) {
                 b.setContentIntent(pi);
@@ -220,7 +217,7 @@ public final class AprsIconsetInstaller {
             dialogShowing = true;
             try {
                 new AlertDialog.Builder(activity)
-                        .setTitle("APRS iconset required")
+                        .setTitle("MeshCore iconset required")
                         .setMessage(IMPORT_INSTRUCTION)
                         .setCancelable(true)
                         .setPositiveButton("OK", (d, which) -> {

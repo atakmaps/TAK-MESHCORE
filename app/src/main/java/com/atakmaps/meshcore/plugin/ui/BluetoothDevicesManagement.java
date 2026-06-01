@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Full-screen style dialog under Tools → UV-PRO Settings: Bluetooth device
+ * Full-screen style dialog under Tools → MeshCore Settings: Bluetooth device
  * history with rename, favorite, and delete.
  */
 public final class BluetoothDevicesManagement {

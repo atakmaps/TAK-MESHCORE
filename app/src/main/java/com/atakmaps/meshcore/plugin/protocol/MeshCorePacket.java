@@ -5,7 +5,7 @@ import java.nio.ByteOrder;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * UV-PRO custom packet format for efficient data transfer over radio.
+ * MeshCore custom packet format for efficient data transfer over radio.
  *
  * TLV (Type-Length-Value) structure:
  *   [Type (1 byte)] [Length (2 bytes, big-endian)] [Value (N bytes)]

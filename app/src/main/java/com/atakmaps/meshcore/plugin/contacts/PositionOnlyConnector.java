@@ -9,7 +9,7 @@ import com.atakmaps.meshcore.plugin.R;
  */
 public final class PositionOnlyConnector extends Connector {
 
-    public static final String CONNECTOR_TYPE = "connector.uvpro.position_only";
+    public static final String CONNECTOR_TYPE = "connector.meshcore.position_only";
     public static final String CONTACT_ACTION =
             "com.atakmaps.meshcore.plugin.action.POSITION_ONLY_CONTACT";
     private static final String PACKAGE = "com.atakmaps.meshcore.plugin";

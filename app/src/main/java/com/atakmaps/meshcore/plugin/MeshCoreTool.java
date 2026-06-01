@@ -18,12 +18,12 @@ public class MeshCoreTool extends AbstractPluginTool {
     }
 
     /**
-     * Quick-launcher / toolbar icons are tinted by ATAK; the full-color {@code ic_uvpro} badge is
-     * almost entirely opaque and becomes a flat white disc. Use stroke-only {@code ic_uvpro_toolbar}.
+     * Quick-launcher / toolbar icons are tinted by ATAK; the full-color {@code ic_meshcore} badge is
+     * almost entirely opaque and becomes a flat white disc. Use stroke-only {@code ic_meshcore_toolbar}.
      * Clear theme tint so stroke art is not flattened on some ATAK builds.
      */
     public static Drawable toolbarIcon(Context context) {
-        Drawable d = context.getResources().getDrawable(R.drawable.ic_uvpro_toolbar, context.getTheme());
+        Drawable d = context.getResources().getDrawable(R.drawable.ic_meshcore_toolbar, context.getTheme());
         if (d == null) {
             return null;
         }

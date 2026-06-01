@@ -445,7 +445,7 @@ public final class InboundGroupSyncApplier {
                     NotificationUtil.GeneralIcon.CHAT.getID(),
                     NotificationUtil.BLUE,
                     "Group Synced",
-                    "UV-PRO",
+                    "MeshCore",
                     msg);
             Log.i(TAG, "System notification posted for convo=" + conversationId);
         } catch (Exception e) {

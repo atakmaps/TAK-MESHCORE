@@ -1,5 +1,5 @@
 <!-- Toolbar / quick-launcher glyph: stroke-only so ATAK's icon tint does not flatten
-     the full-color ic_uvpro badge into a solid white disc. -->
+     the full-color ic_meshcore badge into a solid white disc. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="48dp"
     android:height="48dp"
