@@ -32,6 +32,23 @@ mkdir -p "${PLUGINS_DIR}"
 SOURCE_ZIP="${PLUGIN_SLUG}-${VERSION}-ATAK-${ATAK_VER}-source.zip"
 SOURCE_PATH="${PLUGINS_DIR}/${SOURCE_ZIP}"
 
+# Trust assets must be committed — git archive only includes tracked files.
+TRUST_ASSETS=(
+  "app/src/main/assets/atakmaps-ca.p12"
+  "app/src/main/assets/isrg-root-x1.pem"
+)
+for asset in "${TRUST_ASSETS[@]}"; do
+  if [[ ! -f "${ROOT}/${asset}" ]]; then
+    echo "Missing trust asset: ${asset}" >&2
+    exit 1
+  fi
+  if ! git ls-files --error-unmatch "${asset}" >/dev/null 2>&1; then
+    echo "Trust asset not committed (will be omitted from TPC zip): ${asset}" >&2
+    echo "Run: git add ${asset} && git commit" >&2
+    exit 1
+  fi
+done
+
 git archive --format=zip --prefix="${TPP_ROOT}/" -o "${SOURCE_PATH}" HEAD
 
 APK=""

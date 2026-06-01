@@ -13,6 +13,7 @@ MeshCore connects ATAK to MeshCore radios over BLE. Repo: `atakmaps/TAK-MESHCORE
 Before `package-submission.sh`:
 
 - [ ] `ext.PLUGIN_VERSION` bumped in root `build.gradle` (prefer `x.y.z` three segments)
+- [ ] Trust assets committed: `app/src/main/assets/atakmaps-ca.p12`, `isrg-root-x1.pem`
 - [ ] All submission sources **committed** on `main`
 - [ ] `./gradlew :app:assembleCivRelease` succeeds
 - [ ] `./tools/package-submission.sh` produces `MeshCore-*-ATAK-5.5.1-source.zip`
@@ -26,7 +27,16 @@ Full details: `Plugins/Handoff Docs/MESHCORE-TPC-SUBMISSION.md`
 - Entry points: `MeshCoreLifecycle`, `MeshCoreMapComponent`, `MeshCoreDropDownReceiver`
 - Log tags: prefer `MeshCore` or `MeshCore.*` subtags
 
+## Update-server trust (required for OTA)
+
+MeshCore ships the same `atakmaps.com` CA bundle as UV-PRO:
+
+- `app/src/main/assets/atakmaps-ca.p12`
+- `app/src/main/assets/isrg-root-x1.pem`
+- PKCS#12 key: `meshcore_trust_bundle_p12_key` in `strings.xml`
+
+Both must be **committed** before TPC submission (`package-submission.sh` enforces this).
+
 ## Do not merge UV-PRO-only patterns
 
-- No `atakmaps-ca.p12` / `configureUpdateServerStatic` unless MeshCore gains its own OTA server
-- No UV-PRO catalog APK path (`com.uvpro.plugin.apk`)
+- No UV-PRO catalog APK path (`com.uvpro.plugin.apk`) — MeshCore uses `com.atakmaps.meshcore.plugin.apk`

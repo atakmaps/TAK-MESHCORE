@@ -1,18 +1,35 @@
 ---
-description: Deploy signed MeshCore plugin zips to GitHub and optional cloud catalog
+description: Deploy signed MeshCore plugin zips to GitHub and atakmaps.com catalog
 alwaysApply: true
 ---
 
 # MeshCore Signed Plugin Release Flow
 
-When the user provides a signed plugin zip path (TPC/TAK Signed) for **MeshCore**:
+When the user provides a signed plugin zip path (TPC/TAK Signed) for **MeshCore**, perform this flow end-to-end:
 
 1. Verify `main` is current and pushed on `atakmaps/TAK-MESHCORE`.
 2. Inspect the zip and extract the signed APK (`ATAK-Plugin-Meshcore-*-tpc-5.5.1-civ-release.apk`).
 3. Validate APK: `package: com.atakmaps.meshcore.plugin`, `versionCode` / `versionName` match release intent.
 4. Create/push tag `v<version>` on the release commit; create GitHub Release on **TAK-MESHCORE** with signed APK, AAB, and `MeshCore-*-ATAK-5.5.1-source.zip`.
 5. **Do not** deploy to `com.uvpro.plugin.apk` — that is UV-PRO only.
-6. If publishing to atakmaps.com: add/update a **separate** `generate_infz.py` plugin row for `com.atakmaps.meshcore.plugin` (canonical APK `com.atakmaps.meshcore.plugin.apk`), regenerate `product.infz`, mirror `5.5.1/`, verify URLs return 200.
-7. Report release URL, SHA256, and deployed catalog version (if any).
+6. **Always** upload MeshCore signed APK to cloud:
+   - `scp … root@31.220.30.74:/var/www/html/plugins/com.atakmaps.meshcore.plugin.apk`
+7. **Always** update MeshCore row in server `generate_infz.py` (`version` + `version_code` for `com.atakmaps.meshcore.plugin`).
+8. Regenerate catalog: `python3 /var/www/html/plugins/generate_infz.py`
+9. Mirror: `cp -f /var/www/html/plugins/product.infz /var/www/html/plugins/5.5.1/product.infz`
+10. Verify:
+    - `product.inf` row for `com.atakmaps.meshcore.plugin` matches signed APK hash/size
+    - `https://atakmaps.com/plugins/com.atakmaps.meshcore.plugin.apk` → 200
+    - `https://atakmaps.com/plugins/5.5.1/plugins/com.atakmaps.meshcore.plugin.apk` → 200
+11. Report release URL, SHA256, catalog version, and URLs.
 
-Prefer explicit verification over assumptions.
+## TPC submission (before signing)
+
+`tools/package-submission.sh` fails unless these are **committed** on `main`:
+
+- `app/src/main/assets/atakmaps-ca.p12`
+- `app/src/main/assets/isrg-root-x1.pem`
+
+Same CA bundle as UV-PRO (`atakatak` / `meshcore_trust_bundle_p12_key` in strings.xml).
+
+Prefer explicit verification over assumptions. If any step fails, stop and report the exact blocker.
