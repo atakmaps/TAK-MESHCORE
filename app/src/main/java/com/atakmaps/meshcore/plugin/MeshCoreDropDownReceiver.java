@@ -469,9 +469,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnSettings = rootView.findViewById(getId("btn_settings"));
         btnSendBeacon = rootView.findViewById(getId("btn_send_beacon"));
         btnSendPing = rootView.findViewById(getId("btn_send_ping"));
-        btnBeaconSettings = rootView.findViewById(getId("btn_beacon_settings"));
+        btnBeaconSettings = rootView.findViewById(getId("btn_manage_plugin_beacon_settings"));
         btnPluginSettings = rootView.findViewById(getId("btn_plugin_settings"));
-        btnSmartBeaconSettings = rootView.findViewById(getId("btn_smart_beacon_settings"));
+        btnSmartBeaconSettings = rootView.findViewById(getId("btn_manage_smart_beacon_settings"));
         btnMeshSendAdvert = rootView.findViewById(getId("btn_meshcore_send_advert"));
         switchSmartBeacon = rootView.findViewById(getId("switch_smart_beacon"));
         switchMeshEnableGps = rootView.findViewById(getId("switch_mesh_enable_gps"));
@@ -536,7 +536,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             btnSendPing.setOnClickListener(v -> sendPing());
         }
         if (btnBeaconSettings != null) {
-            btnBeaconSettings.setOnClickListener(v -> showSettingsDialog());
+            btnBeaconSettings.setOnClickListener(v -> showBeaconSettingsDialog());
         }
         if (btnPluginSettings != null) {
             btnPluginSettings.setOnClickListener(v -> showSettingsDialog());
@@ -861,6 +861,83 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         } catch (Exception e) {
             appendLog("Ping failed: " + e.getMessage());
         }
+    }
+
+    /** Beacon-only settings: GPS beacon interval + Smart Beacon enable/settings. */
+    private void showBeaconSettingsDialog() {
+        Context ctx = getMapView().getContext();
+        android.content.SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(ctx);
+
+        ScrollView scrollView = new ScrollView(ctx);
+        LinearLayout layout = new LinearLayout(ctx);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int pad = dip(ctx, 12);
+        layout.setPadding(pad, pad, pad, pad);
+        scrollView.addView(layout);
+
+        TextView beaconLabel = new TextView(ctx);
+        beaconLabel.setText("GPS Beacon Interval (seconds)");
+        beaconLabel.setTextColor(0xFFAAAAAA);
+        beaconLabel.setPadding(0, dip(ctx, 4), 0, dip(ctx, 2));
+        layout.addView(beaconLabel);
+
+        EditText editBeaconInterval = new EditText(ctx);
+        editBeaconInterval.setInputType(InputType.TYPE_CLASS_NUMBER);
+        editBeaconInterval.setText(prefs.getString(
+                SettingsFragment.PREF_BEACON_INTERVAL,
+                SettingsFragment.DEFAULT_BEACON_INTERVAL));
+        layout.addView(editBeaconInterval);
+
+        LinearLayout smartRow = new LinearLayout(ctx);
+        smartRow.setOrientation(LinearLayout.HORIZONTAL);
+        smartRow.setPadding(0, dip(ctx, 8), 0, dip(ctx, 2));
+        TextView smartLabel = new TextView(ctx);
+        smartLabel.setText("Enable Smart Beacon");
+        smartLabel.setTextColor(0xFFE0E0E0);
+        smartRow.addView(smartLabel,
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Switch switchSmart = new Switch(ctx);
+        switchSmart.setChecked(SmartBeacon.isEnabled(ctx));
+        smartRow.addView(switchSmart);
+        layout.addView(smartRow);
+
+        Button btnSmartSettings = new Button(ctx);
+        btnSmartSettings.setText("Smart Beacon Settings");
+        applyPillButtonBackground(btnSmartSettings, COLOR_PILL_BUTTON_PRIMARY);
+        btnSmartSettings.setOnClickListener(v ->
+                SmartBeaconSettingsDialog.show(ctx,
+                        () -> appendLog("Smart beacon settings updated")));
+        layout.addView(btnSmartSettings);
+
+        switchSmart.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            SmartBeacon.setEnabled(ctx, isChecked);
+            editBeaconInterval.setEnabled(!isChecked);
+            editBeaconInterval.setAlpha(isChecked ? 0.45f : 1.0f);
+        });
+        editBeaconInterval.setEnabled(!switchSmart.isChecked());
+        editBeaconInterval.setAlpha(switchSmart.isChecked() ? 0.45f : 1.0f);
+
+        new AlertDialog.Builder(ctx)
+                .setTitle("Beacon Settings")
+                .setView(scrollView)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Save", (dialog, which) -> {
+                    String beacon = editBeaconInterval.getText().toString().trim();
+                    if (!beacon.isEmpty()) {
+                        prefs.edit().putString(SettingsFragment.PREF_BEACON_INTERVAL, beacon).apply();
+                    }
+                    SmartBeacon.setEnabled(ctx, switchSmart.isChecked());
+                    if (switchSmartBeacon != null) {
+                        switchSmartBeacon.setChecked(switchSmart.isChecked());
+                    }
+                    appendLog("Beacon settings saved");
+                    try {
+                        AtakBroadcast.getInstance().sendBroadcast(
+                                new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
+                    } catch (Exception ignored) {
+                    }
+                })
+                .show();
     }
 
     private void showSettingsDialog() {

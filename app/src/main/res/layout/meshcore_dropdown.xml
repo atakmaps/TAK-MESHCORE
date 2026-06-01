@@ -482,7 +482,7 @@
                     android:id="@+id/text_beacon_interval"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="60s"
+                    android:text="300s"
                     android:textColor="#FF00BCD4"
                     android:textSize="13sp"
                     android:textStyle="bold" />
@@ -643,44 +643,6 @@
                 android:layout_marginTop="8dp"
                 android:text="Node Settings"
                 android:backgroundTint="#FF455A64" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginTop="8dp">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Show Repeaters"
-                    android:textColor="#FFE0E0E0" />
-
-                <Switch
-                    android:id="@+id/switch_mesh_show_repeaters"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginTop="4dp">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Show Nodes"
-                    android:textColor="#FFE0E0E0" />
-
-                <Switch
-                    android:id="@+id/switch_mesh_show_nodes"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content" />
-            </LinearLayout>
 
             <Button
                 android:id="@+id/btn_mesh_request_channels"
