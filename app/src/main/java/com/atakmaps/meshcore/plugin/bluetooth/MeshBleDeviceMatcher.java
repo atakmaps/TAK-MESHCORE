@@ -32,6 +32,13 @@ public final class MeshBleDeviceMatcher {
     public static final UUID UUID_MESHTASTIC_SERVICE =
             UUID.fromString("6BA1B218-15A8-461F-9FA8-5DCAE273EAFD");
 
+    public static final UUID UUID_UART_RX =
+            UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
+    public static final UUID UUID_UART_TX =
+            UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E");
+    public static final UUID UUID_CCC =
+            UUID.fromString("00002902-0000-1000-8000-00805F9B34FB");
+
     /** Default BLE PIN when firmware is built with {@code BLE_PIN_CODE} (see MyMesh.cpp). */
     public static final int DEFAULT_PAIRING_PIN = 123456;
 

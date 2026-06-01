@@ -558,15 +558,6 @@
             </LinearLayout>
 
             <Button
-                android:id="@+id/btn_meshcore_channels"
-                style="@style/MeshcorePillButton.Beacon"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="8dp"
-                android:text="Channels"
-                android:backgroundTint="#FF455A64" />
-
-            <Button
                 android:id="@+id/btn_meshcore_send_advert"
                 style="@style/MeshcorePillButton.Beacon"
                 android:layout_width="match_parent"
@@ -627,30 +618,12 @@
                 android:backgroundTint="#FF455A64" />
 
             <Button
-                android:id="@+id/btn_clear_mesh_contacts"
+                android:id="@+id/btn_meshcore_channels"
                 style="@style/MeshcorePillButton.Beacon"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="Clear All Mesh Contacts"
-                android:backgroundTint="#FF455A64" />
-
-            <Button
-                android:id="@+id/btn_mesh_node_settings"
-                style="@style/MeshcorePillButton.Beacon"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="Node Settings"
-                android:backgroundTint="#FF455A64" />
-
-            <Button
-                android:id="@+id/btn_mesh_request_channels"
-                style="@style/MeshcorePillButton.Beacon"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="Request Channels"
+                android:text="Channels"
                 android:backgroundTint="#FF455A64" />
 
             <TextView
@@ -702,7 +675,7 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- ==================== ACTIONS ==================== -->
+        <!-- ==================== SETTINGS ==================== -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -714,7 +687,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="ACTIONS"
+                android:text="SETTINGS"
                 android:textColor="#FF00BCD4"
                 android:textSize="12sp"
                 android:textStyle="bold"
@@ -738,12 +711,21 @@
                 android:backgroundTint="#FF455A64" />
 
             <Button
-                android:id="@+id/btn_packet_terminal"
+                android:id="@+id/btn_mesh_node_settings"
                 style="@style/MeshcorePillButton.Beacon"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="6dp"
-                android:text="Packet Terminal"
+                android:text="Node Settings"
+                android:backgroundTint="#FF455A64" />
+
+            <Button
+                android:id="@+id/btn_clear_mesh_contacts"
+                style="@style/MeshcorePillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:text="Clear All Mesh Contacts"
                 android:backgroundTint="#FF455A64" />
 
         </LinearLayout>

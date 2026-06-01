@@ -30,9 +30,11 @@ public class MeshStatusOverlay extends MarkerIconWidget implements MapWidget.OnC
     private static final String TAG = "MeshCore.StatusOverlay";
     private static final int ICON_WIDTH = 64;
     private static final int ICON_HEIGHT = 64;
+    private static final Object INSTALL_LOCK = new Object();
 
     private static MeshStatusOverlay instance;
     private static boolean lastKnownConnected = false;
+    private static boolean installScheduled = false;
 
     private final MapView mapView;
     private final String connectedUri;
@@ -62,41 +64,88 @@ public class MeshStatusOverlay extends MarkerIconWidget implements MapWidget.OnC
     }
 
     public static void install(Context pluginContext) {
-        MapView mv = MapView.getMapView();
-        if (mv == null) {
-            return;
-        }
-        uninstall();
-        try {
-            RootLayoutWidget root =
-                    (RootLayoutWidget) mv.getComponentExtra("rootLayoutWidget");
-            if (root == null) {
-                mv.postDelayed(() -> install(pluginContext), 2000);
+        synchronized (INSTALL_LOCK) {
+            MapView mv = MapView.getMapView();
+            if (mv == null) {
                 return;
             }
-            LinearLayoutWidget tr = root.getLayout(RootLayoutWidget.TOP_RIGHT);
-            if (tr == null) {
-                return;
+            uninstallInternal(mv);
+            try {
+                RootLayoutWidget root =
+                        (RootLayoutWidget) mv.getComponentExtra("rootLayoutWidget");
+                if (root == null) {
+                    if (!installScheduled) {
+                        installScheduled = true;
+                        mv.postDelayed(() -> {
+                            installScheduled = false;
+                            install(pluginContext);
+                        }, 2000);
+                    }
+                    return;
+                }
+                LinearLayoutWidget tr = root.getLayout(RootLayoutWidget.TOP_RIGHT);
+                if (tr == null) {
+                    return;
+                }
+                removeOrphanOverlays(tr);
+                instance = new MeshStatusOverlay(pluginContext, mv, tr);
+                instance.applyIcon(lastKnownConnected);
+                Log.d(TAG, "Status overlay installed");
+            } catch (Exception e) {
+                Log.e(TAG, "install failed", e);
             }
-            instance = new MeshStatusOverlay(pluginContext, mv, tr);
-            instance.applyIcon(lastKnownConnected);
-        } catch (Exception e) {
-            Log.e(TAG, "install failed", e);
         }
     }
 
     public static void uninstall() {
+        synchronized (INSTALL_LOCK) {
+            MapView mv = MapView.getMapView();
+            if (mv == null) {
+                instance = null;
+                return;
+            }
+            uninstallInternal(mv);
+        }
+    }
+
+    private static void uninstallInternal(MapView mv) {
         if (instance == null) {
             return;
         }
         try {
             instance.removeOnClickListener(instance);
             RootLayoutWidget root =
-                    (RootLayoutWidget) instance.mapView.getComponentExtra("rootLayoutWidget");
-            root.getLayout(RootLayoutWidget.TOP_RIGHT).removeWidget(instance);
+                    (RootLayoutWidget) mv.getComponentExtra("rootLayoutWidget");
+            if (root != null) {
+                LinearLayoutWidget tr = root.getLayout(RootLayoutWidget.TOP_RIGHT);
+                if (tr != null) {
+                    tr.removeWidget(instance);
+                    removeOrphanOverlays(tr);
+                }
+            }
         } catch (Exception ignored) {
         }
         instance = null;
+    }
+
+    /** Removes duplicate overlay widgets left from prior installs. */
+    private static void removeOrphanOverlays(LinearLayoutWidget tr) {
+        if (tr == null) {
+            return;
+        }
+        try {
+            for (int i = tr.getChildWidgetCount() - 1; i >= 0; i--) {
+                if (tr.getChildWidgetAt(i) instanceof MeshStatusOverlay) {
+                    MeshStatusOverlay overlay = (MeshStatusOverlay) tr.getChildWidgetAt(i);
+                    if (overlay != instance) {
+                        tr.removeWidget(overlay);
+                        Log.w(TAG, "Removed orphan MeshStatusOverlay widget");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not prune orphan overlays", e);
+        }
     }
 
     public static void setConnected(boolean connected) {

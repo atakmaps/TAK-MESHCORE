@@ -211,6 +211,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         cotBridge.startOutgoingRelay();
 
         startMeshIconsetReminder(context, view.getContext());
+        btConnectionManager.scheduleBootAutoConnect();
 
         Log.i(TAG, "MeshCore plugin initialized");
     }

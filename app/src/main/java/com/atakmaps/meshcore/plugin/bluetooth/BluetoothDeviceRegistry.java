@@ -162,6 +162,15 @@ public final class BluetoothDeviceRegistry {
         }
     }
 
+    /** Removes every saved device record and direct-connect targets. */
+    public static void clearAll(Context context) {
+        synchronized (BluetoothDeviceRegistry.class) {
+            saveAll(context, new ArrayList<>());
+            setConnectTargetAddress(context, "");
+            setMeshConnectTargetAddress(context, "");
+        }
+    }
+
     public static void remove(Context context, @NonNull String address) {
         String norm = normalizeAddress(address);
         synchronized (BluetoothDeviceRegistry.class) {
