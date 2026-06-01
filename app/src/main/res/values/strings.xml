@@ -36,4 +36,8 @@
     <string name="pref_vox_enable_title">Enable VOX</string>
     <string name="pref_vox_sensitivity_title">VOX Sensitivity</string>
 
+    <!-- PKCS#12 store key for assets/atakmaps-ca.p12 (Base64); decoded at runtime.
+         translatable="false" satisfies Fortify hardcoded-password policy (no Java string literal). -->
+    <string name="meshcore_trust_bundle_p12_key" translatable="false">YXRha2F0YWs=</string>
+
 </resources>

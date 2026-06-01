@@ -236,16 +236,20 @@ public class ChatBridge {
         }
         if (message == null || message.isEmpty()) return false;
 
-        // Gateway envelope: preserve full TAK destination identifiers across 6-byte RF room limits.
-        String gatewayToUid = null;
-        String gatewayRoom = null;
+        // Gateway envelope: wireDest|displayCallsign|lineUid|message (UV-PRO compatible).
+        String gatewayWireDest = null;
+        String gatewayDisplayCallsign = null;
+        String gatewayLineUid = null;
         GatewayWrapped gw = parseGatewayWrappedMessage(message);
         if (gw != null) {
             message = gw.message;
-            gatewayToUid = gw.toUid;
-            gatewayRoom = gw.chatRoom;
-            Log.d(TAG, "Inbound RF gateway envelope toUid=" + gatewayToUid
-                    + " room=" + gatewayRoom);
+            gatewayWireDest = gw.wireDest;
+            gatewayDisplayCallsign = gw.displayCallsign;
+            gatewayLineUid = gw.lineUid;
+            Log.d(TAG, "Inbound RF gateway envelope wireDest=" + gatewayWireDest
+                    + " displayCallsign=" + gatewayDisplayCallsign
+                    + (gatewayLineUid != null && !gatewayLineUid.isEmpty()
+                    ? " lineUid=" + gatewayLineUid : ""));
         }
 
         // Display: the transport truncates the sender callsign to 6 chars (e.g. JESTER_15 -> JSTR15).
@@ -267,13 +271,24 @@ public class ChatBridge {
         } else {
             chatRoom = toCallsign.trim();
         }
-        if (gatewayToUid != null && !gatewayToUid.isEmpty()) {
-            chatRoom = gatewayToUid;
-        } else if (gatewayRoom != null && !gatewayRoom.isEmpty()) {
-            chatRoom = gatewayRoom;
+        if (gatewayDisplayCallsign != null && !gatewayDisplayCallsign.isEmpty()) {
+            chatRoom = gatewayDisplayCallsign;
+        } else if (gatewayWireDest != null && !gatewayWireDest.isEmpty()) {
+            chatRoom = gatewayWireDest;
         }
 
-        // Direct DM: thread id must be the *remote* peer's ANDROID-* UID. Packets include a
+        String lineSenderUid = parseGeoChatSenderUid(gatewayLineUid);
+        String btechUid = cotBridge != null ? cotBridge.resolveBtechUidForId(fromCallsign) : null;
+        String senderUid;
+        if (ContactMergeUtil.isMeshNodeUid(fromCallsign)) {
+            senderUid = fromCallsign.trim();
+        } else if (lineSenderUid != null && !lineSenderUid.isEmpty()) {
+            senderUid = ContactMergeUtil.resolveCanonicalPeerUid(fromCallsign, lineSenderUid, btechUid);
+        } else {
+            senderUid = ContactMergeUtil.resolveCanonicalPeerUid(fromCallsign, btechUid);
+        }
+
+        // Direct DM: thread id must be the *remote* peer's UID.
         // 6-byte "room" (RF destination) that is often THIS operator's callsign (e.g. JUNIOR).
         // Local operator is rarely in btechIdToUid MapView.getDeviceUid() is ANDROID-1729… not
         // ANDROID-JUNIOR — so resolveBtechUidForId("JUNIOR") is often NULL and we incorrectly
@@ -282,7 +297,7 @@ public class ChatBridge {
         if (!"All Chat Rooms".equalsIgnoreCase(chatRoom)) {
             boolean keepGroupThread = isLikelyGroupConversationThread(chatRoom);
             boolean destinationLooksSelf = inboundRfDestinationLooksLikeSelf(
-                    gatewayToUid, gatewayRoom, chatRoom, toCallsign);
+                    gatewayWireDest, gatewayDisplayCallsign, chatRoom, toCallsign);
 
             // Direct RF chat is not routed/hopped: if this packet is explicitly addressed to
             // another peer, do not inject it locally or mutate Contacts.
@@ -298,27 +313,31 @@ public class ChatBridge {
                 return false;
             }
 
-            String destUid = cotBridge.resolveBtechUidForId(chatRoom);
-            String senderUid = cotBridge.resolveBtechUidForId(fromCallsign);
-            // Synthesize an ANDROID-* UID for unregistered senders so GeoChat can thread and
-            // badge them like normal conversations.
-            if ((senderUid == null || senderUid.isEmpty()) && fromCallsign != null) {
+            if ((senderUid == null || senderUid.isEmpty()) && fromCallsign != null
+                    && !ContactMergeUtil.isMeshNodeUid(fromCallsign)) {
                 senderUid = syntheticAndroidUid(fromCallsign);
             }
-            if (senderUid != null && senderUid.startsWith(ANDROID_UID_PREFIX)) {
-                ensurePluginChatContact(fromCallsign, senderUid);
+            if (senderUid != null && !senderUid.isEmpty()
+                    && (senderUid.startsWith(ANDROID_UID_PREFIX)
+                    || ContactMergeUtil.isMeshNodeUid(senderUid))) {
+                if (ContactMergeUtil.isMeshNodeUid(senderUid)) {
+                    MeshCoreContactHandler.ensureMeshInboundChatContact(
+                            extractMeshPublicKeyCandidate(senderUid));
+                } else {
+                    ensurePluginChatContact(fromCallsign, senderUid);
+                    ContactMergeUtil.collapseDuplicateContactsForCallsign(fromCallsign, senderUid);
+                }
                 cotBridge.registerBtechContactUid(senderUid);
                 if (fromCallsign != null && !fromCallsign.trim().isEmpty()) {
                     cotBridge.registerBtechContactId(fromCallsign, senderUid);
                 }
-                cotBridge.registerBtechContactId(
-                        senderUid.substring(ANDROID_UID_PREFIX.length()), senderUid);
             }
             String selfUid = null;
             try {
                 selfUid = MapView.getDeviceUid();
             } catch (Exception ignored) {
             }
+            String destUid = cotBridge.resolveBtechUidForId(chatRoom);
 
             boolean peerThreadResolved = false;
             if (rfDestinationLooksLikeSelf(chatRoom.trim())
@@ -359,7 +378,8 @@ public class ChatBridge {
 
         // Maintain a plugin unread counter for Contacts icon badge.
         // (Native GeoChat unread tracking is not reliably reflected for plugin contacts on all builds.)
-        if (chatRoom != null && chatRoom.startsWith("ANDROID-")) {
+        if (chatRoom != null && (chatRoom.startsWith(ANDROID_UID_PREFIX)
+                || chatRoom.startsWith(MESH_NODE_UID_PREFIX))) {
             // Track wire mid for READ ACK once the user opens the conversation.
             if (radioPacketMessageId > 0) {
                 addPendingReadAck(chatRoom, radioPacketMessageId);
@@ -375,13 +395,14 @@ public class ChatBridge {
             }
         }
 
-        cotBridge.injectChatCot(fromCallsign, message, chatRoom,
-                radioPacketMessageId);
+        String senderDisplay = ContactMergeUtil.displayCallsignForContact(fromCallsign, senderUid);
+        cotBridge.injectChatCot(senderDisplay, message, chatRoom,
+                radioPacketMessageId, gatewayLineUid, senderUid);
         return true;
     }
 
-    private boolean inboundRfDestinationLooksLikeSelf(String gatewayToUid,
-                                                      String gatewayRoom,
+    private boolean inboundRfDestinationLooksLikeSelf(String gatewayWireDest,
+                                                      String gatewayDisplayCallsign,
                                                       String chatRoom,
                                                       String wireToCallsign) {
         String selfUid = null;
@@ -389,16 +410,16 @@ public class ChatBridge {
             selfUid = MapView.getDeviceUid();
         } catch (Exception ignored) {
         }
-        if (gatewayToUid != null && selfUid != null
-                && selfUid.equalsIgnoreCase(gatewayToUid.trim())) {
+        if (gatewayWireDest != null && selfUid != null
+                && selfUid.equalsIgnoreCase(gatewayWireDest.trim())) {
             return true;
         }
-        if (gatewayToUid != null && !gatewayToUid.trim().isEmpty()
-                && rfDestinationLooksLikeSelf(gatewayToUid.trim())) {
+        if (gatewayWireDest != null && !gatewayWireDest.trim().isEmpty()
+                && rfDestinationLooksLikeSelf(gatewayWireDest.trim())) {
             return true;
         }
-        if (gatewayRoom != null && !gatewayRoom.trim().isEmpty()
-                && rfDestinationLooksLikeSelf(gatewayRoom.trim())) {
+        if (gatewayDisplayCallsign != null && !gatewayDisplayCallsign.trim().isEmpty()
+                && rfDestinationLooksLikeSelf(gatewayDisplayCallsign.trim())) {
             return true;
         }
         if (chatRoom != null && selfUid != null
@@ -416,16 +437,47 @@ public class ChatBridge {
                 && rfDestinationLooksLikeSelf(wireToCallsign.trim())) {
             return true;
         }
-        if (inboundDestinationMatchesLocalMeshPubKey(gatewayToUid)) {
+        if (inboundDestinationMatchesLocalMeshPubKey(gatewayWireDest)) {
             return true;
         }
-        if (inboundDestinationMatchesLocalMeshPubKey(gatewayRoom)) {
+        if (inboundDestinationMatchesLocalMeshPubKey(gatewayDisplayCallsign)) {
             return true;
         }
         if (inboundDestinationMatchesLocalMeshPubKey(wireToCallsign)) {
             return true;
         }
         return false;
+    }
+
+    /** Sender UID from {@code GeoChat.{senderUid}.{thread}.{suffix}} on RF gateway relay. */
+    static String parseGeoChatSenderUid(String geoChatLineUid) {
+        if (geoChatLineUid == null || geoChatLineUid.trim().isEmpty()) {
+            return null;
+        }
+        String trimmed = geoChatLineUid.trim();
+        if (!trimmed.startsWith("GeoChat.")) {
+            return null;
+        }
+        String rest = trimmed.substring("GeoChat.".length());
+        int lastDot = rest.lastIndexOf('.');
+        if (lastDot <= 0) {
+            return null;
+        }
+        rest = rest.substring(0, lastDot);
+        int prevDot = rest.lastIndexOf('.');
+        if (prevDot <= 0 || prevDot >= rest.length() - 1) {
+            return null;
+        }
+        String senderUid = rest.substring(0, prevDot).trim();
+        return senderUid.isEmpty() ? null : senderUid;
+    }
+
+    public static void setMergeRoutingBridge(CotBridge bridge) {
+        ContactMergeUtil.setMergeRoutingBridge(bridge);
+    }
+
+    public static void collapseAllCallsignAliasDuplicates() {
+        ContactMergeUtil.collapseAllCallsignAliasDuplicates();
     }
 
     private boolean inboundDestinationMatchesLocalMeshPubKey(String rawDestination) {
@@ -557,8 +609,11 @@ public class ChatBridge {
         }
         String senderUid = resolveExistingMeshContactUidByPubKeyPrefix(prefix);
         if (senderUid == null || senderUid.trim().isEmpty()) {
+            senderUid = MeshCoreContactHandler.ensureMeshInboundChatContact(prefix);
+        }
+        if (senderUid == null || senderUid.trim().isEmpty()) {
             Log.w(TAG, "Dropping inbound native MeshCore DM from unknown prefix=" + prefix
-                    + " (not in mesh contacts)");
+                    + " (no map marker or contact)");
             return false;
         }
         String fromCallsign = meshNodeDisplayForInboundPrefix(prefix, senderUid);
@@ -588,13 +643,7 @@ public class ChatBridge {
                     String u = uid.toUpperCase(Locale.US);
                     if ((u.startsWith(MESH_NODE_UID_PREFIX) || u.startsWith(MESH_RPTR_UID_PREFIX))
                             && extractMeshPublicKeyCandidate(u).startsWith(prefixUpper)) {
-                        if (c instanceof IndividualContact) {
-                            IndividualContact ic = (IndividualContact) c;
-                            if (ic.getConnector(com.atakmaps.meshcore.plugin.contacts.MeshSendMessageConnector.CONNECTOR_TYPE) != null
-                                    || ic.getConnector(com.atakmaps.meshcore.plugin.contacts.MeshFavoriteConnector.CONNECTOR_TYPE) != null) {
-                                return uid;
-                            }
-                        }
+                        return uid;
                     }
                 }
             }
@@ -811,38 +860,7 @@ public class ChatBridge {
      * GeoChat uses device UID, link UID, and callsign forms interchangeably.
      */
     public static String resolveCanonicalPeerUid(String callsignRaw, String... candidateUids) {
-        String callsign = callsignRaw != null ? callsignRaw.trim().toUpperCase(Locale.US) : "";
-        try {
-            Contacts contacts = Contacts.getInstance();
-            if (!callsign.isEmpty()) {
-                Contact byCallsign = contacts.getFirstContactWithCallsign(callsign);
-                if (byCallsign != null && !byCallsign.getUID().isEmpty()) {
-                    return byCallsign.getUID();
-                }
-                return syntheticAndroidUid(callsign);
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "resolveCanonicalPeerUid callsign lookup failed", e);
-        }
-        if (candidateUids != null) {
-            for (String raw : candidateUids) {
-                if (raw == null || raw.trim().isEmpty()) {
-                    continue;
-                }
-                String uid = raw.trim();
-                try {
-                    Contact c = Contacts.getInstance().getContactByUuid(uid);
-                    if (c != null) {
-                        return c.getUID();
-                    }
-                } catch (Exception ignored) {
-                }
-                if (uid.toUpperCase(Locale.US).startsWith(ANDROID_UID_PREFIX)) {
-                    return uid.toUpperCase(Locale.US);
-                }
-            }
-        }
-        return "";
+        return ContactMergeUtil.resolveCanonicalPeerUid(callsignRaw, candidateUids);
     }
 
     public static String ensurePluginChatContact(String callsignRaw, String preferredUid) {
@@ -867,7 +885,7 @@ public class ChatBridge {
         try {
             Contacts contacts = Contacts.getInstance();
             if (!callsign.isEmpty()) {
-                Contact byCallsign = contacts.getFirstContactWithCallsign(callsign);
+                Contact byCallsign = ContactMergeUtil.findContactByCallsignVariants(contacts, callsign);
                 if (byCallsign instanceof IndividualContact) {
                     return byCallsign.getUID();
                 }
@@ -1750,10 +1768,22 @@ public class ChatBridge {
         }
     }
 
-    private static String wrapGatewayMessage(String toUid, String chatRoom, String message) {
-        String uid = toUid != null ? toUid.trim() : "";
-        String room = chatRoom != null ? chatRoom.trim() : "";
-        return GW_PREFIX + uid + "|" + room + "|" + message;
+    /**
+     * Wraps an outbound GeoChat message with routing context for gateway relay.
+     * Format: {@code __UVGW__|wireDest|displayCallsign|lineUid|message}
+     */
+    private static String wrapGatewayMessage(String wireDest, String displayCallsign,
+                                             String lineUid, String message) {
+        String wire = wireDest != null ? wireDest.trim() : "";
+        String display = displayCallsign != null ? displayCallsign.trim() : "";
+        String line = lineUid != null ? lineUid.trim() : "";
+        return GW_PREFIX + wire + "|" + display + "|" + line + "|" + message;
+    }
+
+    /** Legacy 3-field overload; lineUid is left empty. */
+    private static String wrapGatewayMessage(String wireDest, String displayCallsign,
+                                             String message) {
+        return wrapGatewayMessage(wireDest, displayCallsign, null, message);
     }
 
     private static GatewayWrapped parseGatewayWrappedMessage(String message) {
@@ -1765,11 +1795,32 @@ public class ChatBridge {
         if (p1 < 0) return null;
         int p2 = rest.indexOf('|', p1 + 1);
         if (p2 < 0) return null;
-        String toUid = rest.substring(0, p1).trim();
-        String room = rest.substring(p1 + 1, p2).trim();
-        String body = rest.substring(p2 + 1);
+        String wireDest = rest.substring(0, p1).trim();
+        String afterWire = rest.substring(p1 + 1);
+        // Detect 4-field format (wireDest|displayCallsign|lineUid|message)
+        // vs legacy 3-field (toUid|chatRoom|message).
+        int p3 = afterWire.indexOf('|', p2 - p1);
+        String displayCallsign;
+        String lineUid = "";
+        String body;
+        if (p3 >= 0) {
+            // 4-field: wireDest | displayCallsign | lineUid | message
+            displayCallsign = afterWire.substring(0, p3 - p1 - 1).trim();
+            String afterDisplay = afterWire.substring(p3 - p1);
+            int p4 = afterDisplay.indexOf('|');
+            if (p4 >= 0) {
+                lineUid = afterDisplay.substring(0, p4).trim();
+                body = afterDisplay.substring(p4 + 1);
+            } else {
+                body = afterDisplay;
+            }
+        } else {
+            // Legacy 3-field: map chatRoom to displayCallsign
+            displayCallsign = afterWire.substring(0, p2 - p1 - 1).trim();
+            body = rest.substring(p2 + 1);
+        }
         if (body.isEmpty()) return null;
-        return new GatewayWrapped(toUid, room, body);
+        return new GatewayWrapped(wireDest, displayCallsign, lineUid, body);
     }
 
     private boolean isGatewayRelayEnabled() {
@@ -1782,13 +1833,15 @@ public class ChatBridge {
     }
 
     private static final class GatewayWrapped {
-        final String toUid;
-        final String chatRoom;
+        final String wireDest;
+        final String displayCallsign;
+        final String lineUid;
         final String message;
 
-        GatewayWrapped(String toUid, String chatRoom, String message) {
-            this.toUid = toUid;
-            this.chatRoom = chatRoom;
+        GatewayWrapped(String wireDest, String displayCallsign, String lineUid, String message) {
+            this.wireDest = wireDest;
+            this.displayCallsign = displayCallsign;
+            this.lineUid = lineUid;
             this.message = message;
         }
     }

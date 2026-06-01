@@ -530,6 +530,14 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
         if (meshChannelLogText != null) {
             meshChannelLogText.setMovementMethod(new ScrollingMovementMethod());
+            // Let the channel window scroll independently of the outer dropdown ScrollView.
+            meshChannelLogText.setOnTouchListener((v, event) -> {
+                v.getParent().requestDisallowInterceptTouchEvent(true);
+                if (event.getAction() == MotionEvent.ACTION_UP) {
+                    v.getParent().requestDisallowInterceptTouchEvent(false);
+                }
+                return false;
+            });
         }
 
         if (logText != null) {
@@ -1288,10 +1296,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 String prefix = "[" + ts + "] /" + sender + "/ ";
                 int start = sb.length();
                 sb.append(prefix).append(msg);
-                int msgStart = start + prefix.length();
-                int msgEnd = msgStart + msg.length();
-                if (msgEnd > msgStart) {
-                    sb.setSpan(new RelativeSizeSpan(15f / 13f), msgStart, msgEnd,
+                int lineEnd = sb.length();
+                // Enlarge the entire first line (timestamp + node name + message) two sizes above
+                // the base/SNR line size (base 13sp -> 15sp).
+                if (lineEnd > start) {
+                    sb.setSpan(new RelativeSizeSpan(15f / 13f), start, lineEnd,
                             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 }
                 String meta = buildMeshChannelMetaLine(m);
@@ -1305,6 +1314,21 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             sb.append("No messages yet for this channel.");
         }
         meshChannelLogText.setText(sb);
+        // Auto-scroll to the most recent (bottom) message; user can still scroll up for history.
+        meshChannelLogText.post(() -> {
+            if (meshChannelLogText == null) {
+                return;
+            }
+            android.text.Layout layout = meshChannelLogText.getLayout();
+            if (layout == null) {
+                return;
+            }
+            int visible = meshChannelLogText.getHeight()
+                    - meshChannelLogText.getPaddingTop()
+                    - meshChannelLogText.getPaddingBottom();
+            int scrollY = layout.getHeight() - visible;
+            meshChannelLogText.scrollTo(0, Math.max(0, scrollY));
+        });
     }
 
     private void updateMeshChannelButtonLabel() {
@@ -1351,17 +1375,23 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (!m.outbound) {
             return "Node";
         }
+        // Channel chat must NEVER show the ATAK callsign. Outbound messages are labeled with the
+        // local MeshCore node name (e.g. "ATAK-TEST2"). ATAK callsigns are reserved for ATAK-level
+        // contact chat only.
         try {
-            MapView mv = MapView.getMapView();
-            if (mv != null && mv.getSelfMarker() != null) {
-                String cs = mv.getSelfMarker().getMetaString("callsign", "");
-                if (cs != null && !cs.trim().isEmpty()) {
-                    return cs.trim();
-                }
+            BtConnectionManager.MeshNodeSettings ns =
+                    btManager != null ? btManager.getLatestNodeSettings() : null;
+            if (ns != null && ns.nodeName != null && !ns.nodeName.trim().isEmpty()) {
+                return ns.nodeName.trim();
+            }
+            BtConnectionManager.MeshLocationFix fix =
+                    btManager != null ? btManager.getLatestSelfLocation() : null;
+            if (fix != null && fix.nodeName != null && !fix.nodeName.trim().isEmpty()) {
+                return fix.nodeName.trim();
             }
         } catch (Exception ignored) {
         }
-        return "Me";
+        return "Node";
     }
 
     private String deriveMeshChannelMetaStatus(BtConnectionManager.MeshChannelMessage m) {

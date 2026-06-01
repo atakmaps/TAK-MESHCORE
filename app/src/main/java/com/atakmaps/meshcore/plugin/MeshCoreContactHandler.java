@@ -183,6 +183,102 @@ public class MeshCoreContactHandler extends
         return "MeshCore Contact Handler";
     }
 
+    /**
+     * When a native MeshCore app sends a pubkey DM, ensure a GeoChat-capable contact exists
+     * even if the operator has not favorited the node yet (map marker may exist from advert).
+     */
+    public static String ensureMeshInboundChatContact(String senderPubKeyPrefixHex) {
+        if (senderPubKeyPrefixHex == null || senderPubKeyPrefixHex.trim().isEmpty()) {
+            return "";
+        }
+        String prefix = senderPubKeyPrefixHex.trim().toUpperCase(Locale.US);
+        try {
+            com.atakmap.android.maps.MapView mv = com.atakmap.android.maps.MapView.getMapView();
+            MapItem mapItem = findMapItemByPubKeyPrefix(mv, prefix);
+            String uid = mapItem != null ? mapItem.getUID() : (MESH_NODE_UID_PREFIX + prefix);
+            if (uid == null || uid.trim().isEmpty()) {
+                return "";
+            }
+            uid = uid.trim();
+            Contacts contacts = Contacts.getInstance();
+            Contact existing = contacts.getContactByUuid(uid);
+            if (existing instanceof IndividualContact) {
+                IndividualContact ic = (IndividualContact) existing;
+                applyMeshInboundConnectors(ic);
+                return uid;
+            }
+            String displayName = formatMeshFavoriteName(null, uid, mapItem);
+            IndividualContact created = new IndividualContact(
+                    displayName,
+                    uid,
+                    mapItem,
+                    buildNativeConnectorSeed(displayName));
+            applyMeshInboundConnectors(created);
+            contacts.addContact(created);
+            contacts.updateTotalUnreadCount();
+            Log.i("MeshCore.Handler", "Created inbound mesh chat contact " + displayName + " uid=" + uid);
+            return uid;
+        } catch (Exception e) {
+            Log.w("MeshCore.Handler", "ensureMeshInboundChatContact failed prefix=" + prefix, e);
+            return "";
+        }
+    }
+
+    private static MapItem findMapItemByPubKeyPrefix(com.atakmap.android.maps.MapView mv,
+                                                     String prefixUpper) {
+        if (mv == null || mv.getRootGroup() == null || prefixUpper == null || prefixUpper.isEmpty()) {
+            return null;
+        }
+        try {
+            java.util.List<MapItem> items = mv.getRootGroup().deepFindItems("type", "a-f-G-U-C");
+            if (items == null) {
+                return null;
+            }
+            for (MapItem item : items) {
+                if (item == null) {
+                    continue;
+                }
+                String uid = item.getUID();
+                if (uid == null) {
+                    continue;
+                }
+                String u = uid.toUpperCase(Locale.US);
+                if ((u.startsWith(MESH_NODE_UID_PREFIX) || u.startsWith(MESH_RPTR_UID_PREFIX))
+                        && u.contains(prefixUpper)) {
+                    return item;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private static void applyMeshInboundConnectors(IndividualContact contact) {
+        if (contact == null) {
+            return;
+        }
+        try {
+            contact.removeConnector(com.atakmaps.meshcore.plugin.contacts.PositionOnlyConnector.CONNECTOR_TYPE);
+        } catch (Exception ignored) {
+        }
+        try {
+            if (contact.getConnector(PluginConnector.CONNECTOR_TYPE) == null) {
+                contact.addConnector(new PluginConnector(PLUGIN_GEOCHAT_ACTION));
+            }
+            if (contact.getConnector(MeshSendMessageConnector.CONNECTOR_TYPE) == null) {
+                contact.addConnector(new MeshSendMessageConnector());
+            }
+            if (contact.getConnector(GeoChatConnector.CONNECTOR_TYPE) == null) {
+                contact.addConnector(new GeoChatConnector(
+                        buildNativeConnectorSeed(contact.getName())));
+            }
+            writeDefaultConnectorPref(contact.getUID(), MeshSendMessageConnector.CONNECTOR_TYPE);
+            contact.dispatchChangeEvent();
+        } catch (Exception e) {
+            Log.w("MeshCore.Handler", "applyMeshInboundConnectors failed", e);
+        }
+    }
+
     public static boolean promoteMeshFavoriteContactByUid(String contactUid, String currentName) {
         if (contactUid == null || contactUid.trim().isEmpty()) {
             return false;

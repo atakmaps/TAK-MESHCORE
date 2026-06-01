@@ -54,7 +54,29 @@ Upload `MeshCore-<version>-ATAK-5.5.1-source.zip` from `Plugins/TAK Submissions/
 
 ## Trust / update server
 
-MeshCore **does not** ship `atakmaps-ca.p12` or configure ATAK’s UV-PRO update-server trust path. Do not re-add unless implementing a dedicated MeshCore OTA catalog.
+MeshCore ships `atakmaps-ca.p12` + `isrg-root-x1.pem` (identical copies of the UV-PRO assets — same `atakmaps.com` CA) and runs the **same** cert injection chain. Both plugins write identical values to ATAK’s SharedPreferences (`atakUpdateServerUrl`, `appMgmtEnableUpdateServer`, etc.) so they are fully idempotent when installed together.
+
+The filesDir copy is named `meshcore_update_server_ca.p12` to avoid cross-plugin file collision.
+
+### Merge gate (blocking) — trust / update-server
+
+Hard gate for any merge touching startup, certs, prefs, ProGuard, or lifecycle.
+
+**High-risk files:**
+
+| Area | Files / assets |
+|------|----------------|
+| Trust + prefs + reflection | `MeshCoreMapComponent.java` — keep the `configureUpdateServerStatic` → `installUpdateServerTruststoreCompat` → `reloadCertificateManagerFromDatabase` → `registerUpdateServerCA` → deferred sync chain |
+| Early hook | `MeshCoreLifecycle.java` — must keep `MeshCoreMapComponent.applyUpdateServerTrustEarly` in constructor |
+| Bundled trust material | `app/src/main/assets/atakmaps-ca.p12`, `app/src/main/assets/isrg-root-x1.pem` |
+| PKCS#12 unlock key | `app/src/main/res/values/strings.xml` → `meshcore_trust_bundle_p12_key` (Base64, `translatable="false"`) |
+
+**Do not:**
+- Remove or reorder the trust chain, or delay it until after ATAK starts repo HTTPS sync.
+- Remove the cert assets or the string resource.
+- Use a Java string literal for the PKCS#12 password (Fortify will flag it).
+
+**After a merge touching these files:** clean-install on device with `pm clear com.atakmap.app.civ`, check logcat for `MeshCore` cert tags and TAK Package Management green sync.
 
 ## ProGuard
 

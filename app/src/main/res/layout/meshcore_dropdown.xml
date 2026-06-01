@@ -634,8 +634,8 @@
                 android:background="#FF1A1A1A"
                 android:padding="6dp"
                 android:scrollbars="vertical"
-                android:textColor="#FFCCCCCC"
-                android:textSize="11sp" />
+                android:textColor="#FFF0F0F0"
+                android:textSize="13sp" />
 
             <LinearLayout
                 android:layout_width="match_parent"

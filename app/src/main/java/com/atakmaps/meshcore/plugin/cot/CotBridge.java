@@ -682,6 +682,53 @@ public class CotBridge {
     }
 
     /**
+     * Inject a MeshCore node/repeater position CoT at an explicit map UID, carrying the
+     * imported {@code meschore} iconset usericon so ATAK renders the iconset bitmap.
+     *
+     * <p>Mirrors the Darksteal mesh inject path. APRS was removed from MeshcoreAtak, so the
+     * symbol table is unused (vestigial for call-site parity) and the symbol code is routed
+     * directly to {@link com.atakmaps.meshcore.plugin.ax25.MeshcoreIconset}.
+     *
+     * @param meshSymbolTable vestigial table selector ({@code 'M'} from callers); ignored
+     * @param meshSymbolCode  MeshCore symbol code ({@code '>'} repeater, letter for node)
+     * @param mapUidOverride  existing/target map marker UID
+     */
+    public void injectPositionCotAtMapUid(String callsign, double lat, double lon,
+                                          double alt, double speed, double course,
+                                          String senderTeamFromPeer,
+                                          Character meshSymbolTable,
+                                          Character meshSymbolCode,
+                                          String remarksInner,
+                                          String mapUidOverride) {
+        try {
+            String teamForCot = senderTeamFromPeer != null && !senderTeamFromPeer.trim().isEmpty()
+                    ? senderTeamFromPeer.trim()
+                    : "Cyan";
+            char symbolCode = meshSymbolCode != null ? meshSymbolCode : 'N';
+
+            CotEvent event = CotBuilder.buildMeshPositionCot(
+                    callsign, lat, lon, alt, speed, course, teamForCot,
+                    resolveInboundContactStaleMs(),
+                    symbolCode,
+                    remarksInner,
+                    mapUidOverride);
+
+            if (event != null && event.isValid()) {
+                Log.d(TAG, "Injecting mesh position CoT for " + callsign
+                        + " uid=" + event.getUID() + " team=" + teamForCot
+                        + " symbol=" + symbolCode);
+                markInboundInjectSkipOutboundRelay(event.getUID());
+                dispatchCotEvent(event);
+                maybeRelayInboundRadioCotToTak(event);
+            } else {
+                Log.w(TAG, "Invalid mesh position CoT for " + callsign);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error injecting mesh position CoT", e);
+        }
+    }
+
+    /**
      * Receiver-side stale policy for inbound radio contacts.
      * ATAK marks contacts stale based on the CoT stale timestamp we dispatch.
      */
@@ -916,6 +963,106 @@ public class CotBridge {
         } catch (Exception e) {
             Log.e(TAG, "Error injecting chat CoT", e);
         }
+    }
+
+    /**
+     * Variant that accepts a pre-resolved sender UID (e.g. for native MeshCore DMs whose pubkey
+     * prefix has already been mapped to an ATAK contact). When {@code senderUidOverride} is
+     * non-null and non-empty it bypasses the callsign-based UID resolution.
+     */
+    public void injectChatCot(String senderCallsign, String message,
+                              String chatRoom, int radioPacketMessageId,
+                              String geoChatLineUid, String senderUidOverride) {
+        if (senderUidOverride != null && !senderUidOverride.trim().isEmpty()) {
+            String uid = senderUidOverride.trim();
+            String displayCallsign = uid.startsWith(ANDROID_UID_PREFIX)
+                    ? uid.substring(ANDROID_UID_PREFIX.length())
+                    : (senderCallsign != null && !senderCallsign.trim().isEmpty()
+                            ? senderCallsign.trim()
+                            : uid);
+            registerBtechContactUid(uid);
+            try {
+                long uniq;
+                if (radioPacketMessageId != 0) {
+                    long mid = ((long) radioPacketMessageId) & 0xffffffffL;
+                    long t = System.currentTimeMillis() & 0xffffffffL;
+                    uniq = (mid << 32) | t;
+                } else {
+                    uniq = System.nanoTime();
+                }
+                String chatGrpUid1ForDm = null;
+                if (chatRoom != null && chatRoom.startsWith(ANDROID_UID_PREFIX)) {
+                    chatGrpUid1ForDm = cachedLocalDeviceUidForGeoChat;
+                    if (chatGrpUid1ForDm == null) {
+                        chatGrpUid1ForDm = resolveLocalAtakUidForChatGrp(uid, chatRoom);
+                    }
+                }
+                CotEvent event = CotBuilder.buildChatCot(
+                        uid, displayCallsign, message, chatRoom, uniq, chatGrpUid1ForDm);
+                if (event != null && event.isValid()) {
+                    Log.d(TAG, "Injecting chat CoT (uid override) from " + displayCallsign
+                            + " uid=" + uid + " midpkt=" + radioPacketMessageId);
+                    markInboundInjectSkipOutboundRelay(event.getUID());
+                    deliverInboundGeoChatToAtak(event);
+                    maybeRelayInboundRadioCotToTak(event);
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error injecting chat CoT (uid override)", e);
+            }
+        } else {
+            injectChatCot(senderCallsign, message, chatRoom, radioPacketMessageId);
+        }
+    }
+
+    /**
+     * Register a contact as a known mesh/WiFi peer so outbound GeoChat routing resolves
+     * correctly after a contact de-duplication merge.
+     */
+    public void registerMergedContact(
+            com.atakmap.android.contact.IndividualContact contact) {
+        if (contact == null) return;
+        String uid = contact.getUID();
+        String name = contact.getName();
+        if (uid != null && !uid.trim().isEmpty()) {
+            registerBtechContactUid(uid.trim());
+            if (name != null && !name.trim().isEmpty()) {
+                registerBtechAliases(name.trim(), uid.trim(), null, null);
+            }
+        }
+    }
+
+    /**
+     * Remove a stray map-marker contact that was created for a mesh/WiFi callsign when a
+     * canonical ATAK contact now exists for the same peer.
+     *
+     * @param callsignRaw the callsign whose orphan synthetic marker should be removed
+     * @param keepUid     the UID to retain (never removed)
+     */
+    public void removeOrphanRfMapMarkerForCallsign(String callsignRaw, String keepUid) {
+        if (callsignRaw == null || callsignRaw.trim().isEmpty()) return;
+        String upper = callsignRaw.trim().toUpperCase(java.util.Locale.US);
+        com.atakmap.android.maps.MapView mv = com.atakmap.android.maps.MapView.getMapView();
+        if (mv == null) return;
+        com.atakmap.android.maps.MapGroup rootGroup = mv.getRootGroup();
+        if (rootGroup == null) return;
+        rootGroup.deepForEachItem(item -> {
+            if (item == null) return true;
+            String uid = item.getUID();
+            if (uid == null || (keepUid != null && uid.equalsIgnoreCase(keepUid))) return true;
+            String meta = item.getMetaString("callsign", null);
+            if (meta == null) meta = item.getMetaString("title", null);
+            if (meta == null) return true;
+            if (!meta.trim().toUpperCase(java.util.Locale.US).equals(upper)) return true;
+            // Only remove synthetic radio-plugin-created markers (not full SA contacts).
+            String type = item.getMetaString("type", "");
+            if (type.startsWith("a-f") || type.startsWith("a-h") || type.startsWith("a-n")) {
+                return true;
+            }
+            Log.d(TAG, "Removing orphan radio map marker uid=" + uid
+                    + " callsign=" + meta + " (canonical=" + keepUid + ")");
+            item.removeFromGroup();
+            return true;
+        });
     }
 
     private static boolean isGeoChatCotType(String type) {
@@ -1378,51 +1525,45 @@ public class CotBridge {
         }
     }
 
-    public void upsertMeshAdvertMarker(String uid, String callsign, String detailsText,
-                                       double latitude, double longitude, boolean isRepeater) {
-        if (uid == null || uid.trim().isEmpty() || this.mapView == null) {
+    /** Tag a marker as a MeshCore repeater advert point (after the usericon CoT is injected). */
+    public void markMeshRepeaterMapItem(String uid) {
+        tagMeshMapItemWithRetry(uid, true, 0);
+    }
+
+    /** Tag a marker as a MeshCore node advert point so the Mesh details panel handles clicks. */
+    public void markMeshNodeMapItem(String uid) {
+        tagMeshMapItemWithRetry(uid, false, 0);
+    }
+
+    /** CoT dispatch is async; the injected marker may not exist yet — retry briefly. */
+    private static final int MESH_TAG_MAX_RETRIES = 5;
+    private static final long MESH_TAG_RETRY_DELAY_MS = 120L;
+
+    private void tagMeshMapItemWithRetry(String uid, boolean repeater, int attempt) {
+        if (uid == null || uid.isEmpty() || this.mapView == null) {
             return;
         }
-        final String targetUid = uid.trim();
-        Runnable apply = () -> {
+        Runnable tag = () -> {
             try {
                 com.atakmap.android.maps.MapItem item =
-                        this.mapView.getRootGroup().deepFindUID(targetUid);
-                if (!(item instanceof com.atakmap.android.maps.Marker)) {
-                    com.atakmap.android.maps.Marker marker = new com.atakmap.android.maps.Marker(targetUid);
-                    marker.setType("a-f-G-U-C");
-                    marker.setMetaString("entry", "user");
-                    marker.setMetaBoolean("addToObjList", true);
-                    marker.setMetaString("menu", "menus/default_item_w_type.xml");
-                    this.mapView.getRootGroup().addItem(marker);
-                    item = marker;
+                        this.mapView.getRootGroup().deepFindUID(uid);
+                if (item != null) {
+                    item.setMetaBoolean(META_MESHCORE_MESH_REPEATER, repeater);
+                    item.setMetaBoolean(META_MESHCORE_MESH_NODE, !repeater);
+                } else if (attempt < MESH_TAG_MAX_RETRIES) {
+                    this.mapView.postDelayed(
+                            () -> tagMeshMapItemWithRetry(uid, repeater, attempt + 1),
+                            MESH_TAG_RETRY_DELAY_MS);
                 }
-                if (item instanceof com.atakmap.android.maps.PointMapItem
-                        && !Double.isNaN(latitude) && !Double.isNaN(longitude)
-                        && latitude >= -90.0 && latitude <= 90.0
-                        && longitude >= -180.0 && longitude <= 180.0) {
-                    ((com.atakmap.android.maps.PointMapItem) item).setPoint(
-                            new com.atakmap.coremap.maps.coords.GeoPoint(latitude, longitude));
-                }
-                String title = (callsign != null && !callsign.trim().isEmpty())
-                        ? callsign.trim() : targetUid;
-                item.setTitle(title);
-                item.setMetaString("callsign", title);
-                item.setMetaBoolean(META_MESHCORE_MESH_REPEATER, isRepeater);
-                item.setMetaBoolean(META_MESHCORE_MESH_NODE, !isRepeater);
-                if (detailsText != null && !detailsText.trim().isEmpty()) {
-                    item.setMetaString(META_MESHCORE_MESH_DETAILS, detailsText.trim());
-                }
-                item.setMetaBoolean("sendable", false);
-                item.persist(this.mapView.getMapEventDispatcher(), null, this.getClass());
             } catch (Exception e) {
-                Log.w(TAG, "upsertMeshAdvertMarker failed uid=" + targetUid, e);
+                Log.w(TAG, "mark" + (repeater ? "MeshRepeater" : "MeshNode")
+                        + "MapItem failed uid=" + uid, e);
             }
         };
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-            apply.run();
+            tag.run();
         } else {
-            this.mapView.post(apply);
+            this.mapView.post(tag);
         }
     }
 
