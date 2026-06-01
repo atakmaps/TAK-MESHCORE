@@ -69,8 +69,15 @@ Includes:
 - Smart Beacon toggle + advanced settings
 - Auto-reconnect toggle
 
-## 2026-05-31 Update
+## 2026-05-31 Update (v1.3.2)
 
+- **Ghost contact elimination** — `ContactMergeUtil` collapses duplicate callsign aliases and removes orphan synthetic radio markers on connect; canonical peer UID is resolved across BLE, mesh-node, and mesh-repeater transports
+- **Inbound mesh DM from non-ATAK nodes** — messages sent from the native MeshCore app now auto-create a `MESHCORE-NODE-*` contact (named from the first 8 hex chars of the pubkey, e.g. `B5CA4888-MESH`) and deliver to GeoChat with correct DM threading
+- **Single notification per message** — `GeoChatConnector` is actively stripped from mesh contacts (removing the native GeoChat unread counter); ATAK's internal conversation unread is cleared immediately after delivery via `markmessageread`; plugin's own `incrementUnreadOnce` is the sole notification source → exactly 1 badge per inbound message
+- **Retransmit deduplication** — 60-second TTL dedup cache in `ChatBridge.injectInboundMeshDm` drops repeated Meshcore-protocol retransmits of the same message
+- **Clear All Mesh Contacts** now clears notification badges — `clearUnreadForAllMeshContacts()` resets plugin counters, drains dedup cache, and calls ATAK's `updateTotalUnreadCount()`
+- **Gateway envelope aligned with Darksteal** — 4-field format (`wireDest|displayCallsign|lineUid|message`) with backward-compatible 3-field fallback
+- **GeoChat relay dedup fix** — `maybeRelayInboundRadioCotToTak` skips `b-t-f` GeoChat events already delivered by `GeoChatService` to prevent duplicate conversation-list entries
 - **Scan & Connect session guard** — auto-connect and reconnect are fully blocked while the scan/picker is open; only an explicit picker row tap or favorite **Connect** press triggers a connection
 - **Boot auto-connect** — probes saved device on startup; light probe (UART service discovery only) for unbonded nodes avoids spurious pairing dialogs
 - **Favorite direct-connect** — button toggles between CONNECT and SCAN & CONNECT based on selected favorite

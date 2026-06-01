@@ -932,11 +932,12 @@ public class CotBridge {
             } else {
                 uniq = System.nanoTime();
             }
-            // Peer ANDROID-* DM: GeoChat expects chatgrp uid0=peer, uid1=local self. Radio RX runs on
+            // Peer-to-peer DM: GeoChat expects chatgrp uid0=peer, uid1=local self. Radio RX runs on
             // BT thread; MapView.getDeviceUid() is often NULL there — omitting uid1 caused
             // GeoChat.ANDROID-VETTE.ANDROID-VETTE and broken UI / ACK path.
+            // The same applies for native MeshCore peer UIDs (MESHCORE-NODE- / MESHCORE-RPTR-).
             String chatGrpUid1ForDm = null;
-            if (chatRoom != null && chatRoom.startsWith("ANDROID-")) {
+            if (isPeerToPeerChatRoom(chatRoom)) {
                 chatGrpUid1ForDm = cachedLocalDeviceUidForGeoChat;
                 if (chatGrpUid1ForDm == null) {
                     chatGrpUid1ForDm = resolveLocalAtakUidForChatGrp(canonicalUid, chatRoom);
@@ -948,8 +949,7 @@ public class CotBridge {
                     chatGrpUid1ForDm);
 
             if (event != null && event.isValid()) {
-                if (chatGrpUid1ForDm != null && chatRoom != null
-                        && chatRoom.startsWith(ANDROID_UID_PREFIX)) {
+                if (chatGrpUid1ForDm != null && chatRoom != null) {
                     Log.d(TAG, "GeoChat DM __chat id(local)=" + chatGrpUid1ForDm
                             + " chatroom(callsign)=" + displayCallsign
                             + " peerTHREAD=" + chatRoom + " sender=" + canonicalUid);
@@ -991,7 +991,7 @@ public class CotBridge {
                     uniq = System.nanoTime();
                 }
                 String chatGrpUid1ForDm = null;
-                if (chatRoom != null && chatRoom.startsWith(ANDROID_UID_PREFIX)) {
+                if (isPeerToPeerChatRoom(chatRoom)) {
                     chatGrpUid1ForDm = cachedLocalDeviceUidForGeoChat;
                     if (chatGrpUid1ForDm == null) {
                         chatGrpUid1ForDm = resolveLocalAtakUidForChatGrp(uid, chatRoom);
@@ -1070,6 +1070,19 @@ public class CotBridge {
     }
 
     /**
+     * Returns true when {@code chatRoom} represents a direct peer-to-peer DM thread.
+     * Both ANDROID-* (ATAK device) and MESHCORE-NODE-* / MESHCORE-RPTR-* (native MeshCore node)
+     * UIDs require a {@code uid1=<localDeviceUid>} entry in the GeoChat chatgrp element so ATAK
+     * threads and notifies the conversation correctly.
+     */
+    private static boolean isPeerToPeerChatRoom(String chatRoom) {
+        if (chatRoom == null) return false;
+        return chatRoom.startsWith(ANDROID_UID_PREFIX)
+                || chatRoom.startsWith("MESHCORE-NODE-")
+                || chatRoom.startsWith("MESHCORE-RPTR-");
+    }
+
+    /**
      * Wi‑Fi/TAK delivers GeoChat through {@link GeoChatService}; internal {@link CotMapComponent}
      * dispatch alone creates stray contacts and skips {@code hierarchy} group parsing.
      */
@@ -1094,6 +1107,11 @@ public class CotBridge {
                     + " convo=" + GeoChatContactListHelper.extractConversationId(event)
                     + " sender=" + GeoChatContactListHelper.extractChatSenderUid(event)
                     + " hasHierarchy=" + GeoChatContactListHelper.cotHasContactHierarchy(event));
+            // Clear ATAK's native GeoChat unread for this conversation immediately.
+            // Plugin contacts use our own incrementUnreadOnce counter as the single
+            // notification source; letting the native counter also accumulate causes
+            // a second "geo chat" badge on the contact card.
+            clearNativeGeoChatUnread(event);
             if (groupSync) {
                 InboundGroupSyncApplier.applyAfterInboundGroupCot(event, contactListUpdate);
             }
@@ -1106,6 +1124,23 @@ public class CotBridge {
             if (!contactListUpdate) {
                 notifyInboundRfChat(event);
             }
+        }
+    }
+
+    /**
+     * Broadcast {@code markmessageread} for the conversation carried in a GeoChat CoT so
+     * ATAK's native unread counter resets to zero immediately after delivery.
+     * Our plugin's own {@code incrementUnreadOnce} counter is the sole notification source.
+     */
+    private void clearNativeGeoChatUnread(CotEvent event) {
+        try {
+            String convo = GeoChatContactListHelper.extractConversationId(event);
+            if (convo == null || convo.trim().isEmpty()) return;
+            android.content.Intent markRead = new android.content.Intent(
+                    "com.atakmap.chat.markmessageread");
+            markRead.putExtra("conversationId", convo.trim());
+            com.atakmap.android.ipc.AtakBroadcast.getInstance().sendBroadcast(markRead);
+        } catch (Exception ignored) {
         }
     }
 
@@ -2116,6 +2151,9 @@ public class CotBridge {
     private void maybeRelayInboundRadioCotToTak(CotEvent event) {
         if (event == null) return;
         if (!isRfToTakUplinkEnabled()) return;
+        // GeoChat events are already delivered via GeoChatService — dispatching them again
+        // through CotMapComponent causes duplicate conversation entries and extra notifications.
+        if (isGeoChatCotType(event.getType())) return;
         try {
             CotMapComponent.getExternalDispatcher().dispatch(event);
             Log.d(TAG, "RF -> TAK uplink dispatched: type=" + event.getType()

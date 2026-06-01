@@ -122,6 +122,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         chatBridge.setLocalCallsign(callsign);
         chatBridge.setCotBridge(cotBridge);
         cotBridge.setChatBridge(chatBridge);
+        ChatBridge.setMergeRoutingBridge(cotBridge);
 
         contactTracker = new ContactTracker(cotBridge);
         try {
@@ -174,6 +175,9 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                             if (cotBridge != null) {
                                 cotBridge.refreshSendableMapItems();
                             }
+                            // Collapse any duplicate/ghost contacts accumulated
+                            // while the device was disconnected.
+                            ChatBridge.collapseAllCallsignAliasDuplicates();
                         });
                     }
                 }
@@ -204,6 +208,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
 
         dropDownReceiver = new MeshCoreDropDownReceiver(
                 view, pluginContext, btConnectionManager, contactTracker, cotBridge);
+        dropDownReceiver.setChatBridge(chatBridge);
         dropDownReceiver.setEncryptionManager(encryptionManager);
         packetRouter.setPacketCountListener(dropDownReceiver);
 

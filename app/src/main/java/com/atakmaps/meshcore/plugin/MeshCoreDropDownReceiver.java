@@ -1,6 +1,7 @@
 package com.atakmaps.meshcore.plugin;
 
 import android.animation.ArgbEvaluator;
+
 import android.animation.ValueAnimator;
 import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
@@ -57,6 +58,7 @@ import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry.BtDeviceRe
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.bluetooth.MeshBleDeviceMatcher;
 import com.atakmaps.meshcore.plugin.bluetooth.MeshBluetoothForgetAll;
+import com.atakmaps.meshcore.plugin.chat.ChatBridge;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
 import com.atakmaps.meshcore.plugin.contacts.RadioContact;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
@@ -132,6 +134,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private final BtConnectionManager btManager;
     private final ContactTracker contactTracker;
     private final CotBridge cotBridge;
+    private ChatBridge chatBridge;
+
+    public void setChatBridge(ChatBridge bridge) {
+        this.chatBridge = bridge;
+    }
     private EncryptionManager encryptionManager;
 
     private View rootView;
@@ -3202,6 +3209,12 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                     + " markers, " + removedContacts + " contacts";
             appendLog(msg);
             Toast.makeText(mv.getContext(), msg, Toast.LENGTH_SHORT).show();
+            // Clear plugin-side unread counts so the contacts icon badge resets immediately.
+            if (chatBridge != null) {
+                chatBridge.clearUnreadForAllMeshContacts();
+            } else {
+                MeshCoreContactHandler.clearAllMeshUnread();
+            }
             updateContactCount();
         });
     }

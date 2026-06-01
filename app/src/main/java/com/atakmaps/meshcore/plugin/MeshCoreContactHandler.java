@@ -98,6 +98,16 @@ public class MeshCoreContactHandler extends
         }
     }
 
+    /** Clear unread counts only for MESHCORE-NODE-* and MESHCORE-RPTR-* UIDs. */
+    public static void clearAllMeshUnread() {
+        unreadKeysByUid.keySet().removeIf(uid ->
+                uid.startsWith("MESHCORE-NODE-") || uid.startsWith("MESHCORE-RPTR-"));
+        try {
+            Contacts.getInstance().updateTotalUnreadCount();
+        } catch (Exception ignored) {
+        }
+    }
+
     @Override
     public boolean isSupported(String type) {
         return FileSystemUtils.isEquals(type, PluginConnector.CONNECTOR_TYPE)
@@ -161,9 +171,11 @@ public class MeshCoreContactHandler extends
                 + " uid=" + contactUID + " address=" + connectorAddress);
 
         if (feature == ContactConnectorManager.ConnectorFeature.NotificationCount) {
-            // ATAK sums counts across connector queries; only the plugin connector may report
-            // unread — all other addresses (including null) must return 0 or the UI shows 2.
-            if (connectorAddress == null
+            // Only the PluginConnector address should carry our unread count.
+            // MeshSendMessageConnector shares the same connection string (ACTION_PLUGIN_CONTACT_GEOCHAT_SEND)
+            // so we must also gate on connector type to avoid doubling the badge.
+            if (!PluginConnector.CONNECTOR_TYPE.equals(connectorType)
+                    || connectorAddress == null
                     || !PLUGIN_GEOCHAT_ACTION.equals(connectorAddress)) {
                 Log.i("MeshCore.Handler", "NotificationCount uid=" + contactUID + " addr="
                         + connectorAddress + " -> 0 (plugin-only)");
@@ -207,7 +219,12 @@ public class MeshCoreContactHandler extends
                 applyMeshInboundConnectors(ic);
                 return uid;
             }
-            String displayName = formatMeshFavoriteName(null, uid, mapItem);
+            // When no advert has been received, use the first 8 hex chars of the pubkey
+            // prefix as the display name (e.g. "B5CA4888-MESH") so the contact is uniquely
+            // identifiable rather than the generic "NODE-MESH" fallback.
+            String nameHint = (mapItem == null && prefix.length() >= 8)
+                    ? prefix.substring(0, 8) : null;
+            String displayName = formatMeshFavoriteName(nameHint, uid, mapItem);
             IndividualContact created = new IndividualContact(
                     displayName,
                     uid,
@@ -261,16 +278,18 @@ public class MeshCoreContactHandler extends
             contact.removeConnector(com.atakmaps.meshcore.plugin.contacts.PositionOnlyConnector.CONNECTOR_TYPE);
         } catch (Exception ignored) {
         }
+        // Actively remove GeoChatConnector — it causes ATAK's native GeoChat unread system to
+        // show a second notification badge alongside our plugin counter.
+        try {
+            contact.removeConnector(com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
+        } catch (Exception ignored) {
+        }
         try {
             if (contact.getConnector(PluginConnector.CONNECTOR_TYPE) == null) {
                 contact.addConnector(new PluginConnector(PLUGIN_GEOCHAT_ACTION));
             }
             if (contact.getConnector(MeshSendMessageConnector.CONNECTOR_TYPE) == null) {
                 contact.addConnector(new MeshSendMessageConnector());
-            }
-            if (contact.getConnector(GeoChatConnector.CONNECTOR_TYPE) == null) {
-                contact.addConnector(new GeoChatConnector(
-                        buildNativeConnectorSeed(contact.getName())));
             }
             writeDefaultConnectorPref(contact.getUID(), MeshSendMessageConnector.CONNECTOR_TYPE);
             contact.dispatchChangeEvent();

@@ -110,6 +110,16 @@ public class ChatBridge {
             new ConcurrentHashMap<>();
     private Contacts.OnContactsChangedListener contactsUnreadSyncListener;
 
+    /**
+     * Dedup cache for inbound native MeshCore DMs. MeshCore retransmits until ACK'd, so the
+     * same (pubKeyPrefix, mid) pair can arrive multiple times in quick succession. We drop
+     * any re-delivery within MESH_DM_DEDUP_TTL_MS of the first injection.
+     * Key: "PREFIX|mid"  Value: expiry epoch ms
+     */
+    private static final long MESH_DM_DEDUP_TTL_MS = 60_000L;
+    private final ConcurrentHashMap<String, Long> recentlyInjectedMeshDmKeys =
+            new ConcurrentHashMap<>();
+
     /** Runs after ATAK delivers chat to the UI (fragment may not exist yet on first callback). */
     private ChatManagerMapComponent.ChatMessageListener atakChatMessageListener;
 
@@ -623,6 +633,18 @@ public class ChatBridge {
         if (mid == 0) {
             mid = 1;
         }
+        // MeshCore retransmits until ACK'd — drop re-deliveries of the same wire message.
+        String dedupKey = prefix + "|" + mid;
+        long now = System.currentTimeMillis();
+        Long expiry = recentlyInjectedMeshDmKeys.get(dedupKey);
+        if (expiry != null && now < expiry) {
+            Log.d(TAG, "Dropping duplicate inbound MeshCore DM mid=" + mid
+                    + " from " + fromCallsign + " (dedup TTL active)");
+            return false;
+        }
+        recentlyInjectedMeshDmKeys.put(dedupKey, now + MESH_DM_DEDUP_TTL_MS);
+        // Prune expired entries to avoid unbounded growth.
+        recentlyInjectedMeshDmKeys.entrySet().removeIf(e -> now >= e.getValue());
         Log.d(TAG, "Inbound native MeshCore DM from " + fromCallsign
                 + " (" + senderUid + ") len=" + text.trim().length());
         return injectRadioMessage(fromCallsign, localCallsign, text.trim(), mid);
@@ -937,6 +959,12 @@ public class ChatBridge {
         String uid = preferredUid != null ? preferredUid.trim().toUpperCase(Locale.US) : "";
         if (uid.isEmpty()) {
             return "";
+        }
+        // Mesh node / repeater UIDs are already canonical — just ensure the contact exists.
+        if (uid.startsWith(MESH_NODE_UID_PREFIX) || uid.startsWith(MESH_RPTR_UID_PREFIX)) {
+            MeshCoreContactHandler.ensureMeshInboundChatContact(
+                    uid.substring(MESH_NODE_UID_PREFIX.length()));
+            return uid;
         }
         String callsign = callsignRaw != null ? callsignRaw.trim().toUpperCase(Locale.US) : "";
         if (callsign.isEmpty() && uid.startsWith(ANDROID_UID_PREFIX)) {
@@ -1288,6 +1316,24 @@ public class ChatBridge {
             unreadVisibilityPollRunning = false;
         }
         drainAndSendReadAcks(conversationId);
+    }
+
+    /**
+     * Clear all plugin-side unread counts and GeoChat notification badges for every mesh contact
+     * (MESHCORE-NODE-* and MESHCORE-RPTR-*). Called when the user taps "Clear All Mesh Contacts"
+     * so the contacts icon badge resets even though GeoChat history still holds old entries.
+     */
+    public void clearUnreadForAllMeshContacts() {
+        // Snapshot keys to avoid CME
+        for (String uid : new java.util.ArrayList<>(pendingUnreadConversationUids)) {
+            if (uid.startsWith(MESH_NODE_UID_PREFIX) || uid.startsWith(MESH_RPTR_UID_PREFIX)) {
+                clearUnreadLocal(uid);
+            }
+        }
+        // Also sweep MeshCoreContactHandler's own store for any UIDs we may have missed.
+        MeshCoreContactHandler.clearAllMeshUnread();
+        // Flush dedup cache so re-connects don't silently drop the first new message.
+        recentlyInjectedMeshDmKeys.clear();
     }
 
     /** Record an inbound wire mid that should be READ-acked when the user opens this conversation. */
@@ -2268,6 +2314,7 @@ public class ChatBridge {
         outboundWireMidToLocalLineUid.clear();
         pendingReadAcksByConversation.clear();
         pendingUnreadConversationUids.clear();
+        recentlyInjectedMeshDmKeys.clear();
         unreadVisibilityPollRunning = false;
         if (chatReceiver != null) {
             try {

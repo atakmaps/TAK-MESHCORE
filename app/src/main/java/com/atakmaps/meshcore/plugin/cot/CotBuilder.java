@@ -295,10 +295,15 @@ public class CotBuilder {
         // CHAT3 (CoT with <chatgrp>): ChatMessageParser.getConversationUid reads __chat "chatroom"
         // and resolves via getFirstContactWithCallsign — must be the peer's callsign (e.g. VETTE),
         // not ANDROID-1729… or lookup fails and GeoChat routing breaks.
+        // Same applies for native MeshCore peer UIDs (MESHCORE-NODE- / MESHCORE-RPTR-).
         String chatroomAttr = dmPeerConversationUid;
         String idAttr = dmPeerConversationUid;
-        if (localDeviceUidIfDm != null && !localDeviceUidIfDm.isEmpty()
-                && dmPeerConversationUid != null && dmPeerConversationUid.startsWith("ANDROID-")) {
+        boolean isPeerDm = localDeviceUidIfDm != null && !localDeviceUidIfDm.isEmpty()
+                && dmPeerConversationUid != null
+                && (dmPeerConversationUid.startsWith("ANDROID-")
+                    || dmPeerConversationUid.startsWith("MESHCORE-NODE-")
+                    || dmPeerConversationUid.startsWith("MESHCORE-RPTR-"));
+        if (isPeerDm) {
             idAttr = localDeviceUidIfDm.trim();
             chatroomAttr = senderCall != null ? senderCall.trim() : dmPeerConversationUid;
         }
@@ -332,8 +337,7 @@ public class CotBuilder {
         CotDetail chatgrp = new CotDetail("chatgrp");
         chatgrp.setAttribute("uid0", senderUid);
         String uid1 = idAttr;
-        if (localDeviceUidIfDm != null && !localDeviceUidIfDm.isEmpty()
-                && dmPeerConversationUid != null && dmPeerConversationUid.startsWith("ANDROID-")) {
+        if (isPeerDm) {
             uid1 = localDeviceUidIfDm.trim();
         }
         chatgrp.setAttribute("uid1", uid1);
