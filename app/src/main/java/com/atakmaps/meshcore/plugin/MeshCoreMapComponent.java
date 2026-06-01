@@ -124,6 +124,10 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         cotBridge.setChatBridge(chatBridge);
         ChatBridge.setMergeRoutingBridge(cotBridge);
 
+        // Repair connector icons for any MESHCORE-* contacts left by prior plugin versions.
+        // Post to next frame so ATAK's Contacts map is fully loaded before we iterate.
+        view.post(MeshCoreContactHandler::repairAllMeshContactConnectors);
+
         contactTracker = new ContactTracker(cotBridge);
         try {
             com.atakmap.android.contact.ContactConnectorManager mgr =
@@ -178,6 +182,9 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                             // Collapse any duplicate/ghost contacts accumulated
                             // while the device was disconnected.
                             ChatBridge.collapseAllCallsignAliasDuplicates();
+                            // Repair connector stacks for any MESHCORE-* contacts that
+                            // were created by an older plugin version (plug icon → radio icon).
+                            MeshCoreContactHandler.repairAllMeshContactConnectors();
                         });
                     }
                 }

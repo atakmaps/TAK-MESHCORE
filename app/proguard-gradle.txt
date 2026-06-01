@@ -67,7 +67,7 @@
 ################################################################################
 ################################################################################
 
--repackageclasses atakplugin.UVPro
+-repackageclasses atakplugin.MeshCore
 
 ################################################################################
 ## Rules specific to MeshCore ATAK plugin (com.atakmaps.meshcore.plugin)
