@@ -595,6 +595,12 @@ public class ChatBridge {
         if (pubKey.isEmpty()) {
             pubKey = extractMeshPublicKeyCandidate(roomHint);
         }
+        // If the hint is a display name (e.g. "PB-05-MESH") rather than a UID, look up the
+        // corresponding MESHCORE-NODE-* contact by name to obtain the pubkey.
+        if (pubKey.isEmpty()) {
+            pubKey = extractMeshPublicKeyFromContactName(
+                    roomHint != null ? roomHint : destUidHint);
+        }
         if (pubKey.isEmpty()) {
             return false;
         }
@@ -604,6 +610,46 @@ public class ChatBridge {
                     + pubKey.substring(0, Math.min(12, pubKey.length())) + " len=" + message.trim().length());
         }
         return ok;
+    }
+
+    /**
+     * Search the ATAK Contacts store for a MESHCORE-NODE-* or MESHCORE-RPTR-* contact whose
+     * display name matches {@code displayName} and return its pubkey hex string, or "" if none.
+     * This handles the case where the outbound GeoChat CoT carries the contact's display name
+     * (e.g. "PB-05-MESH") rather than its full UID.
+     */
+    private String extractMeshPublicKeyFromContactName(String displayName) {
+        if (displayName == null || displayName.trim().isEmpty()) {
+            return "";
+        }
+        try {
+            String target = displayName.trim().toUpperCase(Locale.US);
+            java.util.List<Contact> all = Contacts.getInstance().getAllContacts();
+            if (all == null) {
+                return "";
+            }
+            for (Contact c : all) {
+                if (!(c instanceof com.atakmap.android.contact.IndividualContact)) continue;
+                String uid = c.getUID();
+                if (uid == null) continue;
+                String uidUpper = uid.toUpperCase(Locale.US);
+                if (!uidUpper.startsWith(MESH_NODE_UID_PREFIX)
+                        && !uidUpper.startsWith(MESH_RPTR_UID_PREFIX)) {
+                    continue;
+                }
+                String name = c.getName();
+                if (name != null && name.trim().toUpperCase(Locale.US).equals(target)) {
+                    String pk = extractMeshPublicKeyCandidate(uid);
+                    if (!pk.isEmpty()) {
+                        Log.d(TAG, "Resolved pubkey for display name " + displayName
+                                + " → " + pk.substring(0, Math.min(12, pk.length())) + "...");
+                        return pk;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
     }
 
     /**

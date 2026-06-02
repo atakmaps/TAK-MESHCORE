@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.3.4`
+- Current version: `1.3.6`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -94,6 +94,16 @@ Includes:
 - Updated scan UX with active discovery pulse
 
 ## Changelog
+
+### v1.3.6
+
+- **Fixed outbound replies to native MeshCore contacts (MESHCORE-NODE-*):** Replies typed in ATAK to a `MESHCORE-NODE-*` contact were sent as a callsign broadcast using the contact's display name (e.g. `PB-05-MESH` → wire form `PB05MS`). The receiving node's callsign is `PB-05` (wire form `PB05`), so it rejected the packet as not addressed to itself. `trySendNativeMeshDm` now falls back to a Contacts store lookup when the `chatroom` attribute is a display name rather than a UID, resolving the pubkey from the matching `MESHCORE-NODE-*` contact. Replies now route via native MeshCore pubkey DM (`sendContactTextMessage`), matching how inbound DMs arrive.
+- **Delayed `dispatchChangeEvent` for MESHCORE-* icon refresh:** After `GeoChatService.onCotEvent` processes an inbound message it can asynchronously re-stamp the sender's default connector. `repairAtakPeerConnectorDefault` re-writes `GeoChatConnector` as the default immediately, then posts a 600 ms delayed `dispatchChangeEvent` on the main thread (MESHCORE-* contacts only) so the contacts-list icon re-renders to the chat bubble without triggering a duplicate-message reload.
+
+### v1.3.5
+
+- **Fixed double notification badge on MESHCORE-* inbound DMs:** `MeshSendMessageConnector.getFeature(NotificationCount)` now returns 0 for **all** contacts. ATAK's `ContactConnectorManager` calls all registered handlers for each connector type and sums results; previously our plugin returned a count while ATAK's native `GeoChatConnectorHandler` also returned 1 for the same contact, producing "Geo Chat: 1 + Send Message: 1" = 2 badges. Now ATAK's native tracking is the sole badge source for all contacts, matching the approach that was already working for `ANDROID-*` contacts. Badge clears correctly when the conversation is opened.
+- **`markmessageread` sent on contact tap:** `handleContact` now broadcasts `markmessageread` for the contact UID before opening the conversation, ensuring the native GeoChat unread clears immediately when the user taps the chat icon.
 
 ### v1.3.4
 
