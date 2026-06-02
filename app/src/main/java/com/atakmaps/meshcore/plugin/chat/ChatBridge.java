@@ -1877,9 +1877,23 @@ public class ChatBridge {
                     com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
             prefs.set("contact.connector.default." + u.toLowerCase(java.util.Locale.US),
                     com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
-            // Do NOT call ic.dispatchChangeEvent() here — doing so after GeoChatService has
-            // just inserted a new message causes ATAK to reload the conversation and add the
-            // incoming message a second time, producing duplicate notifications.
+            // For MESHCORE-* contacts: GeoChatService.onCotEvent may internally call
+            // dispatchChangeEvent which re-renders the contact icon using a stale preference.
+            // Schedule a delayed dispatchChangeEvent so the contact list refreshes the correct
+            // chat-bubble icon after all message-processing is complete (Fragment already stable).
+            if (u.startsWith("MESHCORE-NODE-") || u.startsWith("MESHCORE-RPTR-")) {
+                final IndividualContact finalIc = ic;
+                android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+                h.postDelayed(() -> {
+                    try {
+                        finalIc.dispatchChangeEvent();
+                    } catch (Exception ignored) {
+                    }
+                }, 600);
+            }
+            // For ANDROID-* contacts: do NOT call ic.dispatchChangeEvent() here — doing so after
+            // GeoChatService has just inserted a new message causes ATAK to reload the conversation
+            // and add the incoming message a second time, producing duplicate notifications.
         } catch (Exception ignored) {
         }
     }

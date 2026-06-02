@@ -147,9 +147,16 @@ public class MeshCoreContactHandler extends
 
             if (FileSystemUtils.isEquals(connectorType, GeoChatConnector.CONNECTOR_TYPE)
                     || FileSystemUtils.isEquals(connectorType, MeshSendMessageConnector.CONNECTOR_TYPE)) {
-                // Clear plugin unread badge, then open the DM conversation window directly.
-                // Pass false so ATAK opens the chat panel, not the contact-info card.
+                // Clear plugin unread badge, send markmessageread to clear the native
+                // GeoChatConnector badge, then open the DM conversation window directly.
                 clearUnread(contactUID);
+                try {
+                    android.content.Intent markRead = new android.content.Intent(
+                            "com.atakmap.chat.markmessageread");
+                    markRead.putExtra("conversationId", contactUID);
+                    com.atakmap.android.ipc.AtakBroadcast.getInstance().sendBroadcast(markRead);
+                } catch (Exception ignored) {
+                }
                 ChatManagerMapComponent.getInstance().openConversation(ic, false);
                 Log.i("BTRelay", "Contact selected for chat: " + contactUID);
                 return true;
@@ -184,16 +191,15 @@ public class MeshCoreContactHandler extends
                 return 0;
             }
             String uid = contactUID != null ? contactUID.trim() : "";
-            if (uid.toUpperCase(Locale.US).startsWith("ANDROID-")) {
-                // ATAK native peer — let GeoChatConnector's own tracking be the sole source.
-                Log.i("MeshCore.Handler", "NotificationCount uid=" + contactUID
-                        + " addr=" + connectorAddress + " -> 0 (ANDROID peer, native only)");
-                return 0;
-            }
-            Set<String> keys = unreadKeysByUid.get(uid);
-            int n = keys == null ? 0 : keys.size();
-            Log.i("MeshCore.Handler", "NotificationCount uid=" + contactUID + " addr=" + connectorAddress + " -> " + n);
-            return n;
+            // For all mesh and ATAK contacts, let ATAK's native GeoChatConnector be the sole
+            // badge source. Returning our own count here doubles the badge because ATAK's
+            // built-in GeoChatConnectorHandler runs alongside this handler and also returns a
+            // count for the same contact ("Geo Chat: 1 + Send Message: 1" = 2).
+            // ATAK natively tracks unread via conversationId notification and clears it when
+            // the user opens the conversation — no plugin-side counter needed.
+            Log.i("MeshCore.Handler", "NotificationCount uid=" + contactUID
+                    + " addr=" + connectorAddress + " -> 0 (native badge only)");
+            return 0;
         }
 
         return null;
