@@ -9,6 +9,7 @@ import android.util.Log;
 import androidx.fragment.app.Fragment;
 
 import com.atakmap.android.chat.ChatManagerMapComponent;
+import com.atakmap.android.chat.GeoChatConnector;
 import com.atakmap.android.ipc.AtakBroadcast;
 import com.atakmap.android.maps.MapView;
 import com.atakmap.android.maps.MapItem;
@@ -17,6 +18,8 @@ import com.atakmap.android.contact.Contacts;
 import com.atakmap.android.contact.IndividualContact;
 import com.atakmap.android.contact.PluginConnector;
 import com.atakmap.android.contact.IpConnector;
+import com.atakmap.comms.NetConnectString;
+import com.atakmaps.meshcore.plugin.contacts.MeshSendMessageConnector;
 import com.atakmap.coremap.cot.event.CotEvent;
 import com.atakmap.coremap.cot.event.CotDetail;
 import com.atakmap.android.preference.AtakPreferences;
@@ -928,7 +931,14 @@ public class ChatBridge {
             }
 
             IndividualContact c = new IndividualContact(callsign, uid, item);
-            c.addConnector(new PluginConnector(ACTION_PLUGIN_CONTACT_GEOCHAT_SEND));
+            // All contacts in MeshcoreAtak communicate over BLE mesh — there is no WiFi/network
+            // fallback path. MeshSendMessageConnector (radio icon) is the sole plugin connector;
+            // PluginConnector is never added. GeoChatConnector is required for openConversation()
+            // to find a valid stcp seed without AIOOBE, and our handler intercepts its
+            // NotificationCount query (returning 0) so native GeoChat does not double-count.
+            c.addConnector(new MeshSendMessageConnector());
+            c.addConnector(new com.atakmap.android.chat.GeoChatConnector(
+                    MeshCoreContactHandler.buildNativeConnectorSeed(callsign)));
             // Keep ATAK send-list compatibility without forcing CoT send path selection.
             c.addConnector(new IpConnector((String) null));
 
@@ -936,7 +946,7 @@ public class ChatBridge {
                 try {
                     AtakPreferences prefs = new AtakPreferences(mv.getContext());
                     prefs.set("contact.connector.default." + c.getUID(),
-                            PluginConnector.CONNECTOR_TYPE);
+                            com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
                 } catch (Exception e) {
                     Log.w(TAG, "Failed to set default connector for " + uid, e);
                 }
@@ -978,11 +988,14 @@ public class ChatBridge {
             Contact existing = contacts.getContactByUuid(uid);
             if (existing instanceof IndividualContact) {
                 IndividualContact ic = (IndividualContact) existing;
-                com.atakmap.android.contact.Connector conn =
-                        ic.getConnector(PluginConnector.CONNECTOR_TYPE);
-                if (!(conn instanceof PluginConnector)
-                        || !ACTION_PLUGIN_CONTACT_GEOCHAT_SEND.equals(conn.getConnectionString())) {
-                    ic.addConnector(new PluginConnector(ACTION_PLUGIN_CONTACT_GEOCHAT_SEND));
+                // Strip any stale PluginConnector left by an older build.
+                try { ic.removeConnector(PluginConnector.CONNECTOR_TYPE); } catch (Exception ignored) {}
+                if (ic.getConnector(MeshSendMessageConnector.CONNECTOR_TYPE) == null) {
+                    ic.addConnector(new MeshSendMessageConnector());
+                }
+                if (ic.getConnector(com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE) == null) {
+                    ic.addConnector(new com.atakmap.android.chat.GeoChatConnector(
+                            MeshCoreContactHandler.buildNativeConnectorSeed(callsign)));
                 }
                 if (ic.getConnector(IpConnector.CONNECTOR_TYPE) == null) {
                     ic.addConnector(new IpConnector((String) null));
@@ -998,13 +1011,15 @@ public class ChatBridge {
                 item = mv.getRootGroup().deepFindUID(uid);
             }
             IndividualContact c = new IndividualContact(callsign, uid, item);
-            c.addConnector(new PluginConnector(ACTION_PLUGIN_CONTACT_GEOCHAT_SEND));
+            c.addConnector(new MeshSendMessageConnector());
+            c.addConnector(new com.atakmap.android.chat.GeoChatConnector(
+                    MeshCoreContactHandler.buildNativeConnectorSeed(callsign)));
             c.addConnector(new IpConnector((String) null));
             if (mv != null) {
                 try {
                     AtakPreferences prefs = new AtakPreferences(mv.getContext());
                     prefs.set("contact.connector.default." + c.getUID(),
-                            PluginConnector.CONNECTOR_TYPE);
+                            com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
                 } catch (Exception e) {
                     Log.w(TAG, "Failed to set default connector for exact uid " + uid, e);
                 }
@@ -1570,6 +1585,26 @@ public class ChatBridge {
                 }
                 boolean gatewayRelay = false;
                 if (!shouldRelay) {
+                    // Final fallback: if the destination contact carries MeshSendMessageConnector,
+                    // this is a mesh contact and must always be relayed over BLE mesh regardless
+                    // of whether a GPS beacon has been received this session.
+                    if (toUid != null && !toUid.trim().isEmpty()) {
+                        try {
+                            Contact dest = Contacts.getInstance().getContactByUuid(toUid.trim());
+                            if (dest == null) dest = Contacts.getInstance().getContactByUuid(toUid.trim().toUpperCase(java.util.Locale.US));
+                            if (dest instanceof IndividualContact) {
+                                com.atakmap.android.contact.Connector mc =
+                                        ((IndividualContact) dest).getConnector(
+                                                MeshSendMessageConnector.CONNECTOR_TYPE);
+                                if (mc != null && ACTION_PLUGIN_CONTACT_GEOCHAT_SEND.equals(mc.getConnectionString())) {
+                                    shouldRelay = true;
+                                    Log.d(TAG, "Relay fallback: MeshSendMessageConnector found on " + toUid);
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                }
+                if (!shouldRelay) {
                     gatewayRelay = isGatewayRelayEnabled();
                     if (!gatewayRelay) return;
                 }
@@ -1635,14 +1670,14 @@ public class ChatBridge {
                 return;
             }
 
-            String lineUid = resolveOutboundGeoChatLineUid(event);
-            if (skipIfDuplicateOutboundGeoChatLine(lineUid)) {
-                return;
-            }
+        String lineUid = resolveOutboundGeoChatLineUid(event);
+        if (skipIfDuplicateOutboundGeoChatLine(lineUid)) {
+            return;
+        }
 
-            Log.d(TAG, "Relaying outgoing chat (COT intent) to radio: " + message
-                    + " lineUid=" + lineUid);
-            relayOutboundGeoChatCot(event);
+        Log.d(TAG, "Relaying outgoing chat (COT intent) to radio: " + message
+                + " lineUid=" + lineUid);
+        relayOutboundGeoChatCotAsCompact(event);
 
         } catch (Exception e) {
             Log.e(TAG, "Error handling outgoing chat", e);
@@ -1667,12 +1702,8 @@ public class ChatBridge {
             return;
         }
 
-        String lineUid = resolveOutboundGeoChatLineUid(event);
-        if (skipIfDuplicateOutboundGeoChatLine(lineUid)) {
-            return;
-        }
-
         if (GeoChatContactListHelper.requiresFullCotRelay(event)) {
+            String lineUid = resolveOutboundGeoChatLineUid(event);
             Log.i(TAG, "Group/contact-list GeoChat → full CoT (brief stagger) uid=" + lineUid);
             cotBridge.scheduleSlottedGroupContactCotRelay(event);
             return;
@@ -1811,6 +1842,55 @@ public class ChatBridge {
             scheduleRetryCheck(wireMid);
         } catch (Exception e) {
             Log.e(TAG, "Error sending chat over radio", e);
+        }
+    }
+
+    /**
+     * Re-apply {@link MeshSendMessageConnector} as the default connector for an ATAK peer
+     * contact after {@code GeoChatService.onCotEvent} — which can overwrite the pref with its
+     * own routing choice, reverting the icon to the generic plug.
+     */
+    public static void repairAtakPeerConnectorDefault(String uid) {
+        if (uid == null || uid.trim().isEmpty()) return;
+        try {
+            String u = uid.trim();
+            Contacts contacts = Contacts.getInstance();
+            Contact c = contacts.getContactByUuid(u);
+            if (!(c instanceof IndividualContact)) return;
+            IndividualContact ic = (IndividualContact) c;
+            if (ic.getConnector(MeshSendMessageConnector.CONNECTOR_TYPE) == null) {
+                ic.addConnector(new MeshSendMessageConnector());
+            }
+            MapView mv = MapView.getMapView();
+            if (mv == null) return;
+            AtakPreferences prefs = new AtakPreferences(mv.getContext());
+            prefs.set("contact.connector.default." + u, com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
+            prefs.set("contact.connector.default." + u.toUpperCase(java.util.Locale.US),
+                    com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
+            prefs.set("contact.connector.default." + u.toLowerCase(java.util.Locale.US),
+                    com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
+            // Do NOT call ic.dispatchChangeEvent() here — doing so after GeoChatService has
+            // just inserted a new message causes ATAK to reload the conversation and add the
+            // incoming message a second time, producing duplicate notifications.
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Build a minimal stcp NetConnectString seed for a GeoChatConnector.
+     * This gives ATAK enough address info to render the chat bubble icon and thread
+     * conversations correctly for ANDROID-* (WiFi-reachable ATAK) contacts.
+     */
+    private static NetConnectString buildGeoChatSeed(String callsign) {
+        try {
+            NetConnectString ncs = new NetConnectString("stcp", "127.0.0.1", 4242);
+            String cs = callsign != null ? callsign.trim().toUpperCase(java.util.Locale.US) : "";
+            if (!cs.isEmpty()) {
+                ncs.setCallsign(cs);
+            }
+            return ncs;
+        } catch (Exception e) {
+            return new NetConnectString("stcp", "127.0.0.1", 4242);
         }
     }
 

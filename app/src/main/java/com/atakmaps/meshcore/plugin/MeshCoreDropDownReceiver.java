@@ -80,6 +80,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * MeshCore-only dropdown UI.
@@ -236,6 +237,46 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
     };
     private static final long MESH_GPS_FRESH_TIMEOUT_MS = 12_000L;
+    private static final String PREF_AUGMENT_GPS_FROM_MESHCORE =
+            "meshcore_augment_gps_from_meshcore";
+    private static final long MESH_GPS_AUGMENT_INTERVAL_MS = 120_000L;
+    private Switch switchAugmentGpsFromMeshcore;
+    private View rowAugmentGpsFromMeshcore;
+    private final AtomicBoolean meshGpsAugmentUpdateInFlight = new AtomicBoolean(false);
+    private final Runnable meshGpsAugmentRunnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                Context ctx = getMapView() != null ? getMapView().getContext() : null;
+                if (ctx == null || !isAugmentMeshPreferenceEnabled(ctx)) {
+                    return;
+                }
+                if (btManager == null || !btManager.isConnected()) {
+                    return;
+                }
+                // Only augment when the phone's own GPS chip is not providing a fix.
+                if (isPhoneGpsAvailable()) {
+                    return;
+                }
+                if (!Boolean.TRUE.equals(meshGpsEnabledState)) {
+                    btManager.queryMeshGpsEnabled();
+                    return;
+                }
+                if (!meshGpsAugmentUpdateInFlight.compareAndSet(false, true)) {
+                    return;
+                }
+                new Thread(() -> {
+                    try {
+                        updateGpsFromMeshcoreNow();
+                    } finally {
+                        meshGpsAugmentUpdateInFlight.set(false);
+                    }
+                }, "meshcore-gps-augment").start();
+            } finally {
+                scheduleMeshGpsAugmentTick();
+            }
+        }
+    };
     private Boolean meshGpsEnabledState = null;
     private boolean suppressMeshGpsSwitchCallbacks = false;
     private boolean pendingManualMeshGpsUpdate = false;
@@ -480,11 +521,15 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 switchMeshUseCallsignLocation.setChecked(
                         isMeshUseCallsignLocationPreferenceEnabled(initCtx));
             }
+            if (switchAugmentGpsFromMeshcore != null) {
+                switchAugmentGpsFromMeshcore.setChecked(isAugmentMeshPreferenceEnabled(initCtx));
+            }
         } catch (Exception ignored) {
         }
         meshGpsEnabledState = btManager.getMeshGpsEnabled();
         updateMeshGpsControlsUi();
         scheduleMeshCallsignPositionSync();
+        scheduleMeshGpsAugmentTick();
         updateMeshChannelButtonLabel();
         appendLog("MeshCore ready");
         return rootView;
@@ -516,6 +561,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         switchSmartBeacon = rootView.findViewById(getId("switch_smart_beacon"));
         switchMeshEnableGps = rootView.findViewById(getId("switch_mesh_enable_gps"));
         btnUpdateGpsFromMeshcore = rootView.findViewById(getId("btn_update_gps_from_meshcore"));
+        switchAugmentGpsFromMeshcore =
+                rootView.findViewById(getId("switch_augment_gps_from_meshcore"));
+        rowAugmentGpsFromMeshcore = rootView.findViewById(getId("row_augment_gps_from_meshcore"));
         switchMeshShowRepeaters = rootView.findViewById(getId("switch_mesh_show_repeaters"));
         switchMeshShowNodes = rootView.findViewById(getId("switch_mesh_show_nodes"));
         btnMeshRequestChannels = rootView.findViewById(getId("btn_mesh_request_channels"));
@@ -669,6 +717,18 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (btnUpdateGpsFromMeshcore != null) {
             btnUpdateGpsFromMeshcore.setOnClickListener(v -> requestManualMeshGpsUpdate());
+        }
+        if (switchAugmentGpsFromMeshcore != null) {
+            switchAugmentGpsFromMeshcore.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (!buttonView.isPressed()) {
+                    return;
+                }
+                setAugmentMeshPreference(isChecked);
+                scheduleMeshGpsAugmentTick();
+                appendLog(isChecked
+                        ? "MeshCore GPS augment enabled (2 min when phone has no fix)."
+                        : "MeshCore GPS augment disabled.");
+            });
         }
         if (btnClearMeshContacts != null) {
             btnClearMeshContacts.setOnClickListener(v -> confirmClearAllMeshContacts());
@@ -1609,6 +1669,14 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             btnUpdateGpsFromMeshcore.setEnabled(gpsDrivenActionsEnabled);
             btnUpdateGpsFromMeshcore.setAlpha(gpsDrivenActionsEnabled ? 1f : 0.45f);
         }
+        if (switchAugmentGpsFromMeshcore != null) {
+            switchAugmentGpsFromMeshcore.setEnabled(gpsDrivenActionsEnabled);
+            switchAugmentGpsFromMeshcore.setAlpha(gpsDrivenActionsEnabled ? 1f : 0.45f);
+        }
+        if (rowAugmentGpsFromMeshcore != null) {
+            rowAugmentGpsFromMeshcore.setVisibility(View.VISIBLE);
+            rowAugmentGpsFromMeshcore.setAlpha(gpsDrivenActionsEnabled ? 1f : 0.55f);
+        }
         if (btnMeshcoreSetNodePositionMap != null) {
             btnMeshcoreSetNodePositionMap.setEnabled(meshConnected);
         }
@@ -1666,6 +1734,80 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         Intent gpsReceived = new Intent("com.atakmap.android.map.WR_GPS_RECEIVED");
         AtakBroadcast.getInstance().sendBroadcast(gpsReceived);
         return true;
+    }
+
+    private void updateGpsFromMeshcoreNow() {
+        if (btManager == null || !btManager.isConnected()) {
+            return;
+        }
+        btManager.requestSelfInfo();
+        try {
+            Thread.sleep(700L);
+        } catch (InterruptedException ignored) {
+        }
+        BtConnectionManager.MeshLocationFix fix = btManager.getLatestSelfLocation();
+        if (fix == null || !fix.isValid()) {
+            return;
+        }
+        final BtConnectionManager.MeshLocationFix appliedFix = fix;
+        getMapView().post(() -> {
+            if (injectMeshGpsIntoAtak(appliedFix)) {
+                appendLog(String.format(Locale.US,
+                        "Augmented ATAK from MeshCore GPS: %.5f, %.5f",
+                        appliedFix.latitude, appliedFix.longitude));
+            }
+        });
+    }
+
+    private void scheduleMeshGpsAugmentTick() {
+        if (getMapView() == null) {
+            return;
+        }
+        getMapView().removeCallbacks(meshGpsAugmentRunnable);
+        Context ctx = getMapView().getContext();
+        if (ctx == null || !isAugmentMeshPreferenceEnabled(ctx)) {
+            return;
+        }
+        getMapView().postDelayed(meshGpsAugmentRunnable, MESH_GPS_AUGMENT_INTERVAL_MS);
+    }
+
+    /** True when the phone's internal GPS chip is reporting a valid fix to ATAK. */
+    private boolean isPhoneGpsAvailable() {
+        try {
+            com.atakmap.android.location.framework.LocationProvider internal =
+                    com.atakmap.android.location.framework.LocationManager.getInstance()
+                            .getLocationProvider("internal-gps-chip");
+            if (internal == null || !internal.getEnabled()) {
+                return false;
+            }
+            com.atakmap.android.location.framework.Location loc =
+                    internal.getLastReportedLocation();
+            if (loc == null || !loc.isValid()) {
+                return false;
+            }
+            com.atakmap.coremap.maps.coords.GeoPoint point = loc.getPoint();
+            return point != null && point.isValid();
+        } catch (Exception e) {
+            Log.w(TAG, "Could not evaluate phone GPS state", e);
+            return false;
+        }
+    }
+
+    private boolean isAugmentMeshPreferenceEnabled(Context ctx) {
+        if (ctx == null) {
+            return false;
+        }
+        return PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean(PREF_AUGMENT_GPS_FROM_MESHCORE, false);
+    }
+
+    private void setAugmentMeshPreference(boolean enabled) {
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        if (ctx == null) {
+            return;
+        }
+        PreferenceManager.getDefaultSharedPreferences(ctx)
+                .edit().putBoolean(PREF_AUGMENT_GPS_FROM_MESHCORE, enabled).apply();
     }
 
     private void sendManualBeacon() {
@@ -2416,6 +2558,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 btManager.setSendPositionWithAdvertEnabled(true);
             }
             scheduleMeshCallsignPositionSync();
+            scheduleMeshGpsAugmentTick();
         });
     }
 
@@ -2428,6 +2571,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             pendingManualMeshGpsUpdate = false;
             pendingManualMeshGpsSinceMs = 0L;
             getMapView().removeCallbacks(manualMeshGpsTimeoutRunnable);
+            getMapView().removeCallbacks(meshGpsAugmentRunnable);
             meshGpsEnabledState = null;
             meshGpsEnableRequested = getMeshUseGpsForPositionPreference(getMapView().getContext());
             meshSendPositionWithAdvertState = null;
@@ -3277,6 +3421,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (getMapView() != null) {
             getMapView().removeCallbacks(meshCallsignPositionSyncRunnable);
             getMapView().removeCallbacks(meshQueuedStatusTimeoutRunnable);
+            getMapView().removeCallbacks(meshGpsAugmentRunnable);
         }
         if (meshChannelChatDialog != null && meshChannelChatDialog.isShowing()) {
             meshChannelChatDialog.dismiss();
@@ -3313,6 +3458,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         pendingManualMeshGpsUpdate = false;
         pendingManualMeshGpsSinceMs = 0L;
         getMapView().removeCallbacks(manualMeshGpsTimeoutRunnable);
+        getMapView().removeCallbacks(meshGpsAugmentRunnable);
         getMapView().removeCallbacks(meshCallsignPositionSyncRunnable);
         getMapView().removeCallbacks(meshQueuedStatusTimeoutRunnable);
         if (meshChannelChatDialog != null && meshChannelChatDialog.isShowing()) {

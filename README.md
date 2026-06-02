@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.3.2`
+- Current version: `1.3.3`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -95,7 +95,15 @@ Includes:
 
 ## Changelog
 
-### 2026-06-01 (v1.3.2)
+### v1.3.3
+
+- **Single notification per message (ANDROID-* contacts):** `MeshSendMessageConnector` now returns 0 for `ANDROID-*` UIDs so ATAK's native `GeoChatConnector` is the sole badge source for ATAK peers. Eliminates the "Geo Chat: 1 + Send Message: 1" double-count that showed 2 in the contacts icon.
+- **No duplicate messages in conversation list:** Removed `contact.dispatchChangeEvent()` from `applyMeshInboundConnectors` and `applyMeshContactConnectors`. The async dispatch was firing after `geoChatService.onCotEvent()` inserted the new message, causing ATAK to reload the conversation and add it a second time.
+- **Chat icon opens chat directly:** `handleContact` now calls `openConversation(ic, false)` for both `GeoChatConnector` and `MeshSendMessageConnector` connector types. `false` opens the DM conversation panel; `true` was opening the contact-info card. The native `GeoChatConnector` handler is no longer deferred to (it fell back to a contact card for non-network contacts).
+- **Fixed outbound message relay (dedup cascade):** The COT_PLACED handler in `handleOutgoingChat` was setting the dedup entry, then calling `relayOutboundGeoChatCot` which checked the dedup again and found it already set — silently skipping the send. Dedup is now centralised in `relayOutboundGeoChatCotAsCompact` only.
+- **NetConnectString AIOOBE eliminated:** `buildNativeConnectorSeed` and `buildGeoChatSeed` now use `127.0.0.1:4242` instead of `*:-1`. ATAK's `isMulticast()` parser was throwing `ArrayIndexOutOfBoundsException` on the wildcard host, preventing conversation fragments from being created.
+
+### v1.3.2
 
 - **Silent iconset auto-install:** MeshCore iconset now installs automatically on first ATAK launch with no user interaction. The plugin stages the bundled `meschore.zip` to `/sdcard/atak/tools/import/` then fires the `com.atakmap.android.icons.ADD_ICONSET` broadcast directly to ATAK's `IconsMapAdapter`. No notification, no dialog, and no manual Point Dropper → Add Iconset step required. Install is idempotent — skipped if the iconset UID is already present in `iconsets.sqlite`.
 

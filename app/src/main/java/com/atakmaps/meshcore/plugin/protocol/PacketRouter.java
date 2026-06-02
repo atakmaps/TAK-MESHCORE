@@ -14,8 +14,10 @@ import com.atakmaps.meshcore.plugin.chat.ChatBridge;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
 import com.atakmaps.meshcore.plugin.util.CallsignUtil;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
+import com.atakmaps.meshcore.plugin.contacts.MeshSendMessageConnector;
 import com.atakmaps.meshcore.plugin.crypto.EncryptionManager;
 import com.atakmaps.meshcore.plugin.protocol.PacketFragmenter;
+import com.atakmaps.meshcore.plugin.MeshCoreContactHandler;
 
 /**
  * Routes incoming packets to the appropriate handler based on their type.
@@ -309,11 +311,14 @@ public class PacketRouter {
 
             if (existing instanceof IndividualContact) {
                 IndividualContact ic = (IndividualContact) existing;
-                // If contact was created by a non-plugin path first, ensure GeoChat/send connectors
-                // are attached so Contact Card and chat actions are enabled.
-                if (ic.getConnector(com.atakmap.android.contact.PluginConnector.CONNECTOR_TYPE) == null) {
-                    ic.addConnector(new com.atakmap.android.contact.PluginConnector(
-                            ChatBridge.ACTION_PLUGIN_CONTACT_GEOCHAT_SEND));
+                // Strip any stale PluginConnector left by an older build.
+                try { ic.removeConnector(com.atakmap.android.contact.PluginConnector.CONNECTOR_TYPE); } catch (Exception ignored) {}
+                if (ic.getConnector(MeshSendMessageConnector.CONNECTOR_TYPE) == null) {
+                    ic.addConnector(new MeshSendMessageConnector());
+                }
+                if (ic.getConnector(com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE) == null) {
+                    ic.addConnector(new com.atakmap.android.chat.GeoChatConnector(
+                            MeshCoreContactHandler.buildNativeConnectorSeed(normalized)));
                 }
                 if (ic.getConnector(IpConnector.CONNECTOR_TYPE) == null) {
                     ic.addConnector(new IpConnector((String) null));
@@ -322,7 +327,7 @@ public class PacketRouter {
                     com.atakmap.android.preference.AtakPreferences prefs =
                             new com.atakmap.android.preference.AtakPreferences(mv.getContext());
                     prefs.set("contact.connector.default." + ic.getUID(),
-                            com.atakmap.android.contact.PluginConnector.CONNECTOR_TYPE);
+                            com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
                 } catch (Exception ignored) {
                 }
                 if (item != null) {
@@ -352,18 +357,19 @@ public class PacketRouter {
                     uid,
                     item instanceof MapItem ? item : null);
 
-            c.addConnector(new com.atakmap.android.contact.PluginConnector(
-                    ChatBridge.ACTION_PLUGIN_CONTACT_GEOCHAT_SEND));
+            c.addConnector(new MeshSendMessageConnector());
+            c.addConnector(new com.atakmap.android.chat.GeoChatConnector(
+                    MeshCoreContactHandler.buildNativeConnectorSeed(normalized)));
 
             // IpConnector with null sendIntent: makes contact visible in the SEND_LIST
             // (ContactListAdapter hard-filters on IpConnector presence) without hijacking
-            // the CoT send path (isEmpty(null) → true → uniqueSelected preserved → sendCot fires).
+            // the CoT send path.
             c.addConnector(new IpConnector((String) null));
 
             com.atakmap.android.preference.AtakPreferences prefs =
                     new com.atakmap.android.preference.AtakPreferences(mv.getContext());
             prefs.set("contact.connector.default." + c.getUID(),
-                    com.atakmap.android.contact.PluginConnector.CONNECTOR_TYPE);
+                    com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
 
             contacts.addContact(c);
             if (item != null) {

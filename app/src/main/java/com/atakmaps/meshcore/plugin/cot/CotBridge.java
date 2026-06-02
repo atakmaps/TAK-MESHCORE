@@ -554,10 +554,64 @@ public class CotBridge {
                 return true;
             }
 
+            // Final fallback: check if any UID referenced in the CoT belongs to a contact
+            // carrying MeshSendMessageConnector. Covers the case where the contact was created
+            // this session but has not yet sent a GPS beacon to register in btechContactUids.
+            if (chat != null && geoChatDetailTargetsMeshConnector(chat, detail)) {
+                Log.d(TAG, "GeoChat relay: matched MeshSendMessageConnector contact");
+                return true;
+            }
+
             return false;
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    /** Check if any UID in the chat CoT detail belongs to a contact with MeshSendMessageConnector. */
+    private boolean geoChatDetailTargetsMeshConnector(
+            com.atakmap.coremap.cot.event.CotDetail chat,
+            com.atakmap.coremap.cot.event.CotDetail detail) {
+        try {
+            com.atakmap.coremap.cot.event.CotDetail chatgrp =
+                    chat.getFirstChildByName(0, "chatgrp");
+            if (chatgrp != null) {
+                for (String attr : new String[]{"uid0", "uid1", "uid2"}) {
+                    if (hasMeshConnector(chatgrp.getAttribute(attr))) return true;
+                }
+            }
+            for (String attr : new String[]{"chatroom", "id", "destination", "recipient"}) {
+                String val = chat.getAttribute(attr);
+                if (hasMeshConnector(val)) return true;
+                String resolved = resolveBtechUidForId(val);
+                if (hasMeshConnector(resolved)) return true;
+            }
+            com.atakmap.coremap.cot.event.CotDetail remarks =
+                    detail.getFirstChildByName(0, "remarks");
+            if (remarks != null) {
+                String to = remarks.getAttribute("to");
+                if (hasMeshConnector(to)) return true;
+                if (hasMeshConnector(resolveBtechUidForId(to))) return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private boolean hasMeshConnector(String uid) {
+        if (uid == null || uid.trim().isEmpty()) return false;
+        try {
+            Contact c = Contacts.getInstance().getContactByUuid(uid.trim());
+            if (c == null) c = Contacts.getInstance().getContactByUuid(uid.trim().toUpperCase(Locale.US));
+            if (c instanceof IndividualContact) {
+                com.atakmap.android.contact.Connector conn = ((IndividualContact) c)
+                        .getConnector(com.atakmaps.meshcore.plugin.contacts.MeshSendMessageConnector.CONNECTOR_TYPE);
+                if (conn != null && ChatBridge.ACTION_PLUGIN_CONTACT_GEOCHAT_SEND.equals(conn.getConnectionString())) {
+                    btechContactUids.add(uid.trim()); // register for future fast-path
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     private boolean geoChatDetailTargetsBtechContact(
@@ -1107,11 +1161,10 @@ public class CotBridge {
                     + " convo=" + GeoChatContactListHelper.extractConversationId(event)
                     + " sender=" + GeoChatContactListHelper.extractChatSenderUid(event)
                     + " hasHierarchy=" + GeoChatContactListHelper.cotHasContactHierarchy(event));
-            // Clear ATAK's native GeoChat unread for this conversation immediately.
-            // Plugin contacts use our own incrementUnreadOnce counter as the single
-            // notification source; letting the native counter also accumulate causes
-            // a second "geo chat" badge on the contact card.
-            clearNativeGeoChatUnread(event);
+            // GeoChatService may reset the sender's default connector to its own routing choice.
+            // Re-apply MeshSendMessageConnector as default so the radio icon is preserved.
+            ChatBridge.repairAtakPeerConnectorDefault(
+                    GeoChatContactListHelper.extractChatSenderUid(event));
             if (groupSync) {
                 InboundGroupSyncApplier.applyAfterInboundGroupCot(event, contactListUpdate);
             }
@@ -1134,12 +1187,24 @@ public class CotBridge {
      */
     private void clearNativeGeoChatUnread(CotEvent event) {
         try {
+            // Mark the chatgrp conversation (local device UID as chatgrp id for DMs).
             String convo = GeoChatContactListHelper.extractConversationId(event);
-            if (convo == null || convo.trim().isEmpty()) return;
-            android.content.Intent markRead = new android.content.Intent(
-                    "com.atakmap.chat.markmessageread");
-            markRead.putExtra("conversationId", convo.trim());
-            com.atakmap.android.ipc.AtakBroadcast.getInstance().sendBroadcast(markRead);
+            if (convo != null && !convo.trim().isEmpty()) {
+                android.content.Intent markRead = new android.content.Intent(
+                        "com.atakmap.chat.markmessageread");
+                markRead.putExtra("conversationId", convo.trim());
+                com.atakmap.android.ipc.AtakBroadcast.getInstance().sendBroadcast(markRead);
+            }
+            // Also mark by sender UID — GeoChatConnector tracks unread keyed on the contact UID,
+            // which for mesh DMs is the sender (MESHCORE-NODE-* or ANDROID-*), not the chatgrp id.
+            String senderUid = GeoChatContactListHelper.extractChatSenderUid(event);
+            if (senderUid != null && !senderUid.trim().isEmpty()
+                    && !senderUid.trim().equals(convo != null ? convo.trim() : "")) {
+                android.content.Intent markRead2 = new android.content.Intent(
+                        "com.atakmap.chat.markmessageread");
+                markRead2.putExtra("conversationId", senderUid.trim());
+                com.atakmap.android.ipc.AtakBroadcast.getInstance().sendBroadcast(markRead2);
+            }
         } catch (Exception ignored) {
         }
     }
@@ -1290,6 +1355,8 @@ public class CotBridge {
             }
             String callsign = uid.substring(ANDROID_UID_PREFIX.length());
             ChatBridge.ensurePluginChatContactExactUid(callsign, uid);
+            // Re-stamp the radio icon pref in case ATAK's send pipeline reset the default.
+            ChatBridge.repairAtakPeerConnectorDefault(uid);
         }
     }
 
@@ -1811,7 +1878,7 @@ public class CotBridge {
                         break;
                     }
                     // Fallback: contact persisted from a previous session but no beacon yet
-                    // this session — check whether it carries our PluginConnector.
+                    // this session — check whether it carries our MeshSendMessageConnector.
                     try {
                         Contact c = Contacts.getInstance().getContactByUuid(trimmed);
                         if (c == null) {
@@ -1828,8 +1895,8 @@ public class CotBridge {
                         if (c instanceof IndividualContact) {
                             com.atakmap.android.contact.Connector conn =
                                     ((IndividualContact) c).getConnector(
-                                            PluginConnector.CONNECTOR_TYPE);
-                            if (conn instanceof PluginConnector
+                                            com.atakmaps.meshcore.plugin.contacts.MeshSendMessageConnector.CONNECTOR_TYPE);
+                            if (conn != null
                                     && ChatBridge.ACTION_PLUGIN_CONTACT_GEOCHAT_SEND.equals(
                                             conn.getConnectionString())) {
                                 targetsBtechContact = true;
