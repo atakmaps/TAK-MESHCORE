@@ -728,7 +728,15 @@ public class ChatBridge {
         return MESH_NODE_UID_PREFIX + prefixUpper;
     }
 
-    /** True if the RF payload "chat room" equals this operator's callsign or its AX.25 form. */
+    /**
+     * True if the RF payload "chat room" is addressed to this device.
+     *
+     * Deliberately does NOT fall back to the simple 6-char truncation (sixCharWireForm) because
+     * that form is ambiguous when multiple contacts share the same prefix — e.g. both "JESTER_15"
+     * and "JESTER_25" truncate to "JESTER", so a DM to JESTER_25 would be incorrectly accepted
+     * by JESTER_15.  UV-Pro (Darksteal) uses the same conservative approach: only the exact
+     * callsign and its vowel-compressed toRadioCallsign form are accepted.
+     */
     private boolean rfDestinationLooksLikeSelf(String room) {
         if (room == null || room.isEmpty() || localCallsign == null) {
             return false;
@@ -761,18 +769,9 @@ public class ChatBridge {
                         }
                     } catch (Exception ignored2) {
                     }
-                    if (sixCharWireForm(m.trim()).equalsIgnoreCase(r)) {
-                        return true;
-                    }
                 }
             }
         } catch (Exception ignored) {
-        }
-        // The chat packet carries the destination as the first 6 chars of the full callsign
-        // (see MeshCorePacket.createChatPacket), so a full local callsign like "SMOKEY_15"
-        // must still match the truncated wire room "SMOKEY".
-        if (sixCharWireForm(loc).equalsIgnoreCase(r)) {
-            return true;
         }
         if (r.startsWith(ANDROID_UID_PREFIX)) {
             String bare = r.substring(ANDROID_UID_PREFIX.length());
@@ -1814,9 +1813,17 @@ public class ChatBridge {
                 trimOutboundAckMap();
             }
 
+            // Apply the same vowel-compressed truncation to the room/destination that
+            // UV-Pro (Darksteal) uses when building its own packets.  Simple 6-char
+            // truncation ("JESTER_25" → "JESTER") does not match UV-Pro's form ("JSTR25"),
+            // so messages sent to UV-Pro contacts were silently dropped.  Broadcast rooms
+            // that contain spaces ("All Chat Rooms") are left unchanged.
+            String wireRoom = (room != null && !room.contains(" "))
+                    ? com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(room)
+                    : room;
             MeshCorePacket packet = MeshCorePacket.createChatPacket(
                     com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(sender),
-                    room, wireMid, message);
+                    wireRoom, wireMid, message);
 
             byte[] packetBytes = packet.encode();
             // Encrypt if enabled
@@ -1834,9 +1841,10 @@ public class ChatBridge {
             Log.d(TAG, "Sending chat over radio: " + ax25.length + " bytes");
             btManager.sendKissFrame(ax25);
 
-            // Register for retry watchdog — cancelled when DELIVERED ACK arrives.
+            // Store wireRoom (already compressed) so retries use the same wire-form destination
+            // and don't fall back to the raw room which createChatPacket would truncate differently.
             PendingOutboundChat pending =
-                    new PendingOutboundChat(wireMid, sender, room, message, geoChatLineUidOrNull);
+                    new PendingOutboundChat(wireMid, sender, wireRoom, message, geoChatLineUidOrNull);
             pendingOutboundChats.put(wireMid, pending);
             Log.d(TAG, "Outbound pending registered mid=" + wireMid + " room=" + room);
             scheduleRetryCheck(wireMid);

@@ -30,6 +30,7 @@ app/build/
 # Local-only agent / handoff notes (not published)
 NEW-AGENT-HANDOFF.md
 HANDOFF.md
+contacts_agent_handoff.md
 
 # Debug / scratch
 build_output.txt

@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.3.3`
+- Current version: `1.3.4`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -94,6 +94,13 @@ Includes:
 - Updated scan UX with active discovery pulse
 
 ## Changelog
+
+### v1.3.4
+
+- **Fixed cross-device DM routing:** Removed `sixCharWireForm` fallback from `rfDestinationLooksLikeSelf`. The 6-char truncation (`"JESTER_15"` → `"JESTER"`) was ambiguous — contacts sharing the same prefix (e.g. `JESTER_15` and `JESTER_25`) both matched, causing DMs addressed to one device to be injected on the other. Only exact callsign and `CallsignUtil.toRadioCallsign` (vowel-compressed) forms are now accepted, matching UV-Pro behaviour.
+- **Fixed outbound packets to UV-Pro contacts:** `sendChatOverRadio` now applies `CallsignUtil.toRadioCallsign` to the destination room before passing it to `MeshCorePacket.createChatPacket`. Previously simple 6-char truncation (`"JESTER_25"` → `"JESTER"`) did not match UV-Pro's vowel-compressed wire form (`"JSTR25"`), so all DMs from MeshcoreAtak to UV-Pro contacts were silently dropped on receipt.
+- **`PendingOutboundChat` stores wire room:** Retries now use the already vowel-compressed `wireRoom` rather than the raw callsign, ensuring consistent routing on retry.
+- **Fixed first-message-after-restart dedup collision:** `MeshCorePacket.CHAT_MESSAGE_ID` now seeds from `System.currentTimeMillis()/1000` instead of always starting at `1`. UV-Pro caches received wire mids for 120 s; the old counter reset to `mid=1` on every ATAK restart, causing UV-Pro to silently drop the first message as a duplicate of the previous session.
 
 ### v1.3.3
 

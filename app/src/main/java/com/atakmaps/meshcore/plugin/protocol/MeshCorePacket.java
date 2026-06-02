@@ -25,7 +25,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class MeshCorePacket {
 
     /** Monotonic per-radio-session chat ids ( millis-based ids collided and confused ATAK). */
-    private static final AtomicInteger CHAT_MESSAGE_ID = new AtomicInteger(1);
+    // Seed from current time so the counter never starts at 1 after a restart.
+    // UV-Pro (and any receiver) caches recently-delivered wire mids for ~120 s; if we always
+    // start at 1, the first message after an ATAK restart collides with the previous session's
+    // cached mid=1 and gets silently deduped on the receiving side.
+    private static final AtomicInteger CHAT_MESSAGE_ID = new AtomicInteger(
+            (int) (System.currentTimeMillis() / 1000) & 0x7FFF_FFFF);
 
     // Packet type codes
     public static final byte TYPE_COT = 0x01;
