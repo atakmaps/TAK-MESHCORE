@@ -167,7 +167,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnSmartBeaconSettings;
     private Button btnMeshSendAdvert;
     private Switch switchSmartBeacon;
-    private Switch switchMeshEnableGpsHardware;
+    private Switch switchMeshEnableGpsConnection; // CONNECTION section power switch
+    private Switch switchMeshEnableGpsHardware;   // MESHCORE section convenience copy
     private Switch switchMeshEnableGps;
     private Button btnUpdateGpsFromMeshcore;
     private Switch switchMeshShowRepeaters;
@@ -604,6 +605,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnSmartBeaconSettings = rootView.findViewById(getId("btn_manage_smart_beacon_settings"));
         btnMeshSendAdvert = rootView.findViewById(getId("btn_meshcore_send_advert"));
         switchSmartBeacon = rootView.findViewById(getId("switch_smart_beacon"));
+        switchMeshEnableGpsConnection =
+                rootView.findViewById(getId("switch_mesh_enable_gps_connection"));
         switchMeshEnableGpsHardware =
                 rootView.findViewById(getId("switch_mesh_enable_gps_hardware"));
         switchMeshEnableGps = rootView.findViewById(getId("switch_mesh_enable_gps"));
@@ -709,9 +712,24 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 pushPhoneLocationToMeshNodeIfNeeded(false);
                 if (btManager.sendSelfAdvert()) {
                     appendLog("Requested MeshCore self advert");
+                    Toast.makeText(getMapView().getContext(),
+                            "Advert Sent", Toast.LENGTH_SHORT).show();
                 } else {
                     appendLog("Failed to request self advert");
                 }
+            });
+        }
+        if (switchMeshEnableGpsConnection != null) {
+            switchMeshEnableGpsConnection.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (suppressMeshGpsSwitchCallbacks || !buttonView.isPressed()) {
+                    return;
+                }
+                if (!btManager.isConnected()) {
+                    appendLog("Connect to MeshCore before changing GPS state");
+                    updateMeshGpsControlsUi();
+                    return;
+                }
+                onMeshEnableGpsHardwareChanged(isChecked);
             });
         }
         if (switchMeshEnableGpsHardware != null) {
@@ -1824,21 +1842,25 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         boolean advertPositionEnabled = meshSendPositionWithAdvertRequested
                 || Boolean.TRUE.equals(meshSendPositionWithAdvertState);
         boolean meshGpsHardwareOn = Boolean.TRUE.equals(meshGpsEnabledState);
-        if (switchMeshEnableGpsHardware != null) {
-            suppressMeshGpsSwitchCallbacks = true;
-            try {
-                // "GPS installed" cannot be detected over the companion protocol, so the hardware
-                // enable toggle is available whenever connected (never greyed out for "no GPS").
+        // Sync both power switches (CONNECTION + MESHCORE) to the same hardware state.
+        suppressMeshGpsSwitchCallbacks = true;
+        try {
+            if (switchMeshEnableGpsConnection != null) {
+                switchMeshEnableGpsConnection.setEnabled(meshConnected);
+                switchMeshEnableGpsConnection.setAlpha(meshConnected ? 1f : 0.45f);
+                View connRow = (View) switchMeshEnableGpsConnection.getParent();
+                if (connRow != null) connRow.setAlpha(meshConnected ? 1f : 0.55f);
+                switchMeshEnableGpsConnection.setChecked(meshGpsHardwareOn);
+            }
+            if (switchMeshEnableGpsHardware != null) {
                 switchMeshEnableGpsHardware.setEnabled(meshConnected);
                 switchMeshEnableGpsHardware.setAlpha(meshConnected ? 1f : 0.45f);
                 View hwRow = (View) switchMeshEnableGpsHardware.getParent();
-                if (hwRow != null) {
-                    hwRow.setAlpha(meshConnected ? 1f : 0.55f);
-                }
+                if (hwRow != null) hwRow.setAlpha(meshConnected ? 1f : 0.55f);
                 switchMeshEnableGpsHardware.setChecked(meshGpsHardwareOn);
-            } finally {
-                suppressMeshGpsSwitchCallbacks = false;
             }
+        } finally {
+            suppressMeshGpsSwitchCallbacks = false;
         }
         if (switchMeshEnableGps != null) {
             suppressMeshGpsSwitchCallbacks = true;
@@ -1893,7 +1915,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         boolean gpsDrivenActionsEnabled = meshConnected && meshGpsHardwareOn;
         if (btnUpdateGpsFromMeshcore != null) {
-            btnUpdateGpsFromMeshcore.setVisibility(View.VISIBLE);
             btnUpdateGpsFromMeshcore.setEnabled(gpsDrivenActionsEnabled);
             btnUpdateGpsFromMeshcore.setAlpha(gpsDrivenActionsEnabled ? 1f : 0.45f);
         }
@@ -2973,13 +2994,16 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 suppressMeshGpsSwitchCallbacks = false;
             }
         }
-        if (switchMeshEnableGpsHardware != null) {
-            suppressMeshGpsSwitchCallbacks = true;
-            try {
-                switchMeshEnableGpsHardware.setChecked(false);
-            } finally {
-                suppressMeshGpsSwitchCallbacks = false;
+        suppressMeshGpsSwitchCallbacks = true;
+        try {
+            if (switchMeshEnableGpsConnection != null) {
+                switchMeshEnableGpsConnection.setChecked(false);
             }
+            if (switchMeshEnableGpsHardware != null) {
+                switchMeshEnableGpsHardware.setChecked(false);
+            }
+        } finally {
+            suppressMeshGpsSwitchCallbacks = false;
         }
         if (switchAugmentGpsFromMeshcore != null) {
             switchAugmentGpsFromMeshcore.setChecked(false);
