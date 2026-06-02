@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.3.6`
+- Current version: `1.4.0`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -33,8 +33,15 @@ adb install -r app/build/outputs/apk/civ/debug/ATAK-Plugin-Meshcore-*.apk
 - Manual beacon send
 - Smart Beacon enable + advanced settings
 - MeshCore GPS controls:
-  - `Enable MeshCore GPS`
-  - `Update ATAK with MeshCore GPS` (fresh-fix request path)
+  - `Enable MeshCore GPS` — hardware on/off at the node
+  - `Use MeshCore GPS for Position` — selects node GPS as the advert position source (gated on hardware toggle)
+  - `Update ATAK with MeshCore GPS` — one-shot fresh fix request
+  - `Augment GPS from MeshCore` — auto-updates ATAK self-position every 2 min when phone GPS is unavailable
+- AES-256-GCM end-to-end encryption for all tunnel traffic (CoT, position, relayed chat) with shared-secret passphrase
+- CoT/waypoint reliability:
+  - Minification strips non-essential detail to reduce fragment count
+  - Immediate double-send (T+3s) for resilience against brief RF collisions
+  - App-layer ACK + retry (15s × 5 attempts) — automatic retransmit until receiver confirms delivery
 - Map status overlay with panel-open tap behavior
 
 ## Connection Modes
@@ -94,6 +101,18 @@ Includes:
 - Updated scan UX with active discovery pulse
 
 ## Changelog
+
+### v1.4.0
+
+- **AES-256-GCM encryption UI wired:** Toggle, passphrase field, SET button, and status indicator now functional. Saved secret is restored on startup. All tunnel traffic (CoT, position, relayed GeoChat) is encrypted when enabled; DMs use MeshCore's native per-recipient E2E crypto independently.
+- **Enable MeshCore GPS hardware toggle (new):** Dedicated toggle turns the node GPS hardware on/off (`gps:1/0`). Separated from position-source selection.
+- **Repurposed "Use MeshCore GPS for Position":** Now selects the node GPS fix as the advert position source rather than controlling hardware. Greyed out unless the hardware toggle is ON and Send Position With Advert is enabled.
+- **Augment GPS gating:** "Augment GPS from MeshCore" toggle and row are disabled whenever the GPS hardware toggle is off. Default is OFF.
+- **CoT minification:** Non-essential `<detail>` children (`precisionlocation`, `status`, `takv`, `_flow-tags_`, `archive`, `height`, `track`, `uid`, `ce`, `le`, `link`, `creator`) and XML declaration stripped before compression. Reduces fragment count from 3→2 for typical waypoints. Strictly never-worse — falls back to full XML if minification produces a larger payload. `version='2.0'` preserved (required by ATAK's CoT parser).
+- **CoT hop-count threading:** MeshCore channel message `pathLen` (repeater hop count) threaded from BLE receive layer through `PacketRouter` to `CotBridge`. Logged on every received CoT event.
+- **CoT ACK/retry system (new `TYPE_COT_ACK = 0x08`):** Outbound CoT events are registered in a watchdog keyed by CoT UID. Receiver sends a `TYPE_COT_ACK` after successful parse. Sender cancels watchdog on ACK; retransmits at 15s intervals up to 5 times if no ACK. GeoChat CoT (`b-t-f*`) excluded (uses chat retry). `cotRetryExecutor` shuts down cleanly on dispose.
+- **Immediate double-send:** Each CoT is re-sent automatically 3 seconds after the first attempt (if not yet ACK'd) to survive brief RF collisions without waiting for the 15s retry timer.
+- **Parse-failure guard in `injectCompressedCot`:** Logs the first 120 chars of the rejected XML when `CotEvent.parse` returns null, distinguishing parse failures from RF drops in diagnostic logs.
 
 ### v1.3.6
 

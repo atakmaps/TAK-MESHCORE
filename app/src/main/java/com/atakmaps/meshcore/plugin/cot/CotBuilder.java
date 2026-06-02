@@ -517,6 +517,83 @@ public class CotBuilder {
     }
 
     /**
+     * Detail children that are non-essential for rendering a marker but bloat the
+     * compressed CoT payload. Removing these can drop a typical point under a single
+     * radio fragment (240 bytes compressed). This is a BLACKLIST so unusual-but-small
+     * details survive untouched.
+     */
+    private static final java.util.Set<String> MINIFY_DROP_DETAILS =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "precisionlocation",
+                    "status",
+                    "takv",
+                    "_flow-tags_",
+                    "archive",
+                    "height",
+                    "height_unit",
+                    "track",
+                    "uid",
+                    "ce",
+                    "le",
+                    // Creator back-reference and origin link — ATAK edit/ownership metadata,
+                    // not needed to render or place the marker on the receiver's map.
+                    "link",
+                    "creator"));
+
+    /**
+     * Produce a minified CoT XML string by stripping non-essential {@code <detail>}
+     * children before compression, so a typical point fits in a single radio fragment.
+     *
+     * <p>The original {@link CotEvent} is never mutated (it is also dispatched locally
+     * in ATAK). A clone is created via {@link CotEvent#parse(String)} and only the
+     * clone's detail tree is pruned. Essential rendering children — {@code point}
+     * (an event field, not a detail), {@code contact}, {@code __group}, {@code color},
+     * {@code usericon}, {@code remarks} — are preserved.
+     *
+     * @return minified CoT XML, or the original {@code event.toString()} if cloning fails.
+     */
+    public static String minifyCotXml(CotEvent event) {
+        if (event == null) {
+            return null;
+        }
+        String original = event.toString();
+        try {
+            CotEvent clone = CotEvent.parse(original);
+            if (clone == null) {
+                return original;
+            }
+            CotDetail detail = clone.getDetail();
+            if (detail == null) {
+                return clone.toString();
+            }
+            // getChildren() returns a copy, so iterating while removing is safe.
+            for (CotDetail child : detail.getChildren()) {
+                if (child == null) {
+                    continue;
+                }
+                String name = child.getElementName();
+                if (name != null && MINIFY_DROP_DETAILS.contains(name)) {
+                    detail.removeChild(child);
+                }
+            }
+            // Strip only what is proven safe — preserve all CoT parser-required attributes.
+            String minXml = clone.toString();
+            // XML declaration — not needed; ATAK's CoT parser handles raw XML without it.
+            minXml = minXml.replaceAll("<\\?xml[^?]*\\?>", "");
+            // access='...' — access control attribute, irrelevant on mesh.
+            minXml = minXml.replaceAll(" access='[^']*'", "")
+                           .replaceAll(" access=\"[^\"]*\"", "");
+            // Empty <remarks/> — adds no content.
+            minXml = minXml.replace("<remarks/>", "")
+                           .replace("<remarks></remarks>", "");
+            return minXml.trim();
+        } catch (Exception e) {
+            Log.w(TAG, "minifyCotXml failed — using original CoT", e);
+            return original;
+        }
+    }
+
+    /**
      * Compress a CoT XML string with GZIP.
      */
     public static byte[] compressCot(String cotXml) {

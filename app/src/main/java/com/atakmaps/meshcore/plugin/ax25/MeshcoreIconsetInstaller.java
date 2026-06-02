@@ -4,10 +4,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
-import android.os.Environment;
 import android.util.Log;
 
 import com.atakmap.android.ipc.AtakBroadcast;
+import com.atakmap.coremap.filesystem.FileSystemUtils;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -48,9 +48,7 @@ public final class MeshcoreIconsetInstaller {
             if (!autoImportTriggered) {
                 boolean staged = stageIconsetZip(pluginContext);
                 if (staged) {
-                    File stagedFile = new File(
-                            Environment.getExternalStorageDirectory(),
-                            "atak/tools/import/" + ICONSET_FILENAME);
+                    File stagedFile = FileSystemUtils.getItem("tools/import/" + ICONSET_FILENAME);
                     triggerAutoImport(stagedFile);
                     autoImportTriggered = true;
                     Log.i(TAG, "MeshCore iconset auto-import triggered: " + stagedFile.getAbsolutePath());
@@ -71,7 +69,7 @@ public final class MeshcoreIconsetInstaller {
     }
 
     public static boolean isIconsetInstalled() {
-        File db = new File(Environment.getExternalStorageDirectory(), "atak/Databases/iconsets.sqlite");
+        File db = FileSystemUtils.getItem("Databases/iconsets.sqlite");
         if (!db.exists()) {
             return false;
         }
@@ -106,7 +104,7 @@ public final class MeshcoreIconsetInstaller {
     }
 
     private static boolean stageIconsetZip(Context pluginContext) {
-        File importDir = new File(Environment.getExternalStorageDirectory(), "atak/tools/import");
+        File importDir = FileSystemUtils.getItem("tools/import");
         if (!importDir.exists() && !importDir.mkdirs()) {
             Log.w(TAG, "Failed to create import dir: " + importDir.getAbsolutePath());
             return false;

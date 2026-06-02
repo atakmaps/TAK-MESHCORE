@@ -46,6 +46,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -80,6 +83,31 @@ public class CotBridge {
     private static final long MIN_CONTACT_STALE_MS = 60_000L;
     /** Inbound radio peers: ATAK uses CoT stale as marker TTL; keep ≥ 2h for sparse beacons. */
     private static final long MIN_INBOUND_RADIO_STALE_MS = 2 * 60 * 60_000L;
+
+    private static final long COT_RETRY_INTERVAL_MS   = 15_000L;  // 15s — faster recovery
+    private static final int  COT_MAX_RETRIES          = 5;        // 5 retries × 15s = 75s window
+    private static final long COT_DOUBLE_SEND_DELAY_MS = 3_000L;   // re-send 3s after first attempt
+
+    private static final class PendingOutboundCot {
+        final String cotUid;
+        final CotEvent event;
+        volatile int retryCount;
+        PendingOutboundCot(String cotUid, CotEvent event) {
+            this.cotUid = cotUid;
+            this.event  = event;
+            this.retryCount = 0;
+        }
+    }
+
+    private final ConcurrentHashMap<String, PendingOutboundCot> pendingOutboundCots =
+            new ConcurrentHashMap<>();
+
+    private final ScheduledExecutorService cotRetryExecutor =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "MeshCore-CotRetry");
+                t.setDaemon(true);
+                return t;
+            });
 
     private final Context pluginContext;
     private final MapView mapView;
@@ -860,6 +888,14 @@ public class CotBridge {
      * Inject a compressed CoT XML received from another MeshCore node.
      */
     public void injectCompressedCot(byte[] compressed) {
+        injectCompressedCot(compressed, 0);
+    }
+
+    /**
+     * Inject a compressed CoT XML received from another MeshCore node, carrying
+     * the MeshCore pathLen (number of repeater hops) for display purposes.
+     */
+    public void injectCompressedCot(byte[] compressed, int pathLen) {
         try {
             String xml = CotBuilder.decompressCot(compressed);
             if (xml == null || xml.isEmpty()) {
@@ -868,6 +904,11 @@ public class CotBridge {
             }
 
             CotEvent event = CotEvent.parse(xml);
+            if (event == null || !event.isValid()) {
+                Log.w(TAG, "injectCompressedCot: CotEvent.parse returned null/invalid — xml="
+                        + (xml.length() > 120 ? xml.substring(0, 120) + "…" : xml));
+                return;
+            }
             if (event != null && event.isValid()) {
                 sanitizeInboundAutoPointCot(event);
                 Log.d(TAG, "Injecting decompressed CoT: type=" + event.getType()
@@ -885,6 +926,31 @@ public class CotBridge {
                 if (pingMv != null) {
                     PingReplyNotifier.maybeNotifyPingReplyFromCot(
                             pingMv.getContext(), event);
+                }
+
+                String hopStr = pathLen <= 0 ? "direct" : pathLen + (pathLen == 1 ? " hop" : " hops");
+                Log.d(TAG, "CoT received: type=" + event.getType() + " via " + hopStr);
+
+                // Send TYPE_COT_ACK back to cancel the sender's retry watchdog.
+                String ackUid = event.getUID();
+                if (ackUid != null && !ackUid.trim().isEmpty()
+                        && btManager != null && btManager.isConnected()) {
+                    try {
+                        MeshCorePacket ackPkt = MeshCorePacket.createCotAck(ackUid.trim());
+                        byte[] ackBytes = ackPkt.encode();
+                        if (encryptionManager != null && encryptionManager.isEnabled()) {
+                            ackBytes = encryptionManager.encrypt(ackBytes);
+                        }
+                        if (ackBytes != null) {
+                            com.atakmaps.meshcore.plugin.ax25.Ax25Frame ackFrame =
+                                    com.atakmaps.meshcore.plugin.ax25.Ax25Frame
+                                            .createMeshCoreFrame(localCallsign, 0, ackBytes);
+                            btManager.sendKissFrame(ackFrame.encode());
+                            Log.d(TAG, "CoT ACK sent uid=" + ackUid.trim());
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "Failed to send CoT ACK uid=" + ackUid, e);
+                    }
                 }
             }
         } catch (Exception e) {
@@ -1459,10 +1525,40 @@ public class CotBridge {
      * Send a CoT event out over the radio link.
      * The CoT XML is gzipped and sent as an MeshCore packet.
      */
+    /** Extract a human-readable label from a CoT event: contact callsign if present, else type. */
+    private String extractCotCallsign(com.atakmap.coremap.cot.event.CotEvent event) {
+        if (event == null) {
+            return "item";
+        }
+        try {
+            com.atakmap.coremap.cot.event.CotDetail detail = event.getDetail();
+            if (detail != null) {
+                for (com.atakmap.coremap.cot.event.CotDetail child : detail.getChildren()) {
+                    if (child != null && "contact".equals(child.getElementName())) {
+                        String cs = child.getAttribute("callsign");
+                        if (cs != null && !cs.trim().isEmpty()) {
+                            return cs.trim();
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return event.getType() != null ? event.getType() : "item";
+    }
+
     /** Max compressed CoT size to send over RF. Larger items flood the channel. */
     private static final int MAX_COT_COMPRESSED_BYTES = 4096;
 
     public void sendCotOverRadio(CotEvent event) {
+        sendCotOverRadioInternal(event, true);
+    }
+
+    private void sendCotOverRadioNoRetry(CotEvent event) {
+        sendCotOverRadioInternal(event, false);
+    }
+
+    private void sendCotOverRadioInternal(CotEvent event, boolean registerRetry) {
         if (btManager == null || !btManager.isConnected()) {
             Log.w(TAG, "Not connected to radio — cannot send CoT");
             return;
@@ -1471,11 +1567,23 @@ public class CotBridge {
         com.atakmaps.meshcore.plugin.protocol.RfTxArbitrator.get().markOpenRlTxStart();
         try {
             String xml = event.toString();
-            byte[] compressed = CotBuilder.compressCot(xml);
-            if (compressed == null) {
+            byte[] full = CotBuilder.compressCot(xml);
+            if (full == null) {
                 Log.e(TAG, "Failed to compress CoT for radio");
                 return;
             }
+
+            // Try minified CoT (heavy detail children stripped). Only use it if it
+            // is strictly smaller — never-worse fallback to today's behavior.
+            String minXml = CotBuilder.minifyCotXml(event);
+            Log.d(TAG, "CoT minified XML:\n" + (minXml != null ? minXml : "(null — using full)"));
+            byte[] min = (minXml != null) ? CotBuilder.compressCot(minXml) : null;
+            byte[] compressed = (min != null && min.length < full.length) ? min : full;
+
+            Log.d(TAG, "CoT size: full=" + full.length
+                    + " min=" + (min == null ? -1 : min.length)
+                    + " used=" + compressed.length
+                    + " type=" + event.getType());
 
             if (compressed.length > MAX_COT_COMPRESSED_BYTES) {
                 Log.w(TAG, "CoT too large for RF (" + compressed.length + " bytes compressed"
@@ -1493,6 +1601,9 @@ public class CotBridge {
             List<MeshCorePacket> packets = PacketFragmenter.fragment(
                     MeshCorePacket.TYPE_COT, compressed);
 
+            String txFragStr = packets.size() + (packets.size() == 1 ? " fragment" : " fragments");
+            Log.d(TAG, "CoT sent over mesh: " + compressed.length + " bytes, " + txFragStr);
+
             for (MeshCorePacket packet : packets) {
                 byte[] packetBytes = packet.encode();
                 // Encrypt entire packet bytes if enabled
@@ -1508,10 +1619,67 @@ public class CotBridge {
                 byte[] ax25 = frame.encode();
                 btManager.sendKissFrame(ax25);
             }
+
+            // Register ACK watchdog — skip GeoChat CoT (b-t-f*) which uses chat retry.
+            if (registerRetry) {
+                String cotType = event.getType();
+                if (cotType == null || !cotType.startsWith("b-t-f")) {
+                    String uid = event.getUID();
+                    if (uid != null && !uid.trim().isEmpty()) {
+                        String trimUid = uid.trim();
+                        PendingOutboundCot pending = new PendingOutboundCot(trimUid, event);
+                        pendingOutboundCots.put(trimUid, pending);
+                        // Double-send: re-transmit once after a short delay so a brief RF
+                        // collision on the first attempt doesn't cause a silent drop.
+                        cotRetryExecutor.schedule(() -> {
+                            if (pendingOutboundCots.containsKey(trimUid)) {
+                                Log.d(TAG, "CoT double-send uid=" + trimUid);
+                                sendCotOverRadioNoRetry(pending.event);
+                            }
+                        }, COT_DOUBLE_SEND_DELAY_MS, TimeUnit.MILLISECONDS);
+                        scheduleCotRetryCheck(trimUid);
+                    }
+                }
+            }
         } catch (Exception e) {
             Log.e(TAG, "Error sending CoT over radio", e);
         } finally {
             com.atakmaps.meshcore.plugin.protocol.RfTxArbitrator.get().markOpenRlTxEnd();
+        }
+    }
+
+    private void scheduleCotRetryCheck(String cotUid) {
+        if (cotRetryExecutor.isShutdown()) return;
+        cotRetryExecutor.schedule(() -> onCotRetryTimer(cotUid),
+                COT_RETRY_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private void onCotRetryTimer(String cotUid) {
+        try {
+            PendingOutboundCot pending = pendingOutboundCots.get(cotUid);
+            if (pending == null) return; // ACK already received
+            if (pending.retryCount < COT_MAX_RETRIES) {
+                pending.retryCount++;
+                Log.d(TAG, "CoT retry " + pending.retryCount + "/" + COT_MAX_RETRIES
+                        + " uid=" + cotUid);
+                sendCotOverRadioNoRetry(pending.event);
+                scheduleCotRetryCheck(cotUid);
+            } else {
+                pendingOutboundCots.remove(cotUid);
+                Log.w(TAG, "CoT delivery gave up after " + pending.retryCount
+                        + " retries uid=" + cotUid);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error in CoT retry timer uid=" + cotUid, e);
+        }
+    }
+
+    public void handleCotAck(String cotUid) {
+        if (cotUid == null || cotUid.trim().isEmpty()) return;
+        PendingOutboundCot removed = pendingOutboundCots.remove(cotUid.trim());
+        if (removed != null) {
+            Log.d(TAG, "CoT ACK received uid=" + cotUid.trim()
+                    + " after " + removed.retryCount + " retries");
         }
     }
 
@@ -2486,6 +2654,8 @@ public class CotBridge {
             }
             outboundCommsLogger = null;
         }
+        cotRetryExecutor.shutdownNow();
+        pendingOutboundCots.clear();
         btechContactUids.clear();
         btechIdToUid.clear();
         saRelayLastSentByUid.clear();

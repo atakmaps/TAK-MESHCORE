@@ -93,6 +93,14 @@ public class PacketRouter {
      * Called by BtConnectionManager on the read thread.
      */
     public void routeIncoming(byte[] ax25Data) {
+        routeIncoming(ax25Data, 0);
+    }
+
+    /**
+     * Route an incoming AX.25 frame from the radio, carrying the MeshCore
+     * pathLen (number of repeater hops) for CoT display purposes.
+     */
+    public void routeIncoming(byte[] ax25Data, int pathLen) {
         Ax25Frame frame = Ax25Frame.decode(ax25Data);
         if (frame == null) {
             Log.w(TAG, "Failed to decode AX.25 frame");
@@ -128,7 +136,7 @@ public class PacketRouter {
                 // If decryption returns null, use raw (unencrypted packet)
             }
 
-            routeMeshCorePacket(srcCall, srcSsid, infoField);
+            routeMeshCorePacket(srcCall, srcSsid, infoField, pathLen);
             return;
         }
 
@@ -140,7 +148,7 @@ public class PacketRouter {
     /**
      * Route an MeshCore custom packet.
      */
-    private void routeMeshCorePacket(String callsign, int ssid, byte[] data) {
+    private void routeMeshCorePacket(String callsign, int ssid, byte[] data, int pathLen) {
         MeshCorePacket packet = MeshCorePacket.decode(data);
         if (packet == null) {
             Log.w(TAG, "Failed to decode MeshCore packet");
@@ -197,7 +205,7 @@ public class PacketRouter {
                 break;
 
             case MeshCorePacket.TYPE_COT:
-                cotBridge.injectCompressedCot(packet.getPayload());
+                cotBridge.injectCompressedCot(packet.getPayload(), pathLen);
                 break;
 
             case MeshCorePacket.TYPE_PING:
@@ -234,13 +242,20 @@ public class PacketRouter {
                 }
                 break;
 
+            case MeshCorePacket.TYPE_COT_ACK:
+                String ackedUid = MeshCorePacket.decodeCotAckUid(packet.getPayload());
+                if (ackedUid != null) {
+                    cotBridge.handleCotAck(ackedUid);
+                }
+                break;
+
             case MeshCorePacket.TYPE_COT_FRAGMENT:
                 byte[] reassembled = reassembler.addFragment(
                         packet.getPayload());
                 if (reassembled != null) {
                     Log.d(TAG, "Fragment reassembly complete: "
                             + reassembled.length + " bytes");
-                    cotBridge.injectCompressedCot(reassembled);
+                    cotBridge.injectCompressedCot(reassembled, pathLen);
                 }
                 break;
 

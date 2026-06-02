@@ -257,6 +257,57 @@ Toasts the sender with fragment/size info and the receiver with hop count.
 
 ---
 
+---
+
+## 8. CoT ACK/Retry System
+
+**Status:** ✅ Implemented in MeshcoreAtak — not in Darksteal
+
+**What it does:** CoT/waypoints are fire-and-forget over the mesh channel — if a fragment is lost the point silently fails. This adds app-layer ACK + automatic retransmit so every point eventually gets through.
+
+**Files changed:**
+
+### `protocol/MeshCorePacket.java`
+- Added `TYPE_COT_ACK = 0x08`
+- Added `createCotAck(String cotUid)` — UTF-8 UID payload up to 36 bytes
+- Added `decodeCotAckUid(byte[] payload)`
+
+### `protocol/PacketRouter.java`
+- Added `case TYPE_COT_ACK:` in `routeMeshCorePacket()` → `cotBridge.handleCotAck(ackedUid)`
+
+### `cot/CotBridge.java`
+- **Constants:**
+  ```java
+  private static final long COT_RETRY_INTERVAL_MS   = 15_000L;  // 15s
+  private static final int  COT_MAX_RETRIES          = 5;
+  private static final long COT_DOUBLE_SEND_DELAY_MS = 3_000L;  // immediate re-send
+  ```
+- **Inner class `PendingOutboundCot`:** `cotUid`, `event`, `retryCount`
+- **Fields:** `pendingOutboundCots: ConcurrentHashMap<String, PendingOutboundCot>`, `cotRetryExecutor` (single daemon thread `"MeshCore-CotRetry"`)
+- **`sendCotOverRadio` split into:**
+  - `sendCotOverRadioInternal(event, registerRetry)` — shared core
+  - `sendCotOverRadioNoRetry(event)` — used by retry timer (no re-registration)
+- **After successful send (if `registerRetry=true` and type ≠ `b-t-f*`):**
+  - Registers `PendingOutboundCot` in map
+  - Schedules double-send at T+3s (cancels if ACK arrives first)
+  - Schedules `scheduleCotRetryCheck` at T+15s
+- **`onCotRetryTimer(cotUid)`:** retransmit up to 5 times, then `Log.w` and give up
+- **`handleCotAck(cotUid)`:** removes from pending map, cancels watchdog
+- **`injectCompressedCot` sends ACK back** after successful CoT parse:
+  ```java
+  MeshCorePacket ackPkt = MeshCorePacket.createCotAck(ackUid);
+  btManager.sendKissFrame(Ax25Frame.createMeshCoreFrame(...).encode());
+  ```
+- **`dispose()`:** `cotRetryExecutor.shutdownNow()` + `pendingOutboundCots.clear()`
+
+**Darksteal class name map:**
+- `BtConnectionManager` → `MeshBtConnectionManager` (use `meshBtManager` field in `UVProDropDownReceiver`)
+- `PacketRouter` → `PacketRouter` (same)
+- `CotBridge` → `CotBridge` (same)
+- `MeshCorePacket` → `MeshCorePacket` (same)
+
+---
+
 ## Migration Priority
 
 | Item | Port to Darksteal? | Notes |
@@ -266,7 +317,8 @@ Toasts the sender with fragment/size info and the receiver with hop count.
 | 3. Repurposed "Use GPS for Position" | ⏸ Assess | Tied to item 2 — assess with it |
 | 4. Augment GPS gating | ⏸ Assess | Tied to item 2 |
 | 5. CoT Minification | ✅ Yes — HIGH PRIORITY | Pure reliability win; identical code, no arch differences |
-| 6. CoT Hop Count + Toast | ✅ Yes — HIGH PRIORITY | Pure reliability/visibility win; identical threading pattern |
+| 6. CoT Hop Count threading | ✅ Yes — HIGH PRIORITY | pathLen threaded through BLE→Router→CotBridge; identical pattern |
+| 8. CoT ACK/retry system | ✅ Yes — HIGH PRIORITY | TYPE_COT_ACK=0x08; watchdog + 15s×5 retries; immediate double-send |
 | 7. Clear All Mesh Contacts | ✅ Already done | No action needed |
 
 ## Notes for Migration

@@ -139,6 +139,10 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         }
         packetRouter = new PacketRouter(cotBridge, chatBridge, contactTracker);
         encryptionManager = new EncryptionManager();
+        if (com.atakmaps.meshcore.plugin.ui.SettingsFragment.isEncryptionEnabled(context)) {
+            encryptionManager.setSharedSecret(
+                    com.atakmaps.meshcore.plugin.ui.SettingsFragment.getEncryptionPassphrase(context));
+        }
         cotBridge.setEncryptionManager(encryptionManager);
         chatBridge.setEncryptionManager(encryptionManager);
         packetRouter.setEncryptionManager(encryptionManager);

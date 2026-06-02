@@ -1903,6 +1903,7 @@ public class BtConnectionManager {
             message = extractContactText(pkt, true);
         }
         if (message != null) {
+            int envPathLen = 0;
             if (t == RESP_CHANNEL_MSG || t == RESP_CHANNEL_MSG_V3) {
                 ChannelMessageMeta meta = extractChannelMessageMeta(pkt, t == RESP_CHANNEL_MSG_V3);
                 String statusText = extractChannelStatusText(message);
@@ -1915,11 +1916,12 @@ public class BtConnectionManager {
                         meta.snrQuarterDb,
                         meta.pathLen,
                         meta.senderTimestampSec));
+                envPathLen = meta.pathLen != null ? meta.pathLen : 0;
             }
             String routed = extractRoutableEnvelope(message);
             if (routed != null) {
                 Log.d(TAG, "RX mesh env len=" + routed.length());
-                handleMeshMessage(routed);
+                handleMeshMessage(routed, envPathLen);
             } else if (t == RESP_CONTACT_MSG || t == RESP_CONTACT_MSG_V3) {
                 // Native pubkey-to-pubkey DM (plain text, no UVAX1|/__UVGW__ envelope).
                 // Route it into ATAK GeoChat keyed by the sender's pubkey prefix.
@@ -1965,7 +1967,7 @@ public class BtConnectionManager {
         String routed = extractRoutableEnvelope(text);
         if (routed != null) {
             Log.d(TAG, "RX mesh datagram env len=" + routed.length());
-            handleMeshMessage(routed);
+            handleMeshMessage(routed, 0);
         }
     }
 
@@ -2533,6 +2535,10 @@ public class BtConnectionManager {
     }
 
     private void handleMeshMessage(String msg) {
+        handleMeshMessage(msg, 0);
+    }
+
+    private void handleMeshMessage(String msg, int pathLen) {
         if (msg == null || !msg.startsWith(ENV_PREFIX)) return;
         String[] parts = msg.split("\\|", 5);
         if (parts.length != 5) return;
@@ -2581,7 +2587,7 @@ public class BtConnectionManager {
                 }
             }
             Log.d(TAG, "Routing reassembled AX.25 bytes=" + ax25.length);
-            packetRouter.routeIncoming(ax25);
+            packetRouter.routeIncoming(ax25, pathLen);
         } catch (Exception ignored) {
         }
     }

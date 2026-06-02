@@ -40,6 +40,7 @@ public class MeshCorePacket {
     public static final byte TYPE_ACK = 0x05;
     public static final byte TYPE_COT_FRAGMENT = 0x06;
     public static final byte TYPE_NET_SLOT_CONFIG = 0x07;
+    public static final byte TYPE_COT_ACK = 0x08;
 
     /** GeoChat delivered receipt (CoT type {@code b-t-f-d}). */
     public static final byte ACK_KIND_DELIVERED = 1;
@@ -290,6 +291,24 @@ public class MeshCorePacket {
             return null;
         }
         return a;
+    }
+
+    /**
+     * Build a COT_ACK packet whose payload is the full CoT UID UTF-8 (up to 36 bytes).
+     */
+    public static MeshCorePacket createCotAck(String cotUid) {
+        byte[] uidBytes = cotUid.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] payload = new byte[Math.min(uidBytes.length, 36)];
+        System.arraycopy(uidBytes, 0, payload, 0, payload.length);
+        return new MeshCorePacket(TYPE_COT_ACK, payload);
+    }
+
+    /**
+     * Decode the CoT UID from a COT_ACK payload (may be truncated to 36 chars).
+     */
+    public static String decodeCotAckUid(byte[] payload) {
+        if (payload == null || payload.length == 0) return null;
+        return new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
     }
 
     /**

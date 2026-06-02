@@ -167,6 +167,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnSmartBeaconSettings;
     private Button btnMeshSendAdvert;
     private Switch switchSmartBeacon;
+    private Switch switchMeshEnableGpsHardware;
     private Switch switchMeshEnableGps;
     private Button btnUpdateGpsFromMeshcore;
     private Switch switchMeshShowRepeaters;
@@ -184,6 +185,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnClearMeshContacts;
     private Button btnMeshNodeSettings;
     private Button btnMeshcoreSetNodePositionMap;
+    private Switch switchEncryption;
+    private View passphraseRow;
+    private EditText editPassphrase;
+    private Button btnSetPassphrase;
+    private TextView encryptionStatusText;
 
     private boolean meshGpsEnableRequested = false;
     private Boolean meshSendPositionWithAdvertState = null;
@@ -298,11 +304,23 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 @Override
                 public void onMeshGpsStateChanged(boolean enabled) {
                     meshGpsEnabledState = enabled;
+                    // Hardware on => node drives advert position, so node GPS is the source and the
+                    // other (mutually-exclusive) sources are cleared. Hardware off => clear source.
                     meshGpsEnableRequested = enabled;
                     getMapView().post(() -> {
                         setMeshUseGpsForPositionPreference(enabled);
+                        if (enabled) {
+                            setMeshUseCallsignLocationPreference(false);
+                            if (switchMeshUseCallsignLocation != null) {
+                                switchMeshUseCallsignLocation.setChecked(false);
+                            }
+                            setMeshUseCustomNodePositionPreference(false);
+                            if (switchMeshUseCustomNodePosition != null) {
+                                switchMeshUseCustomNodePosition.setChecked(false);
+                            }
+                        }
                         updateMeshGpsControlsUi();
-                        appendLog("Use Meschore GPS for position "
+                        appendLog("MeshCore GPS hardware "
                                 + (enabled ? "enabled" : "disabled"));
                         if (enabled) {
                             removeMeshNodeMapPositionMarker(true);
@@ -547,6 +565,14 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         meshGpsEnabledState = btManager.getMeshGpsEnabled();
         updateMeshGpsControlsUi();
+        boolean encOn = SettingsFragment.isEncryptionEnabled(initCtx);
+        if (switchEncryption != null) {
+            switchEncryption.setChecked(encOn);
+        }
+        if (passphraseRow != null) {
+            passphraseRow.setVisibility(encOn ? View.VISIBLE : View.GONE);
+        }
+        updateEncryptionStatus();
         scheduleMeshCallsignPositionSync();
         scheduleMeshGpsAugmentTick();
         updateMeshChannelButtonLabel();
@@ -578,6 +604,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnSmartBeaconSettings = rootView.findViewById(getId("btn_manage_smart_beacon_settings"));
         btnMeshSendAdvert = rootView.findViewById(getId("btn_meshcore_send_advert"));
         switchSmartBeacon = rootView.findViewById(getId("switch_smart_beacon"));
+        switchMeshEnableGpsHardware =
+                rootView.findViewById(getId("switch_mesh_enable_gps_hardware"));
         switchMeshEnableGps = rootView.findViewById(getId("switch_mesh_enable_gps"));
         btnUpdateGpsFromMeshcore = rootView.findViewById(getId("btn_update_gps_from_meshcore"));
         switchAugmentGpsFromMeshcore =
@@ -603,6 +631,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnMeshNodeSettings = rootView.findViewById(getId("btn_mesh_node_settings"));
         btnMeshcoreSetNodePositionMap =
                 rootView.findViewById(getId("btn_meshcore_set_node_position_map"));
+        switchEncryption = rootView.findViewById(getId("switch_encryption"));
+        passphraseRow = rootView.findViewById(getId("passphrase_row"));
+        editPassphrase = rootView.findViewById(getId("edit_passphrase"));
+        btnSetPassphrase = rootView.findViewById(getId("btn_set_passphrase"));
+        encryptionStatusText = rootView.findViewById(getId("text_encryption_status"));
 
         if (meshChannelLogText != null) {
             meshChannelLogText.setMovementMethod(new ScrollingMovementMethod());
@@ -679,6 +712,19 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 } else {
                     appendLog("Failed to request self advert");
                 }
+            });
+        }
+        if (switchMeshEnableGpsHardware != null) {
+            switchMeshEnableGpsHardware.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (suppressMeshGpsSwitchCallbacks || !buttonView.isPressed()) {
+                    return;
+                }
+                if (!btManager.isConnected()) {
+                    appendLog("Connect to MeshCore before changing GPS state");
+                    updateMeshGpsControlsUi();
+                    return;
+                }
+                onMeshEnableGpsHardwareChanged(isChecked);
             });
         }
         if (switchMeshEnableGps != null) {
@@ -849,6 +895,72 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (btnMeshcoreChannels != null) {
             btnMeshcoreChannels.setOnClickListener(v -> onMeshcoreChannelsClicked());
+        }
+        if (switchEncryption != null) {
+            switchEncryption.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                SharedPreferences prefs = PreferenceManager
+                        .getDefaultSharedPreferences(getMapView().getContext());
+                prefs.edit().putBoolean(SettingsFragment.PREF_ENCRYPTION_ENABLED, isChecked).apply();
+                if (passphraseRow != null) {
+                    passphraseRow.setVisibility(isChecked ? View.VISIBLE : View.GONE);
+                }
+                if (!isChecked && encryptionManager != null) {
+                    encryptionManager.setSharedSecret(null);
+                    updateEncryptionStatus();
+                    appendLog("Encryption disabled");
+                } else if (isChecked) {
+                    String existing = SettingsFragment.getEncryptionPassphrase(
+                            getMapView().getContext());
+                    if (existing != null && !existing.isEmpty() && encryptionManager != null) {
+                        encryptionManager.setSharedSecret(existing);
+                        updateEncryptionStatus();
+                        appendLog("Encryption enabled (AES-256-GCM)");
+                    } else {
+                        updateEncryptionStatus();
+                        appendLog("Configure shared secret to enable encryption");
+                    }
+                }
+            });
+        }
+        if (btnSetPassphrase != null) {
+            btnSetPassphrase.setOnClickListener(v -> {
+                if (editPassphrase == null) {
+                    return;
+                }
+                String pass = editPassphrase.getText().toString().trim();
+                if (pass.isEmpty()) {
+                    appendLog("Shared secret cannot be empty");
+                    return;
+                }
+                SharedPreferences prefs = PreferenceManager
+                        .getDefaultSharedPreferences(getMapView().getContext());
+                prefs.edit().putString(SettingsFragment.PREF_ENCRYPTION_PASSPHRASE, pass).apply();
+                if (encryptionManager != null) {
+                    encryptionManager.setSharedSecret(pass);
+                }
+                editPassphrase.setText("");
+                updateEncryptionStatus();
+                appendLog("Shared secret saved — encryption active");
+            });
+        }
+    }
+
+    private void updateEncryptionStatus() {
+        if (encryptionStatusText == null) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        boolean encOn = SettingsFragment.isEncryptionEnabled(ctx);
+        String pass = SettingsFragment.getEncryptionPassphrase(ctx);
+        if (encOn && pass != null && !pass.isEmpty()) {
+            encryptionStatusText.setText("\u2705 AES-256-GCM active");
+            encryptionStatusText.setTextColor(0xFF4CAF50);
+        } else if (encOn) {
+            encryptionStatusText.setText("\u26A0 Enter shared secret to activate");
+            encryptionStatusText.setTextColor(0xFFFF9800);
+        } else {
+            encryptionStatusText.setText("All radios must use the same shared secret");
+            encryptionStatusText.setTextColor(0xFF888888);
         }
     }
 
@@ -1711,14 +1823,30 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         boolean meshConnected = btManager != null && btManager.isConnected();
         boolean advertPositionEnabled = meshSendPositionWithAdvertRequested
                 || Boolean.TRUE.equals(meshSendPositionWithAdvertState);
+        boolean meshGpsHardwareOn = Boolean.TRUE.equals(meshGpsEnabledState);
+        if (switchMeshEnableGpsHardware != null) {
+            suppressMeshGpsSwitchCallbacks = true;
+            try {
+                // "GPS installed" cannot be detected over the companion protocol, so the hardware
+                // enable toggle is available whenever connected (never greyed out for "no GPS").
+                switchMeshEnableGpsHardware.setEnabled(meshConnected);
+                switchMeshEnableGpsHardware.setAlpha(meshConnected ? 1f : 0.45f);
+                View hwRow = (View) switchMeshEnableGpsHardware.getParent();
+                if (hwRow != null) {
+                    hwRow.setAlpha(meshConnected ? 1f : 0.55f);
+                }
+                switchMeshEnableGpsHardware.setChecked(meshGpsHardwareOn);
+            } finally {
+                suppressMeshGpsSwitchCallbacks = false;
+            }
+        }
         if (switchMeshEnableGps != null) {
             suppressMeshGpsSwitchCallbacks = true;
             try {
-                // Node GPS toggle is only meaningful once the node reports a GPS state
-                // (not all nodes have GPS installed).
-                boolean gpsCapabilityKnown = meshGpsEnabledState != null;
+                // "Use MeshCore GPS for Position" selects the node GPS fix as the advert source.
+                // It is only meaningful (and only selectable) once the GPS hardware is enabled.
                 boolean meshGpsToggleEnabled = meshConnected
-                        && gpsCapabilityKnown
+                        && meshGpsHardwareOn
                         && advertPositionEnabled;
                 switchMeshEnableGps.setEnabled(meshGpsToggleEnabled);
                 switchMeshEnableGps.setAlpha(meshGpsToggleEnabled ? 1f : 0.45f);
@@ -1726,8 +1854,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 if (meshGpsRow != null) {
                     meshGpsRow.setAlpha(meshGpsToggleEnabled ? 1f : 0.55f);
                 }
-                switchMeshEnableGps.setChecked(
-                        meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState));
+                switchMeshEnableGps.setChecked(meshGpsHardwareOn && meshGpsEnableRequested);
             } finally {
                 suppressMeshGpsSwitchCallbacks = false;
             }
@@ -1764,8 +1891,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 customNodeRow.setAlpha(customNodeToggleEnabled ? 1f : 0.55f);
             }
         }
-        boolean meshGpsOn = meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState);
-        boolean gpsDrivenActionsEnabled = meshConnected && meshGpsOn;
+        boolean gpsDrivenActionsEnabled = meshConnected && meshGpsHardwareOn;
         if (btnUpdateGpsFromMeshcore != null) {
             btnUpdateGpsFromMeshcore.setVisibility(View.VISIBLE);
             btnUpdateGpsFromMeshcore.setEnabled(gpsDrivenActionsEnabled);
@@ -2766,17 +2892,60 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         getMapView().post(this::updatePacketCount);
     }
 
+    /**
+     * "Use MeshCore GPS for Position" — selects the node GPS fix as the advert position source.
+     * This no longer toggles GPS hardware (see {@link #onMeshEnableGpsHardwareChanged}); it only
+     * picks the source and is only operable while the GPS hardware is enabled.
+     */
     private void onMeshGpsToggleChanged(boolean isChecked) {
         if (btManager == null || !btManager.isConnected()) {
             return;
         }
-        if (meshGpsEnabledState == null) {
+        if (!Boolean.TRUE.equals(meshGpsEnabledState)) {
+            // Source selection requires the GPS hardware to be enabled first.
             updateMeshGpsControlsUi();
             return;
         }
         meshGpsEnableRequested = isChecked;
         setMeshUseGpsForPositionPreference(isChecked);
+        updateMeshGpsControlsUi();
+        appendLog(isChecked
+                ? "Node advert position source: MeshCore GPS."
+                : "Node advert position source: cleared.");
+        if (isChecked) {
+            removeMeshNodeMapPositionMarker(true);
+        }
+        scheduleMeshCallsignPositionSync();
         if (!isChecked) {
+            pushPhoneLocationToMeshNodeIfNeeded(false);
+        }
+    }
+
+    /**
+     * "Enable MeshCore GPS" — turns the node's GPS hardware on/off. When the hardware is enabled
+     * the node drives its own advert position from GPS, so node GPS becomes the advert source and
+     * the other (mutually-exclusive) sources are cleared.
+     */
+    private void onMeshEnableGpsHardwareChanged(boolean isChecked) {
+        if (btManager == null || !btManager.isConnected()) {
+            return;
+        }
+        appendLog("Setting MeshCore GPS " + (isChecked ? "ON..." : "OFF..."));
+        if (isChecked) {
+            meshGpsEnableRequested = true;
+            setMeshUseGpsForPositionPreference(true);
+            setMeshUseCallsignLocationPreference(false);
+            if (switchMeshUseCallsignLocation != null) {
+                switchMeshUseCallsignLocation.setChecked(false);
+            }
+            setMeshUseCustomNodePositionPreference(false);
+            if (switchMeshUseCustomNodePosition != null) {
+                switchMeshUseCustomNodePosition.setChecked(false);
+            }
+            removeMeshNodeMapPositionMarker(true);
+        } else {
+            meshGpsEnableRequested = false;
+            setMeshUseGpsForPositionPreference(false);
             meshGpsEnabledState = Boolean.FALSE;
             setAugmentMeshPreference(false);
             if (switchAugmentGpsFromMeshcore != null) {
@@ -2784,10 +2953,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             }
         }
         updateMeshGpsControlsUi();
-        appendLog("Setting Use Meschore GPS for position " + (isChecked ? "ON..." : "OFF..."));
-        if (isChecked) {
-            removeMeshNodeMapPositionMarker(true);
-        }
         scheduleMeshCallsignPositionSync();
         btManager.setMeshGpsEnabled(isChecked);
         btManager.queryMeshGpsEnabled();
@@ -2804,6 +2969,14 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             suppressMeshGpsSwitchCallbacks = true;
             try {
                 switchMeshEnableGps.setChecked(false);
+            } finally {
+                suppressMeshGpsSwitchCallbacks = false;
+            }
+        }
+        if (switchMeshEnableGpsHardware != null) {
+            suppressMeshGpsSwitchCallbacks = true;
+            try {
+                switchMeshEnableGpsHardware.setChecked(false);
             } finally {
                 suppressMeshGpsSwitchCallbacks = false;
             }
@@ -2836,7 +3009,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             }
             return false;
         }
-        boolean nodeGpsOn = meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState);
+        boolean nodeGpsOn = Boolean.TRUE.equals(meshGpsEnabledState);
         if (nodeGpsOn) {
             if (verboseSkipLog) {
                 appendLog("Advert position source: node GPS.");
@@ -2892,7 +3065,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 && isMeshUseCallsignLocationPreferenceEnabled(ctx)
                 && (meshSendPositionWithAdvertRequested
                 || Boolean.TRUE.equals(meshSendPositionWithAdvertState))
-                && !(meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState));
+                && !Boolean.TRUE.equals(meshGpsEnabledState);
         if (shouldRun) {
             mv.postDelayed(meshCallsignPositionSyncRunnable, MESH_CALLSIGN_POSITION_PUSH_INTERVAL_MS);
         }
@@ -2925,7 +3098,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         appendLog(String.format(Locale.US, "Saved node map position: %.5f, %.5f",
                 gp.getLatitude(), gp.getLongitude()));
         if (!isMeshUseCallsignLocationPreferenceEnabled(ctx)
-                && !(meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState))) {
+                && !Boolean.TRUE.equals(meshGpsEnabledState)) {
             pushPhoneLocationToMeshNodeIfNeeded(true);
         }
         try {
