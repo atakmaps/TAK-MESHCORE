@@ -35,7 +35,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:background="#FF2D2D2D"
+            android:background="@drawable/bg_meshcore_connection_section_red"
             android:padding="12dp"
             android:layout_marginBottom="8dp">
 
@@ -141,7 +141,7 @@
                     android:layout_weight="1"
                     android:text="SCAN &amp; CONNECT"
                     android:layout_marginEnd="4dp"
-                    android:backgroundTint="#FF00BCD4" />
+                    android:background="@drawable/bg_meshcore_connection_button_red" />
 
                 <Button
                     android:id="@+id/btn_disconnect"
@@ -151,7 +151,7 @@
                     android:layout_weight="1"
                     android:text="DISCONNECT"
                     android:enabled="false"
-                    android:backgroundTint="#FFF44336" />
+                    android:background="@drawable/bg_meshcore_connection_button_red" />
             </LinearLayout>
 
             <LinearLayout
@@ -170,10 +170,9 @@
                     android:textSize="13sp" />
 
                 <Switch
-                    android:id="@+id/switch_mesh_enable_gps"
+                    android:id="@+id/switch_mesh_enable_gps_connection"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:enabled="false" />
+                    android:layout_height="wrap_content" />
             </LinearLayout>
 
             <LinearLayout
@@ -199,6 +198,15 @@
                     android:enabled="false" />
             </LinearLayout>
 
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="ATAK GPS will be updated every two minutes"
+                android:textColor="#FF888888"
+                android:textSize="11sp"
+                android:paddingTop="4dp"
+                android:paddingBottom="2dp" />
+
             <Button
                 android:id="@+id/btn_update_gps_from_meshcore"
                 style="@style/MeshcorePillButton.Beacon"
@@ -208,7 +216,7 @@
                 android:text="Update GPS from MeshCore"
                 android:enabled="false"
                 android:visibility="gone"
-                android:backgroundTint="#FF455A64" />
+                android:background="@drawable/bg_meshcore_connection_button_red" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -370,7 +378,7 @@
                     android:layout_height="wrap_content"
                     android:text="SET"
                     android:textSize="11sp"
-                    android:backgroundTint="#FFFF9800"
+                    android:background="@drawable/bg_meshcore_connection_button_red"
                     android:minWidth="60dp" />
             </LinearLayout>
 
@@ -391,7 +399,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:background="#FF2D2D2D"
+            android:background="@drawable/bg_meshcore_beacon_section_blue"
             android:padding="12dp"
             android:layout_marginBottom="8dp">
 
@@ -411,7 +419,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="4dp"
                 android:text="Send Beacon"
-                android:backgroundTint="#FF455A64" />
+                android:background="@drawable/bg_meshcore_beacon_button_blue" />
 
             <Button
                 android:id="@+id/btn_send_ping"
@@ -420,7 +428,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="8dp"
                 android:text="Send Ping"
-                android:backgroundTint="#FF455A64" />
+                android:background="@drawable/bg_meshcore_beacon_button_blue" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -459,7 +467,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:text="Smart Beacon Settings"
-                android:backgroundTint="#FF455A64" />
+                android:background="@drawable/bg_meshcore_beacon_button_blue" />
 
             <LinearLayout
                 android:id="@+id/row_beacon_interval"
@@ -495,7 +503,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:text="Beacon Settings"
-                android:backgroundTint="#FF455A64" />
+                android:background="@drawable/bg_meshcore_beacon_button_blue" />
         </LinearLayout>
 
         <!-- ==================== MESHCORE ==================== -->
@@ -503,7 +511,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:background="#FF2D2D2D"
+            android:background="@drawable/bg_meshcore_section_yellow"
             android:padding="12dp"
             android:layout_marginBottom="8dp">
 
@@ -557,20 +565,13 @@
                     android:layout_height="wrap_content" />
             </LinearLayout>
 
-            <Button
-                android:id="@+id/btn_meshcore_send_advert"
-                style="@style/MeshcorePillButton.Beacon"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Send Advert"
-                android:backgroundTint="#FF455A64" />
-
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:layout_marginTop="8dp">
+                android:layout_marginTop="8dp"
+                android:paddingBottom="6dp">
 
                 <TextView
                     android:layout_width="0dp"
@@ -598,12 +599,55 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Use UNKNOWN location for position"
+                    android:text="Use UNKNOWN Location for Position"
                     android:textColor="#FFFFFFFF"
                     android:textSize="13sp" />
 
                 <Switch
                     android:id="@+id/switch_mesh_use_callsign_location"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingBottom="6dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Use MeshCore GPS for Position"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="13sp" />
+
+                <Switch
+                    android:id="@+id/switch_mesh_enable_gps"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:enabled="false" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingBottom="6dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Use Custom Node Position"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="13sp" />
+
+                <Switch
+                    android:id="@+id/switch_mesh_use_custom_node_position"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content" />
             </LinearLayout>
@@ -615,7 +659,25 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:text="Set Node Position on Map"
-                android:backgroundTint="#FF455A64" />
+                android:background="@drawable/bg_meshcore_button_yellow" />
+
+            <Button
+                android:id="@+id/btn_meshcore_send_advert"
+                style="@style/MeshcorePillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Send Advert"
+                android:background="@drawable/bg_meshcore_button_yellow" />
+
+            <Button
+                android:id="@+id/btn_clear_mesh_contacts"
+                style="@style/MeshcorePillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Clear All Mesh Contacts"
+                android:background="@drawable/bg_meshcore_button_yellow" />
 
             <Button
                 android:id="@+id/btn_meshcore_channels"
@@ -624,7 +686,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:text="Channels"
-                android:backgroundTint="#FF455A64" />
+                android:background="@drawable/bg_meshcore_button_yellow" />
 
             <TextView
                 android:id="@+id/text_mesh_channel_log"
@@ -671,7 +733,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="4dp"
                     android:text="Send"
-                    android:backgroundTint="#FF455A64" />
+                    android:background="@drawable/bg_meshcore_button_yellow" />
             </LinearLayout>
         </LinearLayout>
 
@@ -693,14 +755,6 @@
                 android:textStyle="bold"
                 android:paddingBottom="4dp" />
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Plugin settings: tap the button below. Full ATAK list: Settings → Tool Preferences → MeshCore Settings."
-                android:textColor="#FF888888"
-                android:textSize="11sp"
-                android:paddingBottom="6dp" />
-
             <Button
                 android:id="@+id/btn_settings"
                 style="@style/MeshcorePillButton.Beacon"
@@ -717,15 +771,6 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="6dp"
                 android:text="Node Settings"
-                android:backgroundTint="#FF455A64" />
-
-            <Button
-                android:id="@+id/btn_clear_mesh_contacts"
-                style="@style/MeshcorePillButton.Beacon"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="6dp"
-                android:text="Clear All Mesh Contacts"
                 android:backgroundTint="#FF455A64" />
 
         </LinearLayout>

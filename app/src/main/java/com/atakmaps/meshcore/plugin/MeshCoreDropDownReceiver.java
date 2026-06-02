@@ -97,6 +97,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private static final String TAG = "MeshCore.UI";
     private static final int MAX_LOG_LINES = 50;
     private static final int COLOR_PILL_BUTTON_PRIMARY = 0xFF455A64;
+    private static final int COLOR_CONNECTION_STROKE_RED = 0xFFF44336;
     private static final int PILL_CORNER_RADIUS_DP = 20;
     private static final int EDIT_SELECTION_STROKE_DP = 3;
     private static final String PREF_MESH_CHANNEL_HISTORY = "meshcore_mesh_channel_history_v1";
@@ -110,6 +111,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             "meshcore_mesh_use_gps_for_position";
     private static final String PREF_MESH_USE_CALLSIGN_LOCATION_FOR_POSITION =
             "meshcore_mesh_use_callsign_location_for_position";
+    private static final String PREF_MESH_USE_CUSTOM_NODE_POSITION =
+            "meshcore_mesh_use_custom_node_position";
     private static final String PREF_MESH_MAP_SET_POSITION_LAT =
             "meshcore_mesh_map_set_position_lat";
     private static final String PREF_MESH_MAP_SET_POSITION_LON =
@@ -176,6 +179,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnMeshChannelSend;
     private Switch switchMeshSendPositionWithAdvert;
     private Switch switchMeshUseCallsignLocation;
+    private Switch switchMeshUseCustomNodePosition;
     private TextView textMeshUseCallsignLocation;
     private Button btnClearMeshContacts;
     private Button btnMeshNodeSettings;
@@ -532,6 +536,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 switchMeshUseCallsignLocation.setChecked(
                         isMeshUseCallsignLocationPreferenceEnabled(initCtx));
             }
+            if (switchMeshUseCustomNodePosition != null) {
+                switchMeshUseCustomNodePosition.setChecked(
+                        isMeshUseCustomNodePositionPreferenceEnabled(initCtx));
+            }
             if (switchAugmentGpsFromMeshcore != null) {
                 switchAugmentGpsFromMeshcore.setChecked(isAugmentMeshPreferenceEnabled(initCtx));
             }
@@ -587,6 +595,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 rootView.findViewById(getId("switch_mesh_send_position_with_advert"));
         switchMeshUseCallsignLocation =
                 rootView.findViewById(getId("switch_mesh_use_callsign_location"));
+        switchMeshUseCustomNodePosition =
+                rootView.findViewById(getId("switch_mesh_use_custom_node_position"));
         textMeshUseCallsignLocation =
                 rootView.findViewById(getId("text_mesh_use_callsign_location"));
         btnClearMeshContacts = rootView.findViewById(getId("btn_clear_mesh_contacts"));
@@ -676,10 +686,31 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 if (suppressMeshGpsSwitchCallbacks || !buttonView.isPressed()) {
                     return;
                 }
+                if (!isChecked
+                        && !isMeshUseCallsignLocationPreferenceEnabled(getMapView().getContext())
+                        && !isMeshUseCustomNodePositionPreferenceEnabled(getMapView().getContext())) {
+                    suppressMeshGpsSwitchCallbacks = true;
+                    try {
+                        switchMeshEnableGps.setChecked(true);
+                    } finally {
+                        suppressMeshGpsSwitchCallbacks = false;
+                    }
+                    return;
+                }
                 if (!btManager.isConnected()) {
                     appendLog("Connect to MeshCore before changing GPS state");
                     updateMeshGpsControlsUi();
                     return;
+                }
+                if (isChecked) {
+                    setMeshUseCallsignLocationPreference(false);
+                    if (switchMeshUseCallsignLocation != null) {
+                        switchMeshUseCallsignLocation.setChecked(false);
+                    }
+                    setMeshUseCustomNodePositionPreference(false);
+                    if (switchMeshUseCustomNodePosition != null) {
+                        switchMeshUseCustomNodePosition.setChecked(false);
+                    }
                 }
                 onMeshGpsToggleChanged(isChecked);
             });
@@ -713,6 +744,19 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 if (!buttonView.isPressed()) {
                     return;
                 }
+                if (!isChecked
+                        && !getMeshUseGpsForPositionPreference(getMapView().getContext())
+                        && !isMeshUseCustomNodePositionPreferenceEnabled(getMapView().getContext())) {
+                    switchMeshUseCallsignLocation.setChecked(true);
+                    return;
+                }
+                if (isChecked) {
+                    forceDisableMeshGpsPositionSource();
+                    setMeshUseCustomNodePositionPreference(false);
+                    if (switchMeshUseCustomNodePosition != null) {
+                        switchMeshUseCustomNodePosition.setChecked(false);
+                    }
+                }
                 setMeshUseCallsignLocationPreference(isChecked);
                 appendLog(isChecked
                         ? "Node advert position source: ATAK callsign location (dynamic)."
@@ -724,6 +768,28 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 if (isChecked) {
                     pushPhoneLocationToMeshNodeIfNeeded(true);
                 }
+            });
+        }
+        if (switchMeshUseCustomNodePosition != null) {
+            switchMeshUseCustomNodePosition.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (!buttonView.isPressed()) {
+                    return;
+                }
+                if (!isChecked
+                        && !getMeshUseGpsForPositionPreference(getMapView().getContext())
+                        && !isMeshUseCallsignLocationPreferenceEnabled(getMapView().getContext())) {
+                    switchMeshUseCustomNodePosition.setChecked(true);
+                    return;
+                }
+                if (isChecked) {
+                    forceDisableMeshGpsPositionSource();
+                    setMeshUseCallsignLocationPreference(false);
+                    if (switchMeshUseCallsignLocation != null) {
+                        switchMeshUseCallsignLocation.setChecked(false);
+                    }
+                }
+                setMeshUseCustomNodePositionPreference(isChecked);
+                updateMeshGpsControlsUi();
             });
         }
         if (btnUpdateGpsFromMeshcore != null) {
@@ -1643,18 +1709,25 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
     private void updateMeshGpsControlsUi() {
         boolean meshConnected = btManager != null && btManager.isConnected();
+        boolean advertPositionEnabled = meshSendPositionWithAdvertRequested
+                || Boolean.TRUE.equals(meshSendPositionWithAdvertState);
         if (switchMeshEnableGps != null) {
             suppressMeshGpsSwitchCallbacks = true;
             try {
                 // Node GPS toggle is only meaningful once the node reports a GPS state
                 // (not all nodes have GPS installed).
                 boolean gpsCapabilityKnown = meshGpsEnabledState != null;
-                switchMeshEnableGps.setEnabled(meshConnected && gpsCapabilityKnown);
-                switchMeshEnableGps.setAlpha((meshConnected && gpsCapabilityKnown) ? 1f : 0.45f);
+                boolean meshGpsToggleEnabled = meshConnected
+                        && gpsCapabilityKnown
+                        && advertPositionEnabled;
+                switchMeshEnableGps.setEnabled(meshGpsToggleEnabled);
+                switchMeshEnableGps.setAlpha(meshGpsToggleEnabled ? 1f : 0.45f);
+                View meshGpsRow = (View) switchMeshEnableGps.getParent();
+                if (meshGpsRow != null) {
+                    meshGpsRow.setAlpha(meshGpsToggleEnabled ? 1f : 0.55f);
+                }
                 switchMeshEnableGps.setChecked(
-                        gpsCapabilityKnown
-                                && (meshGpsEnableRequested
-                                || Boolean.TRUE.equals(meshGpsEnabledState)));
+                        meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState));
             } finally {
                 suppressMeshGpsSwitchCallbacks = false;
             }
@@ -1671,7 +1744,25 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             }
         }
         if (switchMeshUseCallsignLocation != null) {
-            switchMeshUseCallsignLocation.setEnabled(meshConnected);
+            boolean callsignToggleEnabled = meshConnected && advertPositionEnabled;
+            switchMeshUseCallsignLocation.setEnabled(callsignToggleEnabled);
+            switchMeshUseCallsignLocation.setAlpha(callsignToggleEnabled ? 1f : 0.45f);
+            View callsignRow = (View) switchMeshUseCallsignLocation.getParent();
+            if (callsignRow != null) {
+                callsignRow.setAlpha(callsignToggleEnabled ? 1f : 0.55f);
+            }
+        }
+        boolean customNodePositionEnabled = isMeshUseCustomNodePositionPreferenceEnabled(
+                getMapView() != null ? getMapView().getContext() : null);
+        if (switchMeshUseCustomNodePosition != null) {
+            boolean customNodeToggleEnabled = meshConnected && advertPositionEnabled;
+            switchMeshUseCustomNodePosition.setEnabled(customNodeToggleEnabled);
+            switchMeshUseCustomNodePosition.setAlpha(customNodeToggleEnabled ? 1f : 0.45f);
+            switchMeshUseCustomNodePosition.setChecked(customNodePositionEnabled);
+            View customNodeRow = (View) switchMeshUseCustomNodePosition.getParent();
+            if (customNodeRow != null) {
+                customNodeRow.setAlpha(customNodeToggleEnabled ? 1f : 0.55f);
+            }
         }
         boolean meshGpsOn = meshGpsEnableRequested || Boolean.TRUE.equals(meshGpsEnabledState);
         boolean gpsDrivenActionsEnabled = meshConnected && meshGpsOn;
@@ -1689,7 +1780,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             rowAugmentGpsFromMeshcore.setAlpha(gpsDrivenActionsEnabled ? 1f : 0.55f);
         }
         if (btnMeshcoreSetNodePositionMap != null) {
-            btnMeshcoreSetNodePositionMap.setEnabled(meshConnected);
+            boolean mapButtonEnabled = meshConnected && customNodePositionEnabled;
+            btnMeshcoreSetNodePositionMap.setEnabled(mapButtonEnabled);
+            btnMeshcoreSetNodePositionMap.setAlpha(mapButtonEnabled ? 1f : 0.45f);
         }
     }
 
@@ -1699,7 +1792,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         String safe = (callsign == null || callsign.trim().isEmpty())
                 ? "UNKNOWN" : callsign.trim();
-        textMeshUseCallsignLocation.setText("Use " + safe + " location for position");
+        textMeshUseCallsignLocation.setText("Use " + safe + " Location for Position");
     }
 
     private void requestManualMeshGpsUpdate() {
@@ -2507,8 +2600,23 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         connectPulseDrawable = null;
         if (restoreBackground && btnScan != null) {
-            applyPillButtonBackground(btnScan, COLOR_PILL_BUTTON_PRIMARY);
+            restoreScanButtonDefaultBackground();
         }
+    }
+
+    private void restoreScanButtonDefaultBackground() {
+        if (btnScan == null) {
+            return;
+        }
+        int bgId = pluginContext.getResources().getIdentifier(
+                "bg_meshcore_connection_button_red", "drawable", pluginContext.getPackageName());
+        if (bgId != 0) {
+            btnScan.setBackgroundResource(bgId);
+            return;
+        }
+        btnScan.setBackgroundTintList(null);
+        btnScan.setBackground(buildPillButtonBackground(
+                COLOR_PILL_BUTTON_PRIMARY, COLOR_CONNECTION_STROKE_RED));
     }
 
     private void appendLog(String line) {
@@ -2670,6 +2778,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         setMeshUseGpsForPositionPreference(isChecked);
         if (!isChecked) {
             meshGpsEnabledState = Boolean.FALSE;
+            setAugmentMeshPreference(false);
+            if (switchAugmentGpsFromMeshcore != null) {
+                switchAugmentGpsFromMeshcore.setChecked(false);
+            }
         }
         updateMeshGpsControlsUi();
         appendLog("Setting Use Meschore GPS for position " + (isChecked ? "ON..." : "OFF..."));
@@ -2681,6 +2793,28 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btManager.queryMeshGpsEnabled();
         if (!isChecked) {
             pushPhoneLocationToMeshNodeIfNeeded(false);
+        }
+    }
+
+    private void forceDisableMeshGpsPositionSource() {
+        meshGpsEnableRequested = false;
+        meshGpsEnabledState = Boolean.FALSE;
+        setMeshUseGpsForPositionPreference(false);
+        if (switchMeshEnableGps != null) {
+            suppressMeshGpsSwitchCallbacks = true;
+            try {
+                switchMeshEnableGps.setChecked(false);
+            } finally {
+                suppressMeshGpsSwitchCallbacks = false;
+            }
+        }
+        if (switchAugmentGpsFromMeshcore != null) {
+            switchAugmentGpsFromMeshcore.setChecked(false);
+        }
+        setAugmentMeshPreference(false);
+        if (btManager != null && btManager.isConnected()) {
+            btManager.setMeshGpsEnabled(false);
+            btManager.queryMeshGpsEnabled();
         }
     }
 
@@ -3272,10 +3406,18 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
     private boolean isMeshUseCallsignLocationPreferenceEnabled(Context ctx) {
         if (ctx == null) {
+            return true;
+        }
+        return PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean(PREF_MESH_USE_CALLSIGN_LOCATION_FOR_POSITION, true);
+    }
+
+    private boolean isMeshUseCustomNodePositionPreferenceEnabled(Context ctx) {
+        if (ctx == null) {
             return false;
         }
         return PreferenceManager.getDefaultSharedPreferences(ctx)
-                .getBoolean(PREF_MESH_USE_CALLSIGN_LOCATION_FOR_POSITION, false);
+                .getBoolean(PREF_MESH_USE_CUSTOM_NODE_POSITION, false);
     }
 
     private void setMeshUseCallsignLocationPreference(boolean enabled) {
@@ -3285,6 +3427,15 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         PreferenceManager.getDefaultSharedPreferences(ctx)
                 .edit().putBoolean(PREF_MESH_USE_CALLSIGN_LOCATION_FOR_POSITION, enabled).apply();
+    }
+
+    private void setMeshUseCustomNodePositionPreference(boolean enabled) {
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        if (ctx == null) {
+            return;
+        }
+        PreferenceManager.getDefaultSharedPreferences(ctx)
+                .edit().putBoolean(PREF_MESH_USE_CUSTOM_NODE_POSITION, enabled).apply();
     }
 
     private void setMeshMapSetPosition(Context ctx, com.atakmap.coremap.maps.coords.GeoPoint gp) {
