@@ -449,6 +449,17 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                         "meshcore_dropdown", "layout", pluginContext.getPackageName()),
                 null);
 
+        // Set version label dynamically so it always matches the Gradle PLUGIN_VERSION.
+        try {
+            android.widget.TextView versionView = rootView.findViewById(
+                    pluginContext.getResources().getIdentifier(
+                            "header_version", "id", pluginContext.getPackageName()));
+            if (versionView != null) {
+                versionView.setText("v" + com.atakmaps.meshcore.plugin.BuildConfig.PLUGIN_VERSION);
+            }
+        } catch (Exception ignored) {
+        }
+
         bindViews();
         loadMeshChannelHistoryIfNeeded();
         setupListeners();
