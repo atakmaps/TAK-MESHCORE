@@ -257,6 +257,18 @@ Toasts the sender with fragment/size info and the receiver with hop count.
 
 ---
 
+## Migration Priority
+
+| Item | Port to Darksteal? | Notes |
+|------|--------------------|-------|
+| 1. AES Encryption UI wiring | ✅ Yes | Backend already exists; just UI binding + startup restore |
+| 2. Enable MeshCore GPS hardware toggle | ⏸ Assess | Darksteal has different GPS arch (RadioGpsAugmentController) — design separately |
+| 3. Repurposed "Use GPS for Position" | ⏸ Assess | Tied to item 2 — assess with it |
+| 4. Augment GPS gating | ⏸ Assess | Tied to item 2 |
+| 5. CoT Minification | ✅ Yes — HIGH PRIORITY | Pure reliability win; identical code, no arch differences |
+| 6. CoT Hop Count + Toast | ✅ Yes — HIGH PRIORITY | Pure reliability/visibility win; identical threading pattern |
+| 7. Clear All Mesh Contacts | ✅ Already done | No action needed |
+
 ## Notes for Migration
 
 - All MeshcoreAtak pref keys use `meshcore_` prefix. Darksteal uses `uvpro_` prefix.
@@ -266,7 +278,23 @@ Toasts the sender with fragment/size info and the receiver with hop count.
 - Darksteal's BLE manager is `MeshBtConnectionManager.java`; MeshcoreAtak's is
   `BtConnectionManager.java`. Same API surface, different class names.
 - The `EncryptionManager` class is byte-for-byte identical between plugins.
-- Items 2, 3, 4 (GPS rework) are MeshcoreAtak-only features — Darksteal has a
-  different GPS architecture (Radio GPS via `RadioGpsAugmentController`). Assess
-  whether the "Enable GPS hardware" / "Use for Position" split makes sense for
-  Darksteal's UV-PRO context before porting.
+- Items 2/3/4 (GPS rework): Darksteal has a fundamentally different GPS architecture
+  (UV-PRO radio GPS via `RadioGpsAugmentController`). Do NOT directly copy — assess
+  separately whether the hardware-toggle split adds value in the UV-PRO context.
+- Items 5 and 6 are the RELIABILITY PRIORITY for Darksteal. The code is
+  architecturally identical — only class name substitutions required (see below).
+
+## Class Name Map: MeshcoreAtak → Darksteal
+
+| MeshcoreAtak | Darksteal |
+|---|---|
+| `BtConnectionManager.java` | `MeshBtConnectionManager.java` |
+| `PacketRouter.java` | `PacketRouter.java` (same name) |
+| `cot/CotBridge.java` | `cot/CotBridge.java` (same name) |
+| `cot/CotBuilder.java` | `cot/CotBuilder.java` (same name) |
+| `MeshCoreDropDownReceiver.java` | `UVProDropDownReceiver.java` |
+| `MeshCoreMapComponent.java` | `UVProMapComponent.java` |
+| `ui/SettingsFragment.java` | `ui/SettingsFragment.java` (same name) |
+| `crypto/EncryptionManager.java` | `crypto/EncryptionManager.java` (identical, no change) |
+| `protocol/PacketFragmenter.java` | `protocol/PacketFragmenter.java` (same name) |
+| `bluetooth/BtConnectionManager` field `btManager` | `meshBtManager` (Darksteal has two BT managers) |
