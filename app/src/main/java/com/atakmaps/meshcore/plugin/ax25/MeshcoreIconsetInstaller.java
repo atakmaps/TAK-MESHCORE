@@ -1,63 +1,63 @@
 package com.atakmaps.meshcore.plugin.ax25;
 
-import android.app.Activity;
-import android.app.AlertDialog;
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
-import android.os.Build;
 import android.os.Environment;
 import android.util.Log;
+
+import com.atakmap.android.ipc.AtakBroadcast;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 
 /**
- * Ensures the MeshCore iconset package is available for ATAK import.
+ * Ensures the MeshCore iconset package is silently auto-imported into ATAK on first launch.
+ * Stages the bundled zip to the ATAK import folder then fires the standard ATAK import
+ * broadcast so no manual user action is required.
  */
 public final class MeshcoreIconsetInstaller {
     private static final String TAG = "MeshCore.MeshIconset";
     private static final String ICONSET_UID = MeshcoreIconset.ICONSET_UID;
     private static final String ICONSET_ASSET = "meschore.zip";
     private static final String ICONSET_FILENAME = "meschore.zip";
-    private static final String REMINDER_CHANNEL_ID = "meshcore_meshcore_iconset";
-    private static final int REMINDER_NOTIFICATION_ID = 22002;
-    private static volatile boolean reminderVisible = false;
-    private static volatile long lastDialogMs = 0L;
-    private static final long DIALOG_THROTTLE_MS = 45_000L;
-    private static volatile boolean dialogShowing = false;
-    private static final String IMPORT_INSTRUCTION =
-            "Select Point Dropper>Gear Icon>Add Iconset\n"
-                    + "Path= /sdcard/atak/tools/import/meschore.zip";
+
+    private static volatile boolean autoImportTriggered = false;
 
     private MeshcoreIconsetInstaller() {
     }
 
     /**
-     * @return true when iconset is still missing (reminder should continue)
+     * Stage and silently auto-import the MeshCore iconset.
+     * The broadcast is fired only once per session; subsequent calls just check
+     * {@link #isIconsetInstalled()} and return false once ATAK confirms import.
+     *
+     * @return true when iconset is still pending (caller should retry later)
      */
     public static boolean ensureStagedAndPromptIfMissing(Context pluginContext, Context uiContext) {
-        if (pluginContext == null || uiContext == null) {
+        if (pluginContext == null) {
             return false;
         }
         try {
             if (isIconsetInstalled()) {
-                clearPersistentReminder(uiContext);
+                autoImportTriggered = false;
                 return false;
             }
-
-            boolean staged = stageIconsetZip(pluginContext);
-            if (!staged) {
-                Log.w(TAG, "MeshCore iconset missing and staging failed");
+            if (!autoImportTriggered) {
+                boolean staged = stageIconsetZip(pluginContext);
+                if (staged) {
+                    File stagedFile = new File(
+                            Environment.getExternalStorageDirectory(),
+                            "atak/tools/import/" + ICONSET_FILENAME);
+                    triggerAutoImport(stagedFile);
+                    autoImportTriggered = true;
+                    Log.i(TAG, "MeshCore iconset auto-import triggered: " + stagedFile.getAbsolutePath());
+                } else {
+                    Log.w(TAG, "MeshCore iconset staging failed — will retry");
+                }
             }
-            showPersistentReminder(uiContext);
-            showInAppDialogReminder(uiContext);
             return true;
         } catch (Exception e) {
             Log.w(TAG, "ensureStagedAndPromptIfMissing failed: " + e.getMessage(), e);
@@ -65,21 +65,9 @@ public final class MeshcoreIconsetInstaller {
         }
     }
 
+    /** No-op kept for backward compatibility with map component call sites. */
     public static void clearPersistentReminder(Context uiContext) {
-        if (uiContext == null) {
-            return;
-        }
-        try {
-            NotificationManager nm = (NotificationManager)
-                    uiContext.getSystemService(Context.NOTIFICATION_SERVICE);
-            if (nm != null) {
-                nm.cancel(REMINDER_NOTIFICATION_ID);
-                reminderVisible = false;
-            }
-            dialogShowing = false;
-        } catch (Exception e) {
-            Log.w(TAG, "clearPersistentReminder failed: " + e.getMessage());
-        }
+        autoImportTriggered = false;
     }
 
     public static boolean isIconsetInstalled() {
@@ -87,7 +75,6 @@ public final class MeshcoreIconsetInstaller {
         if (!db.exists()) {
             return false;
         }
-
         SQLiteDatabase sqlite = null;
         Cursor cursor = null;
         try {
@@ -108,13 +95,22 @@ public final class MeshcoreIconsetInstaller {
         }
     }
 
+    private static void triggerAutoImport(File file) {
+        try {
+            Intent intent = new Intent("com.atakmap.android.icons.ADD_ICONSET");
+            intent.putExtra("filepath", file.getAbsolutePath());
+            AtakBroadcast.getInstance().sendBroadcast(intent);
+        } catch (Exception e) {
+            Log.w(TAG, "triggerAutoImport failed: " + e.getMessage(), e);
+        }
+    }
+
     private static boolean stageIconsetZip(Context pluginContext) {
         File importDir = new File(Environment.getExternalStorageDirectory(), "atak/tools/import");
         if (!importDir.exists() && !importDir.mkdirs()) {
             Log.w(TAG, "Failed to create import dir: " + importDir.getAbsolutePath());
             return false;
         }
-
         File outFile = new File(importDir, ICONSET_FILENAME);
         InputStream in = null;
         FileOutputStream out = null;
@@ -127,7 +123,7 @@ public final class MeshcoreIconsetInstaller {
                 out.write(buf, 0, n);
             }
             out.flush();
-            Log.i(TAG, "Staged MeshCore iconset for ATAK import: " + outFile.getAbsolutePath());
+            Log.i(TAG, "Staged MeshCore iconset: " + outFile.getAbsolutePath());
             return true;
         } catch (Exception e) {
             Log.w(TAG, "stageIconsetZip failed: " + e.getMessage(), e);
@@ -142,94 +138,5 @@ public final class MeshcoreIconsetInstaller {
             } catch (Exception ignored) {
             }
         }
-    }
-
-    private static void showPersistentReminder(Context uiContext) {
-        try {
-            if (reminderVisible) {
-                return;
-            }
-            NotificationManager nm = (NotificationManager)
-                    uiContext.getSystemService(Context.NOTIFICATION_SERVICE);
-            if (nm == null) {
-                return;
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                NotificationChannel channel = new NotificationChannel(
-                        REMINDER_CHANNEL_ID,
-                        "MeshCore Setup",
-                        NotificationManager.IMPORTANCE_DEFAULT);
-                channel.setDescription("Guidance for MeshCore iconset import");
-                channel.setShowBadge(false);
-                nm.createNotificationChannel(channel);
-            }
-
-            Intent launchIntent = uiContext.getPackageManager()
-                    .getLaunchIntentForPackage(uiContext.getPackageName());
-            PendingIntent pi = null;
-            if (launchIntent != null) {
-                launchIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    flags |= PendingIntent.FLAG_IMMUTABLE;
-                }
-                pi = PendingIntent.getActivity(uiContext, 0, launchIntent, flags);
-            }
-
-            Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                    ? new Notification.Builder(uiContext, REMINDER_CHANNEL_ID)
-                    : new Notification.Builder(uiContext);
-            b.setSmallIcon(android.R.drawable.stat_notify_error)
-                    .setOngoing(true)
-                    .setAutoCancel(false)
-                    .setOnlyAlertOnce(true)
-                    .setContentTitle("MeshCore iconset import required")
-                    .setContentText("Select Point Dropper>Gear Icon>Add Iconset");
-            if (pi != null) {
-                b.setContentIntent(pi);
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
-                b.setStyle(new Notification.BigTextStyle().bigText(IMPORT_INSTRUCTION));
-            }
-            nm.notify(REMINDER_NOTIFICATION_ID, b.build());
-            reminderVisible = true;
-        } catch (Exception e) {
-            Log.w(TAG, "showPersistentReminder failed: " + e.getMessage());
-        }
-    }
-
-    private static void showInAppDialogReminder(Context uiContext) {
-        if (!(uiContext instanceof Activity)) {
-            return;
-        }
-        long now = System.currentTimeMillis();
-        if (dialogShowing || (now - lastDialogMs) < DIALOG_THROTTLE_MS) {
-            return;
-        }
-        lastDialogMs = now;
-        Activity activity = (Activity) uiContext;
-        activity.runOnUiThread(() -> {
-            if (activity.isFinishing()) {
-                dialogShowing = false;
-                return;
-            }
-            dialogShowing = true;
-            try {
-                new AlertDialog.Builder(activity)
-                        .setTitle("MeshCore iconset required")
-                        .setMessage(IMPORT_INSTRUCTION)
-                        .setCancelable(true)
-                        .setPositiveButton("OK", (d, which) -> {
-                            dialogShowing = false;
-                            d.dismiss();
-                        })
-                        .setOnDismissListener(d -> dialogShowing = false)
-                        .show();
-            } catch (Exception e) {
-                dialogShowing = false;
-                Log.w(TAG, "showInAppDialogReminder failed: " + e.getMessage());
-            }
-        });
     }
 }

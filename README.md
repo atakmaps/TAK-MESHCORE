@@ -93,8 +93,15 @@ Includes:
 - Auto-point safety sanitization for synthetic callsigns
 - Updated scan UX with active discovery pulse
 
-## Scope
+## Changelog
 
+### 2026-06-01 (v1.3.2)
+
+- **Silent iconset auto-install:** MeshCore iconset now installs automatically on first ATAK launch with no user interaction. The plugin stages the bundled `meschore.zip` to `/sdcard/atak/tools/import/` then fires the `com.atakmap.android.icons.ADD_ICONSET` broadcast directly to ATAK's `IconsMapAdapter`. No notification, no dialog, and no manual Point Dropper → Add Iconset step required. Install is idempotent — skipped if the iconset UID is already present in `iconsets.sqlite`.
+
+### Earlier
+
+## Scope
 This repository is MeshCore-only. It does not include UV-PRO radio programming workflows.
 
 ## Build
