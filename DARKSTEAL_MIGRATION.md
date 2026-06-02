@@ -196,13 +196,14 @@ bytes if smaller than original.
 
 ---
 
-## 6. CoT Hop Count Threading + Toast Notifications
+## 6. CoT Hop Count Threading
 
 **Status:** ✅ Implemented in MeshcoreAtak — not in Darksteal
 
 **What it does:** Threads the MeshCore channel message `pathLen` (repeater hop
 count) from the BLE receive layer all the way to `CotBridge.injectCompressedCot`.
-Toasts the sender with fragment/size info and the receiver with hop count.
+Logged silently on every received CoT (`Log.d TAG "CoT received: type=... via N hops"`).
+Available for future display use (e.g. status overlays, diagnostics).
 
 **Files changed:**
 
@@ -226,23 +227,13 @@ Toasts the sender with fragment/size info and the receiver with hop count.
 ### `cot/CotBridge.java`
 - **`injectCompressedCot`:** Added overload `injectCompressedCot(byte[] compressed, int pathLen)`.
   - No-arg delegates: `injectCompressedCot(compressed, 0)`.
-  - After dispatching valid CoT, fires **receiver Toast**:
-    ```java
-    String hopStr = pathLen <= 0 ? "direct" : pathLen + (pathLen == 1 ? " hop" : " hops");
-    String toastMsg = "CoT received: " + event.getType() + " via " + hopStr;
-    mv.post(() -> Toast.makeText(mv.getContext(), toastMsg, Toast.LENGTH_SHORT).show());
-    ```
-- **`sendCotOverRadio`:** After `PacketFragmenter.fragment(...)`, fires **sender Toast**:
-  ```java
-  String toastMsg = "CoT sent over mesh (" + compressed.length + " bytes, "
-          + packets.size() + (packets.size() == 1 ? " fragment)" : " fragments)");
-  mv.post(() -> Toast.makeText(mv.getContext(), toastMsg, Toast.LENGTH_SHORT).show());
-  ```
+  - After dispatching valid CoT: `Log.d(TAG, "CoT received: type=" + event.getType() + " via " + hopStr)`
+- **`sendCotOverRadio`:** Logs send size and fragment count: `Log.d(TAG, "CoT sent over mesh: N bytes, M fragments")`
 
 **Darksteal migration notes:**
 - Darksteal equivalent files: `MeshBtConnectionManager.java` (BLE layer),
-  `PacketRouter.java`, `CotBridge.java`, `UVProDropDownReceiver.java`.
-- The `pathLen` threading is identical in structure — just rename classes.
+  `PacketRouter.java`, `CotBridge.java`.
+- The `pathLen` threading is identical in structure — only class name substitutions.
 - Darksteal's `handleMeshMessage` / `routeIncoming` / `injectCompressedCot`
   need the same overload pattern applied.
 
@@ -308,6 +299,35 @@ Toasts the sender with fragment/size info and the receiver with hop count.
 
 ---
 
+## 9. GPS Power Switch (Dual-Section Sync) + Advert Toast
+
+**Status:** ✅ Implemented in MeshcoreAtak — not in Darksteal
+
+**What it does:**
+- **Dual GPS power switches:** "Enable MeshCore GPS" appears in both the CONNECTION section (`switch_mesh_enable_gps_connection`) and the MESHCORE section (`switch_mesh_enable_gps_hardware`). Both control the same hardware state, stay perfectly in sync, and use the same `onMeshEnableGpsHardwareChanged` handler.
+- **Gating when GPS is OFF:** "Update GPS from MeshCore" button and "Augment GPS from MeshCore" toggle are both greyed (alpha 0.45) when GPS hardware is off. "Update GPS from MeshCore" is always visible (no `visibility="gone"`).
+- **Advert toast:** `Toast.makeText(..., "Advert Sent", LENGTH_SHORT)` fires on successful `btManager.sendSelfAdvert()`.
+
+**Files changed:**
+
+### `meshcore_dropdown.xml`
+- CONNECTION section: added `LinearLayout` row with `switch_mesh_enable_gps_connection` above the Augment GPS row.
+- Removed `android:visibility="gone"` from `btn_update_gps_from_meshcore`.
+
+### `MeshCoreDropDownReceiver.java`
+- **Field added:** `private Switch switchMeshEnableGpsConnection;`
+- **`bindViews()`:** bound `switch_mesh_enable_gps_connection`.
+- **`setupListeners()`:** added identical listener for `switchMeshEnableGpsConnection` → `onMeshEnableGpsHardwareChanged`.
+- **`updateMeshGpsControlsUi()`:** both switches synced under single `suppressMeshGpsSwitchCallbacks` block; `btnUpdateGpsFromMeshcore` no longer force-sets `VISIBLE` (always visible from layout).
+- **`forceDisableMeshGpsPositionSource()`:** unchecks both switches.
+- **`setupListeners()` (advert button):** added `Toast.makeText(..., "Advert Sent", LENGTH_SHORT).show()` on `sendSelfAdvert()` success.
+
+**Darksteal migration notes:**
+- The dual-switch GPS sync pattern can be ported once the GPS arch decision (items 2-4) is made.
+- The advert toast is a trivial 1-line addition to `UVProDropDownReceiver` and can be ported independently.
+
+---
+
 ## Migration Priority
 
 | Item | Port to Darksteal? | Notes |
@@ -318,8 +338,9 @@ Toasts the sender with fragment/size info and the receiver with hop count.
 | 4. Augment GPS gating | ⏸ Assess | Tied to item 2 |
 | 5. CoT Minification | ✅ Yes — HIGH PRIORITY | Pure reliability win; identical code, no arch differences |
 | 6. CoT Hop Count threading | ✅ Yes — HIGH PRIORITY | pathLen threaded through BLE→Router→CotBridge; identical pattern |
-| 8. CoT ACK/retry system | ✅ Yes — HIGH PRIORITY | TYPE_COT_ACK=0x08; watchdog + 15s×5 retries; immediate double-send |
 | 7. Clear All Mesh Contacts | ✅ Already done | No action needed |
+| 8. CoT ACK/retry system | ✅ Yes — HIGH PRIORITY | TYPE_COT_ACK=0x08; watchdog + 15s×5 retries; immediate double-send |
+| 9. GPS power switch (dual-section) + advert toast | ⏸ Assess | Tied to GPS arch (item 2/3/4); advert toast is trivial to port independently |
 
 ## Notes for Migration
 
@@ -333,8 +354,10 @@ Toasts the sender with fragment/size info and the receiver with hop count.
 - Items 2/3/4 (GPS rework): Darksteal has a fundamentally different GPS architecture
   (UV-PRO radio GPS via `RadioGpsAugmentController`). Do NOT directly copy — assess
   separately whether the hardware-toggle split adds value in the UV-PRO context.
-- Items 5 and 6 are the RELIABILITY PRIORITY for Darksteal. The code is
+- Items 5, 6, and 8 are the RELIABILITY PRIORITY for Darksteal. The code is
   architecturally identical — only class name substitutions required (see below).
+- Item 9 advert toast is a trivial 1-line port; the dual GPS switch requires the
+  GPS arch decision first.
 
 ## Class Name Map: MeshcoreAtak → Darksteal
 
