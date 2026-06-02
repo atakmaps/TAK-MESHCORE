@@ -10,11 +10,11 @@ When the user provides a signed plugin zip path (TPC/TAK Signed) for **MeshCore*
 1. Verify `main` is current and pushed on `atakmaps/TAK-MESHCORE`.
 2. Inspect the zip and extract the signed APK (`ATAK-Plugin-Meshcore-*-tpc-5.5.1-civ-release.apk`).
 3. Validate APK: `package: com.atakmaps.meshcore.plugin`, `versionCode` / `versionName` match release intent.
-4. Create/push tag `v<version>` on the release commit; create GitHub Release on **TAK-MESHCORE** with signed APK, AAB, and `MeshCore-*-ATAK-5.5.1-source.zip`.
+4. Create/push tag `v<version>` on the release commit; create GitHub Release on **TAK-MESHCORE** with title **`TAK-MeshCore <version>`** (not plain "MeshCore"), signed APK, AAB, and `MeshCore-*-ATAK-5.5.1-source.zip`.
 5. **Do not** deploy to `com.uvpro.plugin.apk` — that is UV-PRO only.
 6. **Always** upload MeshCore signed APK to cloud:
    - `scp … root@31.220.30.74:/var/www/html/plugins/com.atakmaps.meshcore.plugin.apk`
-7. **Always** update MeshCore row in server `generate_infz.py` (`version` + `version_code` for `com.atakmaps.meshcore.plugin`).
+7. **Always** update MeshCore row in server `generate_infz.py` (`name`: **`TAK-MeshCore`**, plus `version` + `version_code` for `com.atakmaps.meshcore.plugin`).
 8. Regenerate catalog: `python3 /var/www/html/plugins/generate_infz.py`
 9. Mirror: `cp -f /var/www/html/plugins/product.infz /var/www/html/plugins/5.5.1/product.infz`
 10. Verify:

@@ -12,6 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 PLUGIN_SLUG="${PLUGIN_SLUG:-MeshCore}"
+PLUGIN_DISPLAY_NAME="${PLUGIN_DISPLAY_NAME:-TAK-MeshCore}"
 APK_PREFIX="${APK_PREFIX:-ATAK-Plugin-Meshcore}"
 
 VERSION="$(sed -n 's/.*ext\.PLUGIN_VERSION *= *"\([^"]*\)".*/\1/p' build.gradle | head -1)"
@@ -75,7 +76,7 @@ UTC: ${STAMP}
 Output directory: ${PLUGINS_DIR}/
 
 TPC portal (first-time plugin):
-  - Plugin name: MeshCore
+  - Plugin name: ${PLUGIN_DISPLAY_NAME}
   - Package / applicationId: com.atakmaps.meshcore.plugin
   - ATAK compatibility: ${ATAK_VER} CIV
 

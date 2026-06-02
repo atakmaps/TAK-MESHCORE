@@ -17,7 +17,7 @@ Before `package-submission.sh`:
 - [ ] All submission sources **committed** on `main`
 - [ ] `./gradlew :app:assembleCivRelease` succeeds
 - [ ] `./tools/package-submission.sh` produces `MeshCore-*-ATAK-5.5.1-source.zip`
-- [ ] Portal metadata matches: **MeshCore**, `com.atakmaps.meshcore.plugin`, ATAK **5.5.1 CIV**
+- [ ] Portal metadata matches: **TAK-MeshCore**, `com.atakmaps.meshcore.plugin`, ATAK **5.5.1 CIV**
 
 Full details: `Plugins/Handoff Docs/MESHCORE-TPC-SUBMISSION.md`
 
