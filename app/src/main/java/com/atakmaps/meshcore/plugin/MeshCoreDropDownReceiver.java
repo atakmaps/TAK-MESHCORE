@@ -675,13 +675,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             });
         }
         if (btnSettings != null) {
-            btnSettings.setOnClickListener(v ->
-                    com.atakmaps.meshcore.plugin.ui.BluetoothDevicesManagement.show(
-                            getMapView().getContext(),
-                            () -> getMapView().post(() -> {
-                                refreshFavoriteStrip();
-                                updateScanButtonText();
-                            })));
+            btnSettings.setOnClickListener(v -> showSettingsDialog());
         }
         if (btnSendBeacon != null) {
             btnSendBeacon.setOnClickListener(v -> sendManualBeacon());
@@ -2196,30 +2190,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         int pad = dip(ctx, 12);
         layout.setPadding(pad, pad, pad, pad);
         scrollView.addView(layout);
-
-        TextView bluetoothHeader = new TextView(ctx);
-        bluetoothHeader.setText("Bluetooth Favorites");
-        bluetoothHeader.setTextColor(0xFFFFFFFF);
-        bluetoothHeader.setTextSize(15f);
-        layout.addView(bluetoothHeader);
-
-        TextView bluetoothHint = new TextView(ctx);
-        bluetoothHint.setText("Manage saved MeshCore devices and favorites shown on the panel.");
-        bluetoothHint.setTextColor(0xFFAAAAAA);
-        bluetoothHint.setTextSize(11f);
-        bluetoothHint.setPadding(0, dip(ctx, 2), 0, dip(ctx, 6));
-        layout.addView(bluetoothHint);
-
-        Button btnBluetoothDevices = new Button(ctx);
-        btnBluetoothDevices.setText("Manage Bluetooth Devices");
-        applyPillButtonBackground(btnBluetoothDevices, COLOR_PILL_BUTTON_PRIMARY);
-        btnBluetoothDevices.setOnClickListener(v ->
-                com.atakmaps.meshcore.plugin.ui.BluetoothDevicesManagement.show(ctx, () ->
-                        getMapView().post(() -> {
-                            refreshFavoriteStrip();
-                            updateScanButtonText();
-                        })));
-        layout.addView(btnBluetoothDevices);
 
         TextView beaconHeader = new TextView(ctx);
         beaconHeader.setText("\nBeacon");

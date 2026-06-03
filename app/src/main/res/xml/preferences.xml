@@ -82,13 +82,6 @@
         android:key="meshcore_cat_bluetooth"
         android:title="Bluetooth">
 
-        <Preference
-            android:key="meshcore_bluetooth_devices"
-            android:title="Bluetooth Devices"
-            android:summary="Radios you have connected — rename, favorite, delete"
-            android:persistent="false"
-            android:selectable="true" />
-
         <com.atakmap.android.gui.PanCheckBoxPreference
             android:key="meshcore_auto_reconnect"
             android:title="Auto-Reconnect"

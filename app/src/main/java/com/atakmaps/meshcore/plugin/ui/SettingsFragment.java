@@ -6,6 +6,7 @@ import android.graphics.Typeface;
 import android.os.Bundle;
 import android.preference.Preference;
 import android.preference.PreferenceCategory;
+import android.preference.PreferenceGroup;
 import android.preference.PreferenceManager;
 import android.view.Gravity;
 import android.view.View;
@@ -104,87 +105,24 @@ public class SettingsFragment extends PluginPreferenceFragment
     }
 
     /**
-     * Ensures "Bluetooth Devices" appears under Radio Settings. Preference is added
-     * programmatically so it survives ATAK preference-inflation quirks.
+     * Removes the legacy "Bluetooth Devices" (favorites manager) preference if a saved
+     * preference XML or older install still surfaces it. Favorites have been retired.
      */
     private void ensureBluetoothDevicesPreference() {
-        android.util.Log.d("MeshCore.Settings", "ensureBluetoothDevicesPreference called");
-        Preference existing = findPreference(KEY_BLUETOOTH_DEVICES);
-        if (existing != null) {
-            android.util.Log.d("MeshCore.Settings", "bluetooth pref already exists, wiring click");
-            wireBluetoothDevicesClick(existing);
-            return;
-        }
-
-        // Try the radio category first, fall back to the bluetooth category
-        PreferenceCategory radio = (PreferenceCategory) findPreference(KEY_CAT_RADIO);
-        android.util.Log.d("MeshCore.Settings", "meshcore_cat_radio lookup: " + radio);
-        if (radio == null) {
-            radio = (PreferenceCategory) findPreference("meshcore_cat_bluetooth");
-            android.util.Log.d("MeshCore.Settings", "meshcore_cat_bluetooth fallback: " + radio);
-        }
-        if (radio == null) {
-            // Last resort: add directly to the root preference screen
-            android.preference.PreferenceScreen root = getPreferenceScreen();
-            android.util.Log.d("MeshCore.Settings", "preferenceScreen: " + root
-                    + (root != null ? ", count=" + root.getPreferenceCount() : ""));
-            if (root == null) return;
-            Context ctx = getContext();
-            if (ctx == null) ctx = staticPluginContext;
-            if (ctx == null) return;
-            try {
-                PanPreference p = new PanPreference(ctx);
-                p.setKey(KEY_BLUETOOTH_DEVICES);
-                p.setTitle("Bluetooth Devices");
-                p.setSummary("Radios you have connected — rename, favorite, delete");
-                p.setPersistent(false);
-                p.setSelectable(true);
-                root.addPreference(p);
-                wireBluetoothDevicesClick(p);
-                android.util.Log.d("MeshCore.Settings", "added bluetooth pref to root screen");
-            } catch (Exception e) {
-                android.util.Log.e("MeshCore.Settings", "Could not add bluetooth pref to root", e);
-            }
-            return;
-        }
-
-        Context ctx = getContext();
-        if (ctx == null) ctx = staticPluginContext;
-        if (ctx == null) {
-            android.util.Log.e("MeshCore.Settings", "context is null, cannot create PanPreference");
-            return;
-        }
         try {
-            PanPreference p = new PanPreference(ctx);
-            p.setKey(KEY_BLUETOOTH_DEVICES);
-            p.setTitle("Bluetooth Devices");
-            p.setSummary("Radios you have connected — rename, favorite, delete");
-            p.setPersistent(false);
-            p.setSelectable(true);
-            p.setOrder(-1000);
-            radio.addPreference(p);
-            wireBluetoothDevicesClick(p);
-            android.util.Log.d("MeshCore.Settings", "added bluetooth pref to category: " + radio.getKey());
+            Preference existing = findPreference(KEY_BLUETOOTH_DEVICES);
+            if (existing == null) return;
+            PreferenceGroup parent = (PreferenceGroup) findPreference("meshcore_cat_bluetooth");
+            if (parent == null) parent = (PreferenceGroup) findPreference(KEY_CAT_RADIO);
+            if (parent != null) {
+                parent.removePreference(existing);
+            } else {
+                android.preference.PreferenceScreen root = getPreferenceScreen();
+                if (root != null) root.removePreference(existing);
+            }
         } catch (Exception e) {
-            android.util.Log.e("MeshCore.Settings",
-                    "Could not add Bluetooth Devices preference", e);
+            android.util.Log.w("MeshCore.Settings", "Could not remove legacy Bluetooth Devices pref", e);
         }
-    }
-
-    private void wireBluetoothDevicesClick(Preference bt) {
-        bt.setOnPreferenceClickListener(preference -> {
-            Context c = getActivity() != null ? getActivity() : getContext();
-            try {
-                if (c == null && MapView.getMapView() != null) {
-                    c = MapView.getMapView().getContext();
-                }
-            } catch (Exception ignored) {
-            }
-            if (c != null) {
-                BluetoothDevicesManagement.show(c, null);
-            }
-            return true;
-        });
     }
 
     @Override
