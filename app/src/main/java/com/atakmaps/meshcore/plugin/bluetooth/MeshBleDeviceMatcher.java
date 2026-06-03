@@ -28,10 +28,6 @@ public final class MeshBleDeviceMatcher {
     public static final UUID UUID_UART_SERVICE =
             UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
 
-    /** Meshtastic-compatible UART service (some dual-stack / bridged nodes). */
-    public static final UUID UUID_MESHTASTIC_SERVICE =
-            UUID.fromString("6BA1B218-15A8-461F-9FA8-5DCAE273EAFD");
-
     public static final UUID UUID_UART_RX =
             UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
     public static final UUID UUID_UART_TX =
@@ -65,7 +61,7 @@ public final class MeshBleDeviceMatcher {
                 continue;
             }
             UUID uuid = parcelUuid.getUuid();
-            if (UUID_UART_SERVICE.equals(uuid) || UUID_MESHTASTIC_SERVICE.equals(uuid)) {
+            if (UUID_UART_SERVICE.equals(uuid)) {
                 return true;
             }
         }
@@ -73,8 +69,12 @@ public final class MeshBleDeviceMatcher {
     }
 
     /**
-     * Heuristic name match for nodes that advertise a name but omit the service UUID
-     * in the parsed scan record (common on some chipsets / Android versions).
+     * Name-based fallback for chipsets/Android versions that don't surface the service UUID in
+     * the parsed scan record. MeshCore firmware always prefixes the BLE name with
+     * {@code "MeshCore-"} ({@code BLE_NAME_PREFIX} in companion_radio/MyMesh.h), so we only match
+     * that. Generic hardware-brand keywords were removed because they matched unrelated BLE gear
+     * and produced false positives. Real nodes with custom firmware are still caught by the
+     * primary service-UUID filter.
      */
     public static boolean matchesMeshName(@Nullable String name) {
         if (name == null) {
@@ -87,28 +87,7 @@ public final class MeshBleDeviceMatcher {
         if (trimmed.regionMatches(true, 0, NAME_PREFIX, 0, NAME_PREFIX.length())) {
             return true;
         }
-        String n = trimmed.toLowerCase(Locale.US);
-        return n.contains("meshcore")
-                || n.contains("meshtastic")
-                || n.contains("wismesh")
-                || n.contains("heltec")
-                || n.contains("lilygo")
-                || n.contains("t-echo")
-                || n.contains("tdeck")
-                || n.contains("t-deck")
-                || n.contains("t-pager")
-                || n.contains("t-display")
-                || n.contains("tbeam")
-                || n.contains("t-beam")
-                || n.contains("t1000")
-                || n.contains("t114")
-                || n.contains("rak")
-                || n.contains("seeed")
-                || n.contains("sensecap")
-                || n.contains("thinknode")
-                || n.contains("station g2")
-                || n.contains("nano g2")
-                || n.contains("wio");
+        return trimmed.toLowerCase(Locale.US).contains("meshcore");
     }
 
     @Nullable
@@ -184,7 +163,12 @@ public final class MeshBleDeviceMatcher {
             } catch (Exception ignored) {
             }
         }
-        return "Pairing " + label + ". Accept the Bluetooth prompt; default PIN is "
-                + DEFAULT_PAIRING_PIN + ".";
+        return "Pairing " + label + ". If Android asks for a PIN, enter the code shown on the "
+                + "node's screen, or " + DEFAULT_PAIRING_PIN + " if it has no screen.";
+    }
+
+    /** Short PIN guidance for the device picker (shown before the system pairing dialog appears). */
+    public static String pinGuidance() {
+        return "PIN: shown on node screen, or " + DEFAULT_PAIRING_PIN + " if no screen";
     }
 }

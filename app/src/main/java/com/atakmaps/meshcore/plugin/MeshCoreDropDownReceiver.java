@@ -2303,38 +2303,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             return;
         }
 
-        Context ctx = getMapView().getContext();
-        String target = getFavoriteDirectConnectTarget(ctx);
-        if (target != null && !target.isEmpty()) {
-            if (btManager.isConnecting()) {
-                appendLog("Cancelling current connection attempt...");
-                btManager.cancelConnectionAttempts();
-                stopConnectButtonPulse(true);
-            }
-            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-            if (adapter == null) {
-                appendLog("Bluetooth not available");
-                return;
-            }
-            try {
-                BluetoothDevice device = adapter.getRemoteDevice(target);
-                BtDeviceRecord record = BluetoothDeviceRegistry.find(ctx, target);
-                String display = record != null
-                        ? BluetoothDeviceRegistry.getDisplayTitle(record)
-                        : target;
-                appendLog("Connecting to " + display + "...");
-                startConnectButtonPulse();
-                btManager.connectUserSelected(device);
-            } catch (Exception e) {
-                Log.w(TAG, "Favorite mesh connect failed", e);
-                appendLog("Favorite not available — use Scan & Connect");
-                BluetoothDeviceRegistry.setMeshConnectTargetAddress(ctx, "");
-                refreshFavoriteStrip();
-                updateScanButtonText();
-            }
-            return;
-        }
-
+        // Favorites removed: this button always scans and opens the picker. Auto-connect to the
+        // last device happens silently at startup only. The saved target is preserved for that.
         btManager.prepareForUserScan();
         if (btManager.isConnecting()) {
             appendLog("Cancelling current connection attempt...");
@@ -2342,19 +2312,49 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             stopConnectButtonPulse(true);
         }
 
-        BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-        if (adapter == null) {
+        if (BluetoothAdapter.getDefaultAdapter() == null) {
             appendLog("Bluetooth not available");
             return;
         }
 
         foundDevices.clear();
         scanFoundAnyDevice = false;
-        refreshFavoriteStrip();
         updateScanButtonText();
         appendLog("Scanning for MeshCore devices...");
         startScanDiscoveryPulse();
         btManager.startScan();
+    }
+
+    /**
+     * Builds a two-line title for the MeshCore picker: the heading plus persistent PIN guidance.
+     * Shown here (before the system pairing dialog steals focus) because a toast/log line is
+     * hidden behind Android's modal PIN prompt and never seen by the user.
+     */
+    private View buildMeshPickerTitle(Context ctx) {
+        android.widget.LinearLayout col = new android.widget.LinearLayout(ctx);
+        col.setOrientation(android.widget.LinearLayout.VERTICAL);
+        int pad = dip(ctx, 16);
+        col.setPadding(pad, dip(ctx, 12), pad, dip(ctx, 4));
+
+        TextView title = new TextView(ctx);
+        title.setText("Select MeshCore");
+        title.setTextColor(0xFFFFFFFF);
+        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
+        title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
+        col.addView(title);
+
+        TextView hint = new TextView(ctx);
+        hint.setText(MeshBleDeviceMatcher.pinGuidance());
+        hint.setTextColor(0xFFB0B0B0);
+        hint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        android.widget.LinearLayout.LayoutParams hp = new android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+        hp.topMargin = dip(ctx, 4);
+        hint.setLayoutParams(hp);
+        col.addView(hint);
+
+        return col;
     }
 
     private void showDevicePicker() {
@@ -2395,7 +2395,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         appendLog("Select node: green=available, red=busy, grey=off/not in range");
         try {
             AlertDialog pickerDialog = new AlertDialog.Builder(ctx)
-                    .setTitle("Select MeshCore")
+                    .setCustomTitle(buildMeshPickerTitle(ctx))
                     .setAdapter(adapter, (dialog, which) -> {
                         if (which < 0 || which >= foundDevices.size()) {
                             return;
@@ -2426,6 +2426,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             return;
         }
 
+        // Only probe devices actually seen in the live scan (in-range / advertising). The saved
+        // last-connected device, if it isn't advertising right now, stays grey ("not seen")
+        // rather than being probed — probing a non-advertising node is pointless and would
+        // falsely show red.
         btManager.prepareForAvailabilityProbes();
         for (int i = 0; i < count; i++) {
             final int idx = i;
@@ -2433,6 +2437,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             if (!btManager.isLiveScanDevice(device)) {
                 dotColors[idx] = DOT_UNSEEN;
                 adapter.notifyDataSetChanged();
+                continue;
             }
             btManager.probeDeviceAvailabilityForPicker(device, availability -> getMapView().post(() -> {
                 dotColors[idx] = availability == BtConnectionManager.AVAIL_AVAILABLE
@@ -2568,75 +2573,25 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (btnScan == null) {
             return;
         }
-        if (btManager.isConnected()) {
-            btnScan.setText("SCAN & CONNECT");
-            return;
-        }
-        Context ctx = getMapView().getContext();
-        String target = getFavoriteDirectConnectTarget(ctx);
-        btnScan.setText(target != null ? "CONNECT" : "SCAN & CONNECT");
+        // Favorites removed: the button is always SCAN & CONNECT when not connected (it doubles as
+        // Disconnect while connected, handled by the caller's UI state).
+        btnScan.setText("SCAN & CONNECT");
     }
 
     private void refreshFavoriteStrip() {
-        if (favoritesStrip == null || favoritesScroll == null
-                || favoritesLabel == null || connectModeHint == null) {
-            return;
+        // MeshCore favorites were removed in favour of "auto-connect to last device on startup".
+        // The favorites row is always hidden.
+        if (favoritesStrip != null) {
+            favoritesStrip.removeAllViews();
         }
-        Context ctx = getMapView().getContext();
-        favoritesStrip.removeAllViews();
-
-        List<BtDeviceRecord> favs = BluetoothDeviceRegistry.getFavoritesSorted(ctx);
-        List<BtDeviceRecord> meshFavs = new ArrayList<>();
-        for (BtDeviceRecord r : favs) {
-            if (MeshBleDeviceMatcher.isKnownMeshRecord(r)) {
-                meshFavs.add(r);
-            }
-        }
-        if (meshFavs.isEmpty()) {
+        if (favoritesLabel != null) {
             favoritesLabel.setVisibility(View.GONE);
+        }
+        if (favoritesScroll != null) {
             favoritesScroll.setVisibility(View.GONE);
-            connectModeHint.setVisibility(View.GONE);
-            return;
         }
-
-        favoritesLabel.setText("FAVORITE MESH");
-        favoritesLabel.setVisibility(View.VISIBLE);
-        favoritesScroll.setVisibility(View.VISIBLE);
-
-        String selected = getFavoriteDirectConnectTarget(ctx);
-        if (selected != null && !selected.isEmpty()) {
-            connectModeHint.setVisibility(View.VISIBLE);
-            connectModeHint.setText("Tap CONNECT to join this node — tap favorite again for Scan & Connect");
-        } else {
+        if (connectModeHint != null) {
             connectModeHint.setVisibility(View.GONE);
-        }
-
-        for (BtDeviceRecord r : meshFavs) {
-            Button chip = new Button(ctx);
-            chip.setAllCaps(false);
-            chip.setText(BluetoothDeviceRegistry.getDisplayTitle(r));
-            boolean isSel = selected != null && selected.equalsIgnoreCase(r.address);
-            applyPillButtonBackground(chip, isSel ? 0xFF00788B : 0xFF3D3D3D);
-            chip.setTextColor(0xFFFFFFFF);
-            int px = dip(ctx, 8);
-            chip.setPadding(px, px / 2, px, px / 2);
-            chip.setOnClickListener(v -> {
-                String cur = BluetoothDeviceRegistry.getMeshConnectTargetAddress(ctx);
-                if (cur != null && cur.equalsIgnoreCase(r.address)) {
-                    BluetoothDeviceRegistry.setMeshConnectTargetAddress(ctx, "");
-                    appendLog("MeshCore using Scan & Connect mode");
-                } else {
-                    BluetoothDeviceRegistry.setMeshConnectTargetAddress(ctx, r.address);
-                    appendLog("MeshCore selected: " + BluetoothDeviceRegistry.getDisplayTitle(r));
-                }
-                refreshFavoriteStrip();
-                updateScanButtonText();
-            });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.setMarginEnd(dip(ctx, 6));
-            favoritesStrip.addView(chip, lp);
         }
     }
 
