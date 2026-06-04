@@ -34,7 +34,7 @@ public class MeshStatusOverlay extends MarkerIconWidget implements MapWidget.OnC
 
     private static MeshStatusOverlay instance;
     private static boolean lastKnownConnected = false;
-    private static boolean installScheduled = false;
+    private static int installGeneration = 0;
 
     private final MapView mapView;
     private final String connectedUri;
@@ -65,22 +65,24 @@ public class MeshStatusOverlay extends MarkerIconWidget implements MapWidget.OnC
 
     public static void install(Context pluginContext) {
         synchronized (INSTALL_LOCK) {
+            if (instance != null) {
+                Log.d(TAG, "install skipped: already installed");
+                return;
+            }
             MapView mv = MapView.getMapView();
             if (mv == null) {
                 return;
             }
-            uninstallInternal(mv);
+            final int myGeneration = ++installGeneration;
             try {
                 RootLayoutWidget root =
                         (RootLayoutWidget) mv.getComponentExtra("rootLayoutWidget");
                 if (root == null) {
-                    if (!installScheduled) {
-                        installScheduled = true;
-                        mv.postDelayed(() -> {
-                            installScheduled = false;
+                    mv.postDelayed(() -> {
+                        if (myGeneration == installGeneration && instance == null) {
                             install(pluginContext);
-                        }, 2000);
-                    }
+                        }
+                    }, 2000);
                     return;
                 }
                 LinearLayoutWidget tr = root.getLayout(RootLayoutWidget.TOP_RIGHT);

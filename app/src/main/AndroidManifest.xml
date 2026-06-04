@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.CAMERA" />
 
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
@@ -19,6 +20,11 @@
         android:roundIcon="@drawable/ic_meshcore">
 
         <meta-data android:name="plugin-api" android:value="${atakApiVersion}" />
+
+        <activity
+            android:name="com.atakmaps.meshcore.plugin.QrScanActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:exported="true" />
 
         <!-- Allow ATAK plugin discovery -->
         <activity android:name="com.atakmap.app.component"

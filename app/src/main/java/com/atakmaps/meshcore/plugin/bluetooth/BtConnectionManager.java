@@ -165,6 +165,8 @@ public class BtConnectionManager {
     private final Map<String, Long> nodeToastDedupByPubKeyTs = new ConcurrentHashMap<>();
     private final Map<String, Long> contactQueryThrottleMsByPubKey = new ConcurrentHashMap<>();
     private final Map<Integer, String> meshChannelNamesByIndex = new ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<Integer, byte[]> channelSecretsByIndex =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private final Map<Integer, ChunkAccumulator> chunkBuffers = new ConcurrentHashMap<>();
     private final ArrayDeque<byte[]> writeQueue = new ArrayDeque<>();
@@ -1332,6 +1334,22 @@ public class BtConnectionManager {
         return meshChannelNamesByIndex.get(index);
     }
 
+    public byte[] getChannelSecret(int idx) {
+        return channelSecretsByIndex.get(idx);
+    }
+
+    public boolean setChannelSlot(int idx, String name, byte[] secret) {
+        if (!connected.get() || idx < 0 || idx > 7) return false;
+        if (secret != null) channelSecretsByIndex.put(idx, java.util.Arrays.copyOf(secret, secret.length));
+        enqueueCommand(buildSetChannelCommand(idx, name != null ? name : "", secret));
+        enqueueCommand(buildGetChannelInfoCommand(idx));
+        return true;
+    }
+
+    public boolean clearChannelSlot(int idx) {
+        return setChannelSlot(idx, "", new byte[16]);
+    }
+
     public void requestAllChannelInfo() {
         if (!connected.get()) {
             return;
@@ -2051,6 +2069,9 @@ public class BtConnectionManager {
         int nul = raw.indexOf('\0');
         String name = (nul >= 0 ? raw.substring(0, nul) : raw).trim();
         String secretFp = channelSecretFingerprint(pkt, 34, 16);
+        byte[] secret = new byte[16];
+        System.arraycopy(pkt, 34, secret, 0, 16);
+        channelSecretsByIndex.put(idx, secret);
         meshChannelNamesByIndex.put(idx, name);
         notifyMeshChannelInfo(new MeshChannelInfo(idx, name));
         Log.d(TAG, "Channel slot " + idx + " name='" + name + "' secretFp=" + secretFp);

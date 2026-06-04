@@ -226,6 +226,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         AtakBroadcast.DocumentedIntentFilter filter =
                 new AtakBroadcast.DocumentedIntentFilter();
         filter.addAction(MeshCoreDropDownReceiver.SHOW_PLUGIN);
+        filter.addAction(MeshCoreDropDownReceiver.ACTION_QR_CHANNEL_RESULT);
         registerDropDownReceiver(dropDownReceiver, filter);
         meshDetailsDropDownReceiver = new MeshDetailsDropDownReceiver(view, pluginContext, cotBridge);
         AtakBroadcast.DocumentedIntentFilter meshDetailsFilter =

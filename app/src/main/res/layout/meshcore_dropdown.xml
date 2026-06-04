@@ -700,14 +700,25 @@
                 android:text="Clear All Mesh Contacts"
                 android:background="@drawable/bg_meshcore_button_yellow" />
 
+            <!-- Add Channel button — tap to subscribe to a new channel -->
             <Button
-                android:id="@+id/btn_meshcore_channels"
+                android:id="@+id/btn_add_mesh_channel"
                 style="@style/MeshcorePillButton.Beacon"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="Channels"
+                android:text="+ Add Channel"
                 android:background="@drawable/bg_meshcore_button_yellow" />
+
+            <!-- Channel buttons strip — one button per subscribed channel -->
+            <LinearLayout
+                android:id="@+id/strip_mesh_channels"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="2dp"
+                android:visibility="gone" />
 
             <TextView
                 android:id="@+id/text_mesh_channel_log"
