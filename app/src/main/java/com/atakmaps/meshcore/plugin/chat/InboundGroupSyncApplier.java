@@ -416,40 +416,8 @@ public final class InboundGroupSyncApplier {
     }
 
     private static void notifyRfGroupSynced(String groupName, String conversationId) {
-        String name = groupName != null && !groupName.trim().isEmpty()
-                ? groupName.trim()
-                : conversationId;
-        String msg = "RF group synced: " + name;
-        Log.i(TAG, "Notify RF group sync: " + msg + " convo=" + conversationId);
-        try {
-            android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
-            main.post(() -> {
-                MapView mv = MapView.getMapView();
-                if (mv != null && mv.getContext() != null) {
-                    android.widget.Toast.makeText(
-                            mv.getContext(),
-                            msg,
-                            android.widget.Toast.LENGTH_LONG).show();
-                    Log.i(TAG, "Toast posted for convo=" + conversationId);
-                } else {
-                    Log.w(TAG, "Toast skipped (MapView/context null) convo=" + conversationId);
-                }
-            });
-        } catch (Exception e) {
-            Log.w(TAG, "Toast failed for RF group sync " + name, e);
-        }
-        try {
-            int notifyId = ("rf_group_" + conversationId).hashCode() & 0x7FFFFFFF;
-            NotificationUtil.getInstance().postNotification(
-                    notifyId,
-                    NotificationUtil.GeneralIcon.CHAT.getID(),
-                    NotificationUtil.BLUE,
-                    "Group Synced",
-                    "MeshCore",
-                    msg);
-            Log.i(TAG, "System notification posted for convo=" + conversationId);
-        } catch (Exception e) {
-            Log.w(TAG, "Notification failed for RF group sync " + name, e);
-        }
+        // Popups and system notifications suppressed — chat appears only in the inline
+        // channel window inside the plugin panel.
+        Log.i(TAG, "RF group synced: convo=" + conversationId + " name=" + groupName);
     }
 }

@@ -179,7 +179,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnMeshRequestChannels;
     private Button btnAddMeshChannel;
     private LinearLayout stripMeshChannels;
+    private TextView meshChannelTitleView;
     private TextView meshChannelLogText;
+    private android.view.View rowMeshChannelInput;
     private EditText editMeshChannelIndex;
     private EditText editMeshChannelMessage;
     private Button btnMeshChannelSend;
@@ -632,7 +634,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnMeshRequestChannels = rootView.findViewById(getId("btn_mesh_request_channels"));
         btnAddMeshChannel = rootView.findViewById(getId("btn_add_mesh_channel"));
         stripMeshChannels = rootView.findViewById(getId("strip_mesh_channels"));
+        meshChannelTitleView = rootView.findViewById(getId("text_mesh_channel_title"));
         meshChannelLogText = rootView.findViewById(getId("text_mesh_channel_log"));
+        rowMeshChannelInput = rootView.findViewById(getId("row_mesh_channel_input"));
         editMeshChannelIndex = rootView.findViewById(getId("edit_mesh_channel_index"));
         editMeshChannelMessage = rootView.findViewById(getId("edit_mesh_channel_message"));
         btnMeshChannelSend = rootView.findViewById(getId("btn_mesh_channel_send"));
@@ -1111,92 +1115,22 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private void openMeshChannelChatDialog(int channelIndex) {
-        Context ctx = getMapView().getContext();
         String channelName = meshChannelNames.get(channelIndex);
-        if (channelName == null || channelName.trim().isEmpty()) {
-            channelName = "Channel";
-        }
+        if (channelName == null || channelName.trim().isEmpty()) channelName = "Channel";
         meshChannelChatActiveIndex = channelIndex;
-
-        LinearLayout root = new LinearLayout(ctx);
-        root.setOrientation(LinearLayout.VERTICAL);
-        int pad = dip(ctx, 12);
-        root.setPadding(pad, pad, pad, pad);
-
-        TextView title = new TextView(ctx);
-        title.setText("Channel #" + channelIndex + " - " + channelName);
-        title.setTextColor(0xFFFFFFFF);
-        title.setTextSize(15f);
-        root.addView(title);
-        meshChannelChatTitleView = title;
-
-        TextView status = new TextView(ctx);
-        status.setText("Status shown from MeshCore message metadata when available.");
-        status.setTextColor(0xFF90A4AE);
-        status.setTextSize(11f);
-        LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-        statusLp.bottomMargin = dip(ctx, 8);
-        root.addView(status, statusLp);
-
-        ScrollView scroll = new ScrollView(ctx);
-        LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0);
-        scrollLp.weight = 1f;
-        TextView log = new TextView(ctx);
-        log.setTextColor(0xFFE0E0E0);
-        log.setTextSize(13f);
-        log.setMovementMethod(new ScrollingMovementMethod());
-        log.setPadding(dip(ctx, 8), dip(ctx, 8), dip(ctx, 8), dip(ctx, 8));
-        log.setBackgroundColor(0xFF1E1E1E);
-        scroll.addView(log, new ScrollView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(scroll, scrollLp);
-        meshChannelChatLogView = log;
-
-        EditText input = new EditText(ctx);
-        input.setHint("Type message");
-        input.setInputType(InputType.TYPE_CLASS_TEXT
-                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-                | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        LinearLayout.LayoutParams inputLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        inputLp.topMargin = dip(ctx, 8);
-        root.addView(input, inputLp);
-
-        AlertDialog dialog = new AlertDialog.Builder(ctx)
-                .setTitle("MeshCore Channel Chat")
-                .setView(root)
-                .setPositiveButton("Send", null)
-                .setNegativeButton("Close", (d, which) -> {
-                    meshChannelChatActiveIndex = -1;
-                    meshChannelChatDialog = null;
-                    meshChannelChatLogView = null;
-                    meshChannelChatTitleView = null;
-                })
-                .create();
-        dialog.setOnShowListener(d -> {
-            Button send = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-            if (send != null) {
-                send.setOnClickListener(v -> {
-                    String text = input.getText() != null ? input.getText().toString().trim() : "";
-                    if (text.isEmpty()) {
-                        return;
-                    }
-                    if (!btManager.sendChannelText(channelIndex, text)) {
-                        Toast.makeText(ctx, "Failed to send over MeshCore channel.",
-                                Toast.LENGTH_SHORT).show();
-                        return;
-                    }
-                    input.setText("");
-                });
-            }
-            renderMeshChannelChatLog(channelIndex);
-        });
-        dialog.show();
-        meshChannelChatDialog = dialog;
+        // Show the inline chat window — no popup dialog.
+        if (meshChannelTitleView != null) {
+            meshChannelTitleView.setText("Channel #" + channelIndex + " — " + channelName);
+            meshChannelTitleView.setVisibility(android.view.View.VISIBLE);
+        }
+        if (meshChannelLogText != null) {
+            meshChannelChatLogView = meshChannelLogText;
+            meshChannelLogText.setVisibility(android.view.View.VISIBLE);
+        }
+        if (rowMeshChannelInput != null) {
+            rowMeshChannelInput.setVisibility(android.view.View.VISIBLE);
+        }
+        renderMeshChannelChatLog(channelIndex);
     }
 
     private void appendMeshChannelMessage(BtConnectionManager.MeshChannelMessage message) {
