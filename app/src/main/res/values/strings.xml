@@ -19,8 +19,6 @@
 
     <!-- Settings -->
     <string name="pref_category_radio">Radio Connection</string>
-    <string name="pref_beacon_interval_title">GPS Beacon Interval</string>
-    <string name="pref_beacon_interval_summary">How often to transmit your position (seconds)</string>
     <string name="pref_auto_reconnect_title">Auto Reconnect</string>
     <string name="pref_auto_reconnect_summary">Automatically reconnect to radio if connection drops</string>
     <string name="pref_callsign_title">Radio Callsign</string>

@@ -45,7 +45,6 @@ public class SettingsFragment extends PluginPreferenceFragment
     /** Key registered with {@code ToolsPreferenceFragment} in {@link com.atakmaps.meshcore.plugin.MeshCoreMapComponent}. */
     public static final String TOOL_SETTINGS_KEY = "meshcorePreference";
 
-    public static final String PREF_BEACON_INTERVAL = "meshcore_beacon_interval";
     public static final String PREF_AUTO_RECONNECT = "meshcore_auto_reconnect";
     public static final String PREF_ENCRYPTION_ENABLED = "meshcore_encryption_enabled";
     public static final String PREF_ENCRYPTION_PASSPHRASE = "meshcore_encryption_passphrase";
@@ -64,7 +63,6 @@ public class SettingsFragment extends PluginPreferenceFragment
     public static final String KEY_BLUETOOTH_DEVICES = "meshcore_bluetooth_devices";
     public static final String KEY_CAT_RADIO = "meshcore_cat_radio";
 
-    public static final String DEFAULT_BEACON_INTERVAL = "300";
     public static final boolean DEFAULT_AUTO_RECONNECT = true;
     public static final String DEFAULT_RETRY_INTERVAL_MIN = "2";
     public static final String DEFAULT_RETRY_MAX = "3";
@@ -238,13 +236,6 @@ public class SettingsFragment extends PluginPreferenceFragment
         SharedPreferences prefs =
                 getPreferenceManager().getSharedPreferences();
 
-        Preference beaconPref = findPreference(PREF_BEACON_INTERVAL);
-        if (beaconPref != null) {
-            String interval = prefs.getString(
-                    PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL);
-            beaconPref.setSummary("Every " + interval + " seconds");
-        }
-
         Preference retryIntervalPref = findPreference(PREF_RETRY_INTERVAL_MIN);
         if (retryIntervalPref != null) {
             String mins = prefs.getString(PREF_RETRY_INTERVAL_MIN, DEFAULT_RETRY_INTERVAL_MIN);
@@ -333,16 +324,6 @@ public class SettingsFragment extends PluginPreferenceFragment
         } catch (Exception e) {
         }
         return "UNKNOWN";
-    }
-
-    public static int getBeaconIntervalSec(Context context) {
-        String val = getPrefs(context)
-                .getString(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL);
-        try {
-            return Integer.parseInt(val);
-        } catch (NumberFormatException e) {
-            return 60;
-        }
     }
 
     public static long getRetryIntervalMs(Context context) {

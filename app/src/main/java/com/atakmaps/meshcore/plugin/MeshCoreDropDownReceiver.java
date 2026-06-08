@@ -51,8 +51,6 @@ import com.atakmap.android.toolbar.ToolManagerBroadcastReceiver;
 import com.atakmap.android.toolbar.widgets.TextContainer;
 import com.atakmap.android.user.MapClickTool;
 import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
-import com.atakmaps.meshcore.plugin.beacon.SmartBeacon;
-import com.atakmaps.meshcore.plugin.beacon.SmartBeaconSettingsDialog;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry.BtDeviceRecord;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
@@ -165,11 +163,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnSettings;
     private Button btnSendBeacon;
     private Button btnSendPing;
-    private Button btnBeaconSettings;
     private Button btnPluginSettings;
-    private Button btnSmartBeaconSettings;
     private Button btnMeshSendAdvert;
-    private Switch switchSmartBeacon;
     private Switch switchMeshEnableGpsConnection; // CONNECTION section power switch
     private Switch switchMeshEnableGpsHardware;   // MESHCORE section convenience copy
     private Switch switchMeshEnableGps;
@@ -425,20 +420,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                     });
                 }
             };
-    private final CompoundButton.OnCheckedChangeListener smartBeaconCheckedListener =
-            (buttonView, isChecked) -> {
-                if (!buttonView.isPressed()) {
-                    return;
-                }
-                Context ctx = getMapView().getContext();
-                SmartBeacon.setEnabled(ctx, isChecked);
-                appendLog("Smart beacon " + (isChecked ? "enabled" : "disabled"));
-                try {
-                    AtakBroadcast.getInstance().sendBroadcast(
-                            new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
-                } catch (Exception ignored) {
-                }
-            };
 
     public MeshCoreDropDownReceiver(MapView mapView,
                                  Context pluginContext,
@@ -548,9 +529,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         updatePacketCount();
         refreshFavoriteStrip();
         updateScanButtonText();
-        if (switchSmartBeacon != null) {
-            switchSmartBeacon.setChecked(SmartBeacon.isEnabled(getMapView().getContext()));
-        }
         try {
             android.content.SharedPreferences meshPrefs =
                     PreferenceManager.getDefaultSharedPreferences(getMapView().getContext());
@@ -615,11 +593,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnSettings = rootView.findViewById(getId("btn_settings"));
         btnSendBeacon = rootView.findViewById(getId("btn_send_beacon"));
         btnSendPing = rootView.findViewById(getId("btn_send_ping"));
-        btnBeaconSettings = rootView.findViewById(getId("btn_manage_plugin_beacon_settings"));
         btnPluginSettings = rootView.findViewById(getId("btn_plugin_settings"));
-        btnSmartBeaconSettings = rootView.findViewById(getId("btn_manage_smart_beacon_settings"));
         btnMeshSendAdvert = rootView.findViewById(getId("btn_meshcore_send_advert"));
-        switchSmartBeacon = rootView.findViewById(getId("switch_smart_beacon"));
         switchMeshEnableGpsConnection =
                 rootView.findViewById(getId("switch_mesh_enable_gps_connection"));
         switchMeshEnableGpsHardware =
@@ -693,7 +668,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             });
         }
         if (btnSettings != null) {
-            btnSettings.setOnClickListener(v -> showSettingsDialog());
+            btnSettings.setOnClickListener(v -> SettingsFragment.openToolPreferences(getMapView().getContext()));
         }
         if (btnSendBeacon != null) {
             btnSendBeacon.setOnClickListener(v -> sendManualBeacon());
@@ -701,25 +676,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (btnSendPing != null) {
             btnSendPing.setOnClickListener(v -> sendPing());
         }
-        if (btnBeaconSettings != null) {
-            btnBeaconSettings.setOnClickListener(v -> showBeaconSettingsDialog());
-        }
         if (btnPluginSettings != null) {
-            btnPluginSettings.setOnClickListener(v -> showSettingsDialog());
-        }
-        if (switchSmartBeacon != null) {
-            switchSmartBeacon.setOnCheckedChangeListener(smartBeaconCheckedListener);
-        }
-        if (btnSmartBeaconSettings != null) {
-            btnSmartBeaconSettings.setOnClickListener(v ->
-                    SmartBeaconSettingsDialog.show(getMapView().getContext(), () -> {
-                        appendLog("Smart beacon settings updated.");
-                        try {
-                            AtakBroadcast.getInstance().sendBroadcast(
-                                    new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
-                        } catch (Exception ignored) {
-                        }
-                    }));
+            btnPluginSettings.setOnClickListener(v -> SettingsFragment.openToolPreferences(getMapView().getContext()));
         }
         if (btnMeshSendAdvert != null) {
             btnMeshSendAdvert.setOnClickListener(v -> {
@@ -1766,9 +1724,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private void showQrScanDialog() {
-        try {
-            getQrPendingFile().delete();
-        } catch (Exception ignored) {}
+        QrResultProvider.clearPending(getMapView().getContext());
         pendingQrScan = true;
         Intent launch = new Intent(pluginContext, QrScanActivity.class);
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -1786,51 +1742,47 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                     qrPollRunnable = null;
                     return;
                 }
-                try {
-                    java.io.File file = getQrPendingFile();
-                    if (file.exists()) {
-                        java.util.List<String> lines = new java.util.ArrayList<>();
-                        try (java.io.BufferedReader br = new java.io.BufferedReader(
-                                new java.io.FileReader(file))) {
-                            String l;
-                            while ((l = br.readLine()) != null) lines.add(l);
-                        }
-                        if (lines.size() >= 2) {
-                            long ts = Long.parseLong(lines.get(0).trim());
-                            String content = lines.get(1).trim();
-                            if (System.currentTimeMillis() - ts < 60_000L
-                                    && !content.isEmpty()) {
-                                file.delete();
-                                pendingQrScan = false;
-                                qrPollRunnable = null;
-                                handleQrChannelResult(content);
-                                return;
-                            }
-                        }
-                        file.delete();
-                    }
-                } catch (Exception e) {
-                    Log.w(TAG, "QR poll failed", e);
+                String content = QrResultProvider.consumePending(
+                        getMapView().getContext(), 60_000L);
+                if (content != null && !content.isEmpty()) {
+                    pendingQrScan = false;
+                    qrPollRunnable = null;
+                    handleQrChannelResult(content);
+                    return;
                 }
-                getMapView().postDelayed(this, 1000L);
+                getMapView().postDelayed(this, 500L);
             }
         };
-        getMapView().postDelayed(qrPollRunnable, 1000L);
+        getMapView().postDelayed(qrPollRunnable, 500L);
     }
 
     private void handleQrChannelResult(String rawContent) {
         pendingQrScan = false;
+        QrResultProvider.clearPending(getMapView().getContext());
         if (rawContent == null || rawContent.trim().isEmpty()) return;
+        Log.d(TAG, "QR result received: " + rawContent);
         try {
             android.net.Uri uri = android.net.Uri.parse(rawContent.trim());
-            if (!"meshcore".equals(uri.getScheme())
-                    || !"/add".equals(uri.getPath()) && !"channel/add".equals(uri.getPath())
-                            && !"/channel/add".equals(uri.getPath())) {
+            String path = uri.getPath();
+            boolean validMeshcore = "meshcore".equals(uri.getScheme())
+                    && ("/add".equals(path) || "/channel/add".equals(path)
+                            || "channel/add".equals(path));
+            if (!validMeshcore) {
                 showJoinPrivateDialogFromQr(null, rawContent);
                 return;
             }
             String name = uri.getQueryParameter("name");
             String secret = uri.getQueryParameter("secret");
+            if (name != null && secret != null && secret.length() == 32) {
+                byte[] key = hexToBytes(secret.toLowerCase(java.util.Locale.US));
+                if (key != null && addChannelToNode(name.trim(), key)) {
+                    android.widget.Toast.makeText(getMapView().getContext(),
+                            "Channel '" + name.trim() + "' added from QR.",
+                            android.widget.Toast.LENGTH_SHORT).show();
+                    buildMeshChannelButtonStrip();
+                    return;
+                }
+            }
             showJoinPrivateDialogFromQr(name, secret);
         } catch (Exception e) {
             Log.w(TAG, "QR parse failed: " + rawContent, e);
@@ -2215,40 +2167,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
     }
 
-    private java.io.File getQrPendingFile() {
-        try {
-            Context qrCtx = getMapView().getContext()
-                    .createPackageContext("com.atakmaps.meshcore.plugin",
-                            Context.CONTEXT_IGNORE_SECURITY);
-            java.io.File extCache = qrCtx.getExternalCacheDir();
-            if (extCache != null) {
-                return new java.io.File(extCache, "uvpro_qr_pending.txt");
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "getQrPendingFile createPackageContext failed", e);
-        }
-        return new java.io.File(
-                "/sdcard/Android/data/com.atakmaps.meshcore.plugin/cache/uvpro_qr_pending.txt");
-    }
-
     private void checkPendingQrResult() {
-        try {
-            java.io.File file = getQrPendingFile();
-            if (!file.exists()) return;
-            java.util.List<String> lines = new java.util.ArrayList<>();
-            try (java.io.BufferedReader br = new java.io.BufferedReader(
-                    new java.io.FileReader(file))) {
-                String l;
-                while ((l = br.readLine()) != null) lines.add(l);
-            }
-            file.delete();
-            if (lines.size() < 2) return;
-            long ts = Long.parseLong(lines.get(0).trim());
-            String content = lines.get(1).trim();
-            if (System.currentTimeMillis() - ts > 60_000L || content.isEmpty()) return;
+        if (!pendingQrScan) return;
+        String content = QrResultProvider.consumePending(getMapView().getContext(), 60_000L);
+        if (content != null && !content.isEmpty()) {
             handleQrChannelResult(content);
-        } catch (Exception e) {
-            Log.w(TAG, "checkPendingQrResult failed", e);
         }
     }
 
@@ -2819,182 +2742,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         } catch (Exception e) {
             appendLog("Ping failed: " + e.getMessage());
         }
-    }
-
-    /** Beacon-only settings: GPS beacon interval + Smart Beacon enable/settings. */
-    private void showBeaconSettingsDialog() {
-        Context ctx = getMapView().getContext();
-        android.content.SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(ctx);
-
-        ScrollView scrollView = new ScrollView(ctx);
-        LinearLayout layout = new LinearLayout(ctx);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        int pad = dip(ctx, 12);
-        layout.setPadding(pad, pad, pad, pad);
-        scrollView.addView(layout);
-
-        TextView beaconLabel = new TextView(ctx);
-        beaconLabel.setText("GPS Beacon Interval (seconds)");
-        beaconLabel.setTextColor(0xFFAAAAAA);
-        beaconLabel.setPadding(0, dip(ctx, 4), 0, dip(ctx, 2));
-        layout.addView(beaconLabel);
-
-        EditText editBeaconInterval = new EditText(ctx);
-        editBeaconInterval.setInputType(InputType.TYPE_CLASS_NUMBER);
-        editBeaconInterval.setText(prefs.getString(
-                SettingsFragment.PREF_BEACON_INTERVAL,
-                SettingsFragment.DEFAULT_BEACON_INTERVAL));
-        layout.addView(editBeaconInterval);
-
-        LinearLayout smartRow = new LinearLayout(ctx);
-        smartRow.setOrientation(LinearLayout.HORIZONTAL);
-        smartRow.setPadding(0, dip(ctx, 8), 0, dip(ctx, 2));
-        TextView smartLabel = new TextView(ctx);
-        smartLabel.setText("Enable Smart Beacon");
-        smartLabel.setTextColor(0xFFE0E0E0);
-        smartRow.addView(smartLabel,
-                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Switch switchSmart = new Switch(ctx);
-        switchSmart.setChecked(SmartBeacon.isEnabled(ctx));
-        smartRow.addView(switchSmart);
-        layout.addView(smartRow);
-
-        Button btnSmartSettings = new Button(ctx);
-        btnSmartSettings.setText("Smart Beacon Settings");
-        applyPillButtonBackground(btnSmartSettings, COLOR_PILL_BUTTON_PRIMARY);
-        btnSmartSettings.setOnClickListener(v ->
-                SmartBeaconSettingsDialog.show(ctx, () -> {
-                    appendLog("Smart beacon settings updated.");
-                    try {
-                        AtakBroadcast.getInstance().sendBroadcast(
-                                new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
-                    } catch (Exception ignored) {
-                    }
-                }));
-        layout.addView(btnSmartSettings);
-
-        switchSmart.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            SmartBeacon.setEnabled(ctx, isChecked);
-            editBeaconInterval.setEnabled(!isChecked);
-            editBeaconInterval.setAlpha(isChecked ? 0.45f : 1.0f);
-        });
-        editBeaconInterval.setEnabled(!switchSmart.isChecked());
-        editBeaconInterval.setAlpha(switchSmart.isChecked() ? 0.45f : 1.0f);
-
-        new AlertDialog.Builder(ctx)
-                .setTitle("Beacon Settings")
-                .setView(scrollView)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Save", (dialog, which) -> {
-                    String beacon = editBeaconInterval.getText().toString().trim();
-                    if (!beacon.isEmpty()) {
-                        prefs.edit().putString(SettingsFragment.PREF_BEACON_INTERVAL, beacon).apply();
-                    }
-                    SmartBeacon.setEnabled(ctx, switchSmart.isChecked());
-                    if (switchSmartBeacon != null) {
-                        switchSmartBeacon.setChecked(switchSmart.isChecked());
-                    }
-                    appendLog("Beacon settings saved");
-                    try {
-                        AtakBroadcast.getInstance().sendBroadcast(
-                                new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
-                    } catch (Exception ignored) {
-                    }
-                })
-                .show();
-    }
-
-    private void showSettingsDialog() {
-        Context ctx = getMapView().getContext();
-        android.content.SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(ctx);
-
-        ScrollView scrollView = new ScrollView(ctx);
-        LinearLayout layout = new LinearLayout(ctx);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        int pad = dip(ctx, 12);
-        layout.setPadding(pad, pad, pad, pad);
-        scrollView.addView(layout);
-
-        TextView beaconHeader = new TextView(ctx);
-        beaconHeader.setText("\nBeacon");
-        beaconHeader.setTextColor(0xFFFFFFFF);
-        beaconHeader.setTextSize(15f);
-        layout.addView(beaconHeader);
-
-        TextView beaconLabel = new TextView(ctx);
-        beaconLabel.setText("GPS Beacon Interval (seconds)");
-        beaconLabel.setTextColor(0xFFAAAAAA);
-        beaconLabel.setPadding(0, dip(ctx, 4), 0, dip(ctx, 2));
-        layout.addView(beaconLabel);
-
-        EditText editBeaconInterval = new EditText(ctx);
-        editBeaconInterval.setInputType(InputType.TYPE_CLASS_NUMBER);
-        editBeaconInterval.setText(prefs.getString(
-                SettingsFragment.PREF_BEACON_INTERVAL,
-                SettingsFragment.DEFAULT_BEACON_INTERVAL));
-        layout.addView(editBeaconInterval);
-
-        LinearLayout smartRow = new LinearLayout(ctx);
-        smartRow.setOrientation(LinearLayout.HORIZONTAL);
-        smartRow.setPadding(0, dip(ctx, 8), 0, dip(ctx, 2));
-
-        TextView smartLabel = new TextView(ctx);
-        smartLabel.setText("Enable Smart Beacon");
-        smartLabel.setTextColor(0xFFE0E0E0);
-        LinearLayout.LayoutParams smartLabelLp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        smartRow.addView(smartLabel, smartLabelLp);
-
-        Switch switchSmart = new Switch(ctx);
-        switchSmart.setChecked(SmartBeacon.isEnabled(ctx));
-        smartRow.addView(switchSmart);
-        layout.addView(smartRow);
-
-        Button btnSmartSettings = new Button(ctx);
-        btnSmartSettings.setText("Smart Beacon Settings");
-        applyPillButtonBackground(btnSmartSettings, COLOR_PILL_BUTTON_PRIMARY);
-        btnSmartSettings.setOnClickListener(v ->
-                SmartBeaconSettingsDialog.show(ctx, () -> {
-                    appendLog("Smart beacon settings updated.");
-                    try {
-                        AtakBroadcast.getInstance().sendBroadcast(
-                                new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
-                    } catch (Exception ignored) {
-                    }
-                }));
-        layout.addView(btnSmartSettings);
-
-        switchSmart.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            SmartBeacon.setEnabled(ctx, isChecked);
-            editBeaconInterval.setEnabled(!isChecked);
-            editBeaconInterval.setAlpha(isChecked ? 0.45f : 1.0f);
-        });
-        editBeaconInterval.setEnabled(!switchSmart.isChecked());
-        editBeaconInterval.setAlpha(switchSmart.isChecked() ? 0.45f : 1.0f);
-
-        new AlertDialog.Builder(ctx)
-                .setTitle("MeshCore Settings")
-                .setView(scrollView)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Save", (dialog, which) -> {
-                    String beacon = editBeaconInterval.getText().toString().trim();
-                    android.content.SharedPreferences.Editor editor = prefs.edit();
-                    if (!beacon.isEmpty()) {
-                        editor.putString(SettingsFragment.PREF_BEACON_INTERVAL, beacon);
-                    }
-                    editor.apply();
-                    SmartBeacon.setEnabled(ctx, switchSmart.isChecked());
-                    if (switchSmartBeacon != null) {
-                        switchSmartBeacon.setChecked(switchSmart.isChecked());
-                    }
-                    appendLog("Settings saved");
-                    try {
-                        AtakBroadcast.getInstance().sendBroadcast(
-                                new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
-                    } catch (Exception ignored) {
-                    }
-                })
-                .show();
     }
 
     private void onScanOrConnectClicked() {

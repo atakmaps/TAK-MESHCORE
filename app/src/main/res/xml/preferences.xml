@@ -23,15 +23,6 @@
         android:key="meshcore_cat_radio"
         android:title="Radio Settings">
 
-        <com.atakmap.android.gui.PanListPreference
-            android:key="meshcore_beacon_interval"
-            android:title="GPS Beacon Interval"
-            android:summary="How often to broadcast position"
-            android:defaultValue="60"
-            android:dialogTitle="Beacon Interval"
-            android:entries="@array/beacon_interval_labels"
-            android:entryValues="@array/beacon_interval_values" />
-
         <com.atakmap.android.gui.PanCheckBoxPreference
             android:key="meshcore_ping_reply_enabled"
             android:title="Send Ping Reply"

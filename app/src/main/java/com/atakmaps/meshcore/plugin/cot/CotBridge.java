@@ -27,7 +27,6 @@ import com.atakmap.coremap.cot.event.CotEvent;
 
 import com.atakmaps.meshcore.plugin.BuildConfig;
 import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
-import com.atakmaps.meshcore.plugin.beacon.SmartBeacon;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.chat.ChatBridge;
 import com.atakmaps.meshcore.plugin.crypto.EncryptionManager;
@@ -79,9 +78,7 @@ public class CotBridge {
     public static final String META_MESHCORE_MESH_NODE = "meshcore_mesh_node";
     /** Multi-line MeshCore details text for custom details panel. */
     public static final String META_MESHCORE_MESH_DETAILS = "meshcore_mesh_details";
-    private static final long STALE_GRACE_MS = 30_000L;
-    private static final long MIN_CONTACT_STALE_MS = 60_000L;
-    /** Inbound radio peers: ATAK uses CoT stale as marker TTL; keep ≥ 2h for sparse beacons. */
+    /** Inbound radio peers: ATAK uses CoT stale as marker TTL; keep ≥ 2h for sparse updates. */
     private static final long MIN_INBOUND_RADIO_STALE_MS = 2 * 60 * 60_000L;
 
     private static final long COT_RETRY_INTERVAL_MS   = 15_000L;  // 15s — faster recovery
@@ -815,30 +812,7 @@ public class CotBridge {
      * ATAK marks contacts stale based on the CoT stale timestamp we dispatch.
      */
     private long resolveInboundContactStaleMs() {
-        try {
-            Context prefsCtx = mapView != null && mapView.getContext() != null
-                    ? mapView.getContext()
-                    : pluginContext;
-            if (prefsCtx == null) {
-                return MIN_INBOUND_RADIO_STALE_MS;
-            }
-
-            long staleMs;
-            if (SmartBeacon.isEnabled(prefsCtx)) {
-                int slowRateSec = Math.max(1, SmartBeacon.getSlowRate(prefsCtx));
-                int fastRateSec = Math.max(1, SmartBeacon.getFastRate(prefsCtx));
-                int minTurnTimeSec = Math.max(1, SmartBeacon.getMinTurnTime(prefsCtx));
-                int expectedMaxGapSec = Math.max(slowRateSec, fastRateSec + minTurnTimeSec);
-                staleMs = expectedMaxGapSec * 1000L;
-            } else {
-                int fixedSec = Math.max(1, SettingsFragment.getBeaconIntervalSec(pluginContext));
-                staleMs = fixedSec * 1000L;
-            }
-            long fromBeacon = Math.max(MIN_CONTACT_STALE_MS, staleMs + STALE_GRACE_MS);
-            return Math.max(MIN_INBOUND_RADIO_STALE_MS, fromBeacon);
-        } catch (Exception ignored) {
-            return MIN_INBOUND_RADIO_STALE_MS;
-        }
+        return MIN_INBOUND_RADIO_STALE_MS;
     }
 
     /**
@@ -2192,7 +2166,7 @@ public class CotBridge {
         // Skip CoT we injected from the radio — loop prevention
         if (shouldSkipOutboundRelayWasInboundInject(uid)) return;
 
-        // Skip our own PLI — the beacon timer handles local position
+        // Skip our own PLI — manual beacon handles local position when the operator sends it
         String localUid = null;
         try { localUid = MapView.getDeviceUid(); } catch (Exception ignored) {}
         if (uid.equals(localUid)) return;

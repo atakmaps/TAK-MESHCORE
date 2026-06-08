@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.4.4`
+- Current version: `1.4.5`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -30,8 +30,7 @@ adb install -r app/build/outputs/apk/civ/debug/ATAK-Plugin-Meshcore-*.apk
 - **Setup Favorite Mesh Devices** button — opens device management directly from the main panel
 - GeoChat over RF transport
 - Contact-targeted CoT relay behavior
-- Manual beacon send
-- Smart Beacon with GPS Doppler speed, turn/low-speed logic, periodic timer, and safety floor
+- Manual beacon send (operator-initiated only; no automatic or timed beacons)
 - MeshCore GPS controls:
   - `Enable MeshCore GPS` — hardware on/off at the node
   - `Use MeshCore GPS for Position` — selects node GPS as the advert position source (gated on hardware toggle)
@@ -102,13 +101,15 @@ Includes:
 
 ## Changelog
 
+### v1.4.5
+
+- **Removed Smart Beacon and timed beacons:** MeshCore no longer sends automatic or interval-based position beacons. Use **Send Beacon** manually when you want to transmit position. Smart Beacon settings, GPS beacon interval, and the periodic post-connect beacon timer are removed.
+
 ### v1.4.4
 
-- **Smart Beacon GPS speed:** Periodic beacon decisions now use Android `LocationManager` GPS Doppler speed/bearing (`src=gps`) instead of ATAK self-marker meta. Position-derived speed remains as a startup fallback only.
-- **Periodic Smart Beacon timer:** Replaced one-shot post-connect beacon with a full periodic timer (fixed interval or Smart Beacon profile), matching UV-PRO behavior. First beacon fires 30s after connect when position is valid.
-- **Smart Beacon turn vs. low-speed logic:** Turn detection runs before the low-speed threshold check (fires at any speed > 0). Speed-interval beacons are suppressed at or below the configured low-speed threshold.
-- **Smart Beacon safety floor:** If the configured fixed beacon interval elapses without a Smart Beacon trigger, a beacon is sent anyway.
-- **Settings reschedule:** Saving Smart Beacon settings or toggling Smart Beacon on/off now broadcasts `BEACON_INTERVAL_CHANGED` to restart the beacon timer with new values.
+- **Smart Beacon GPS speed:** Periodic beacon decisions use Android `LocationManager` GPS Doppler speed/bearing.
+- **Periodic Smart Beacon timer:** Full periodic timer with fixed interval or Smart Beacon profile; first beacon 30s after connect.
+- **Smart Beacon turn vs. low-speed logic** and **safety floor** for fixed-interval fallback.
 
 ### v1.4.0
 
