@@ -27,6 +27,8 @@ import com.google.zxing.Result;
 import com.google.zxing.common.HybridBinarizer;
 import com.google.zxing.qrcode.QRCodeReader;
 
+import com.atakmap.android.ipc.AtakBroadcast;
+
 /**
  * Native QR scanner — uses the device camera directly with ZXing core decoding.
  * No AndroidX or external app required. Requests CAMERA permission at runtime.
@@ -164,27 +166,16 @@ public class QrScanActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void broadcastResult(String content) {
+        QrResultProvider.storePending(this, content);
         try {
-            android.os.Environment.getExternalStorageState();
-            java.io.File dir = getExternalCacheDir();
-            if (dir == null) dir = getCacheDir();
-            java.io.File file = new java.io.File(dir, "uvpro_qr_pending.txt");
-            if (content != null && !content.isEmpty()) {
-                try (java.io.FileWriter fw = new java.io.FileWriter(file, false)) {
-                    fw.write(System.currentTimeMillis() + "\n" + content);
-                }
-                file.setReadable(true, false);
-            } else {
-                file.delete();
+            Intent broadcast = new Intent(MeshCoreDropDownReceiver.ACTION_QR_CHANNEL_RESULT);
+            if (content != null) {
+                broadcast.putExtra(MeshCoreDropDownReceiver.EXTRA_QR_RESULT, content);
             }
+            AtakBroadcast.getInstance().sendBroadcast(broadcast);
         } catch (Exception e) {
-            Log.w(TAG, "Could not write QR result file", e);
+            Log.w(TAG, "AtakBroadcast failed", e);
         }
-        Intent broadcast = new Intent(MeshCoreDropDownReceiver.ACTION_QR_CHANNEL_RESULT);
-        if (content != null) {
-            broadcast.putExtra(MeshCoreDropDownReceiver.EXTRA_QR_RESULT, content);
-        }
-        sendBroadcast(broadcast);
     }
 
     @Override

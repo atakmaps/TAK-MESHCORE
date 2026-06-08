@@ -26,6 +26,11 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:exported="true" />
 
+        <provider
+            android:name="com.atakmaps.meshcore.plugin.QrResultProvider"
+            android:authorities="com.atakmaps.meshcore.plugin.qrresult"
+            android:exported="true" />
+
         <!-- Allow ATAK plugin discovery -->
         <activity android:name="com.atakmap.app.component"
             android:exported="true"
