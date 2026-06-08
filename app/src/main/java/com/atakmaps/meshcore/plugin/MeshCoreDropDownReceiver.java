@@ -712,8 +712,14 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (btnSmartBeaconSettings != null) {
             btnSmartBeaconSettings.setOnClickListener(v ->
-                    SmartBeaconSettingsDialog.show(getMapView().getContext(),
-                            () -> appendLog("Smart beacon settings updated")));
+                    SmartBeaconSettingsDialog.show(getMapView().getContext(), () -> {
+                        appendLog("Smart beacon settings updated.");
+                        try {
+                            AtakBroadcast.getInstance().sendBroadcast(
+                                    new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
+                        } catch (Exception ignored) {
+                        }
+                    }));
         }
         if (btnMeshSendAdvert != null) {
             btnMeshSendAdvert.setOnClickListener(v -> {
@@ -2857,8 +2863,14 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnSmartSettings.setText("Smart Beacon Settings");
         applyPillButtonBackground(btnSmartSettings, COLOR_PILL_BUTTON_PRIMARY);
         btnSmartSettings.setOnClickListener(v ->
-                SmartBeaconSettingsDialog.show(ctx,
-                        () -> appendLog("Smart beacon settings updated")));
+                SmartBeaconSettingsDialog.show(ctx, () -> {
+                    appendLog("Smart beacon settings updated.");
+                    try {
+                        AtakBroadcast.getInstance().sendBroadcast(
+                                new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
+                    } catch (Exception ignored) {
+                    }
+                }));
         layout.addView(btnSmartSettings);
 
         switchSmart.setOnCheckedChangeListener((buttonView, isChecked) -> {
@@ -2942,8 +2954,14 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnSmartSettings.setText("Smart Beacon Settings");
         applyPillButtonBackground(btnSmartSettings, COLOR_PILL_BUTTON_PRIMARY);
         btnSmartSettings.setOnClickListener(v ->
-                SmartBeaconSettingsDialog.show(ctx,
-                        () -> appendLog("Smart beacon settings updated")));
+                SmartBeaconSettingsDialog.show(ctx, () -> {
+                    appendLog("Smart beacon settings updated.");
+                    try {
+                        AtakBroadcast.getInstance().sendBroadcast(
+                                new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
+                    } catch (Exception ignored) {
+                    }
+                }));
         layout.addView(btnSmartSettings);
 
         switchSmart.setOnCheckedChangeListener((buttonView, isChecked) -> {

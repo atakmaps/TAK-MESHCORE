@@ -144,25 +144,8 @@ public class SmartBeacon {
         fastRate = Math.max(1, fastRate);
         slowRate = Math.max(fastRate + 1, slowRate);
 
-        // APRS SmartBeaconing rate model:
-        // - <= slow speed: slow rate
-        // - >= fast speed: fast rate
-        // - between: proportional spacing based on distance-per-position
-        int beaconRate;
-        if (speedMph <= lowSpeed) {
-            beaconRate = slowRate;
-        } else if (speedMph >= highSpeed) {
-            beaconRate = fastRate;
-        } else {
-            beaconRate = (int) Math.round((fastRate * (double) highSpeed) / speedMph);
-        }
-        beaconRate = Math.max(fastRate, Math.min(slowRate, beaconRate));
-
-        if (elapsedSec >= beaconRate) {
-            return true;
-        }
-
-        if (lastBeaconHeading >= 0 && speedMph > lowSpeed) {
+        // Turn check fires at any speed > 0, regardless of lowSpeed threshold.
+        if (lastBeaconHeading >= 0 && speedMph > 0) {
             double delta = Math.abs(headingDeg - lastBeaconHeading);
             if (delta > 180) delta = 360 - delta; // shortest arc
 
@@ -172,7 +155,22 @@ public class SmartBeacon {
             }
         }
 
-        return false;
+        // Speed-interval beacons only fire above lowSpeed threshold.
+        // Below lowSpeed: rely on floor interval in caller; no periodic speed beacons.
+        if (speedMph <= lowSpeed) {
+            return false;
+        }
+
+        // Proportional rate: fastRate at highSpeed, scaling up toward slowRate at lowSpeed.
+        int beaconRate;
+        if (speedMph >= highSpeed) {
+            beaconRate = fastRate;
+        } else {
+            beaconRate = (int) Math.round((fastRate * (double) highSpeed) / speedMph);
+        }
+        beaconRate = Math.max(fastRate, Math.min(slowRate, beaconRate));
+
+        return elapsedSec >= beaconRate;
     }
 
     /**
@@ -183,6 +181,12 @@ public class SmartBeacon {
     public void recordBeacon(double headingDeg) {
         lastBeaconTimeMs  = System.currentTimeMillis();
         lastBeaconHeading = headingDeg;
+    }
+
+    /** Seconds elapsed since the last beacon was recorded (or since epoch if never sent). */
+    public long elapsedSinceLastBeaconSec() {
+        if (lastBeaconTimeMs == 0) return Long.MAX_VALUE;
+        return (System.currentTimeMillis() - lastBeaconTimeMs) / 1000L;
     }
 
     /** Force next check to trigger a beacon (e.g. on startup or reconnect). */
