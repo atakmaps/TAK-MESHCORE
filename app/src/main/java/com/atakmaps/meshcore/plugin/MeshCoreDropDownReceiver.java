@@ -181,6 +181,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private EditText editMeshChannelMessage;
     private Button btnMeshChannelSend;
     private Switch switchMeshSendPositionWithAdvert;
+    private View rowMeshBeaconAdmin;
+    private Switch switchMeshBeaconEnabled;
+    private boolean suppressMeshBeaconSwitchCallbacks = false;
     private Switch switchMeshUseCallsignLocation;
     private Switch switchMeshUseCustomNodePosition;
     private TextView textMeshUseCallsignLocation;
@@ -617,6 +620,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnMeshChannelSend = rootView.findViewById(getId("btn_mesh_channel_send"));
         switchMeshSendPositionWithAdvert =
                 rootView.findViewById(getId("switch_mesh_send_position_with_advert"));
+        rowMeshBeaconAdmin = rootView.findViewById(getId("row_mesh_beacon_admin"));
+        switchMeshBeaconEnabled = rootView.findViewById(getId("switch_mesh_beacon_enabled"));
         switchMeshUseCallsignLocation =
                 rootView.findViewById(getId("switch_mesh_use_callsign_location"));
         switchMeshUseCustomNodePosition =
@@ -777,6 +782,25 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                     pushPhoneLocationToMeshNodeIfNeeded(true);
                 }
                 btManager.requestSelfInfo();
+            });
+        }
+        if (switchMeshBeaconEnabled != null) {
+            switchMeshBeaconEnabled.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (suppressMeshBeaconSwitchCallbacks || !buttonView.isPressed()) {
+                    return;
+                }
+                Context ctx = getMapView() != null ? getMapView().getContext() : null;
+                if (ctx == null || !com.atakmaps.meshcore.plugin.ui.AdminAccessGate.isUnlocked(ctx)) {
+                    updateMeshBeaconAdminUi();
+                    return;
+                }
+                SettingsFragment.setMeshBeaconEnabled(ctx, isChecked);
+                appendLog("Mesh Beacon " + (isChecked ? "enabled" : "disabled"));
+                try {
+                    AtakBroadcast.getInstance().sendBroadcast(
+                            new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
+                } catch (Exception ignored) {
+                }
             });
         }
         if (switchMeshUseCallsignLocation != null) {
@@ -2472,7 +2496,31 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         return v == null ? "-" : Integer.toString(v);
     }
 
+    private void updateMeshBeaconAdminUi() {
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        if (rowMeshBeaconAdmin == null) {
+            return;
+        }
+        boolean unlocked = ctx != null
+                && com.atakmaps.meshcore.plugin.ui.AdminAccessGate.isUnlocked(ctx);
+        rowMeshBeaconAdmin.setVisibility(unlocked ? View.VISIBLE : View.GONE);
+        if (!unlocked || switchMeshBeaconEnabled == null) {
+            return;
+        }
+        boolean meshConnected = btManager != null && btManager.isConnected();
+        suppressMeshBeaconSwitchCallbacks = true;
+        try {
+            switchMeshBeaconEnabled.setChecked(SettingsFragment.isMeshBeaconEnabled(ctx));
+            switchMeshBeaconEnabled.setEnabled(meshConnected);
+            switchMeshBeaconEnabled.setAlpha(meshConnected ? 1f : 0.45f);
+            rowMeshBeaconAdmin.setAlpha(meshConnected ? 1f : 0.85f);
+        } finally {
+            suppressMeshBeaconSwitchCallbacks = false;
+        }
+    }
+
     private void updateMeshGpsControlsUi() {
+        updateMeshBeaconAdminUi();
         boolean meshConnected = btManager != null && btManager.isConnected();
         boolean advertPositionEnabled = meshSendPositionWithAdvertRequested
                 || Boolean.TRUE.equals(meshSendPositionWithAdvertState);
@@ -4207,6 +4255,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             refreshFavoriteStrip();
             updateScanButtonText();
             checkPendingQrResult();
+            updateMeshBeaconAdminUi();
         }
     }
 

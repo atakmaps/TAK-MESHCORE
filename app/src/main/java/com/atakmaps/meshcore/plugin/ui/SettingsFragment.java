@@ -1,9 +1,11 @@
 package com.atakmaps.meshcore.plugin.ui;
 
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Typeface;
 import android.os.Bundle;
+import android.text.InputType;
 import android.preference.Preference;
 import android.preference.PreferenceCategory;
 import android.preference.PreferenceGroup;
@@ -53,7 +55,11 @@ public class SettingsFragment extends PluginPreferenceFragment
     public static final String PREF_SA_RELAY_ENABLED = "meshcore_sa_relay_enabled";
     public static final String PREF_RF_TO_TAK_UPLINK_ENABLED = "meshcore_rf_to_tak_uplink_enabled";
     public static final String PREF_PING_REPLY_ENABLED = "meshcore_ping_reply_enabled";
+    public static final String PREF_BEACON_INTERVAL = "meshcore_beacon_interval";
+    /** National-only mesh periodic beacons — hidden until administrative unlock. */
+    public static final String PREF_MESH_BEACON_ENABLED = "meshcore_mesh_beacon_enabled";
 
+    public static final String KEY_UNLOCK_ADMIN = "meshcore_admin_access";
     public static final String KEY_CAT_ADMINISTRATION = "meshcore_cat_administration";
     public static final String KEY_ADMIN_LEADERSHIP_WARNING = "meshcore_admin_leadership_warning";
     public static final String KEY_DISTRIBUTE_NET_SLOTS = "meshcore_distribute_net_slots";
@@ -64,10 +70,14 @@ public class SettingsFragment extends PluginPreferenceFragment
     public static final String KEY_CAT_RADIO = "meshcore_cat_radio";
 
     public static final boolean DEFAULT_AUTO_RECONNECT = true;
+    public static final String DEFAULT_BEACON_INTERVAL = "60";
     public static final String DEFAULT_RETRY_INTERVAL_MIN = "2";
     public static final String DEFAULT_RETRY_MAX = "3";
 
     private static Context staticPluginContext;
+
+    private PreferenceCategory adminCategory;
+    private boolean adminCategoryRemoved = false;
 
     /**
      * Zero-arg constructor required by Android fragment system.
@@ -100,6 +110,7 @@ public class SettingsFragment extends PluginPreferenceFragment
         }
         ensureBluetoothDevicesPreference();
         wireAdministrationPreferences();
+        wireAdminAccessPreference();
     }
 
     /**
@@ -129,6 +140,7 @@ public class SettingsFragment extends PluginPreferenceFragment
         getPreferenceManager().getSharedPreferences()
                 .registerOnSharedPreferenceChangeListener(this);
         styleAdminLeadershipWarning();
+        applyAdminCategoryVisibility();
         updateAdminControlsEnabled();
         updateSummaries();
     }
@@ -153,6 +165,88 @@ public class SettingsFragment extends PluginPreferenceFragment
         updateSummaries();
     }
 
+    private void wireAdminAccessPreference() {
+        adminCategory = (PreferenceCategory) findPreference(KEY_CAT_ADMINISTRATION);
+        Preference unlock = findPreference(KEY_UNLOCK_ADMIN);
+        if (unlock != null) {
+            unlock.setOnPreferenceClickListener(preference -> {
+                Context ctx = getActivity() != null ? getActivity() : getContext();
+                if (ctx == null && MapView.getMapView() != null) {
+                    ctx = MapView.getMapView().getContext();
+                }
+                if (ctx == null) {
+                    return true;
+                }
+                if (AdminAccessGate.isUnlocked(ctx)) {
+                    Toast.makeText(ctx, "Administrative Settings already unlocked",
+                            Toast.LENGTH_SHORT).show();
+                    return true;
+                }
+                promptAdministrativeUnlock(ctx, () -> applyAdminCategoryVisibility());
+                return true;
+            });
+        }
+        applyAdminCategoryVisibility();
+    }
+
+    private void applyAdminCategoryVisibility() {
+        Context ctx = getActivity() != null ? getActivity() : getContext();
+        if (ctx == null) {
+            ctx = staticPluginContext;
+        }
+        boolean unlocked = AdminAccessGate.isUnlocked(ctx);
+        Preference unlock = findPreference(KEY_UNLOCK_ADMIN);
+        if (unlock != null) {
+            unlock.setSummary(unlocked
+                    ? "Unlocked — leadership controls below"
+                    : "Tap to enter password");
+        }
+        android.preference.PreferenceScreen screen = getPreferenceScreen();
+        if (adminCategory == null || screen == null) {
+            return;
+        }
+        if (!unlocked && adminCategory.getParent() != null) {
+            screen.removePreference(adminCategory);
+            adminCategoryRemoved = true;
+        } else if (unlocked && adminCategoryRemoved) {
+            screen.addPreference(adminCategory);
+            adminCategoryRemoved = false;
+            updateAdminControlsEnabled();
+            updateSummaries();
+        }
+    }
+
+    public static void promptAdministrativeUnlock(Context ctx, Runnable onUnlocked) {
+        if (ctx == null) {
+            return;
+        }
+        if (!AdminAccessGate.isConfigured()) {
+            Toast.makeText(ctx,
+                    "Administrative password not configured in this build",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        final EditText input = new EditText(ctx);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        new AlertDialog.Builder(ctx)
+                .setTitle("Administrative Settings")
+                .setMessage("Enter password to unlock hidden settings.")
+                .setView(input)
+                .setPositiveButton("Unlock", (dialog, which) -> {
+                    if (AdminAccessGate.unlock(ctx, input.getText().toString())) {
+                        Toast.makeText(ctx, "Administrative Settings unlocked",
+                                Toast.LENGTH_SHORT).show();
+                        if (onUnlocked != null) {
+                            onUnlocked.run();
+                        }
+                    } else {
+                        Toast.makeText(ctx, "Incorrect password", Toast.LENGTH_LONG).show();
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
     private void wireAdministrationPreferences() {
         Preference distribute = findPreference(KEY_DISTRIBUTE_NET_SLOTS);
         if (distribute != null) {
@@ -162,6 +256,10 @@ public class SettingsFragment extends PluginPreferenceFragment
                     ctx = MapView.getMapView().getContext();
                 }
                 if (ctx == null) {
+                    return true;
+                }
+                if (!AdminAccessGate.isUnlocked(ctx)) {
+                    promptAdministrativeUnlock(ctx, () -> applyAdminCategoryVisibility());
                     return true;
                 }
                 if (!getPrefs(ctx).getBoolean(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false)) {
@@ -235,6 +333,13 @@ public class SettingsFragment extends PluginPreferenceFragment
     private void updateSummaries() {
         SharedPreferences prefs =
                 getPreferenceManager().getSharedPreferences();
+
+        Preference beaconPref = findPreference(PREF_BEACON_INTERVAL);
+        if (beaconPref != null) {
+            int interval = getBeaconIntervalSec(
+                    getActivity() != null ? getActivity() : staticPluginContext);
+            beaconPref.setSummary("Every " + interval + " seconds (when Mesh Beacon enabled)");
+        }
 
         Preference retryIntervalPref = findPreference(PREF_RETRY_INTERVAL_MIN);
         if (retryIntervalPref != null) {
@@ -324,6 +429,33 @@ public class SettingsFragment extends PluginPreferenceFragment
         } catch (Exception e) {
         }
         return "UNKNOWN";
+    }
+
+    public static int getBeaconIntervalSec(Context context) {
+        String val = getPrefs(context)
+                .getString(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL);
+        try {
+            return Integer.parseInt(val);
+        } catch (NumberFormatException e) {
+            return 60;
+        }
+    }
+
+    public static boolean isMeshBeaconEnabled(Context context) {
+        if (context == null) {
+            return false;
+        }
+        if (!AdminAccessGate.isUnlocked(context)) {
+            return false;
+        }
+        return getPrefs(context).getBoolean(PREF_MESH_BEACON_ENABLED, false);
+    }
+
+    public static void setMeshBeaconEnabled(Context context, boolean enabled) {
+        if (context == null) {
+            return;
+        }
+        getPrefs(context).edit().putBoolean(PREF_MESH_BEACON_ENABLED, enabled).apply();
     }
 
     public static long getRetryIntervalMs(Context context) {
@@ -435,6 +567,7 @@ public class SettingsFragment extends PluginPreferenceFragment
      */
     public static final class AdministrationUi {
         public Switch adminEnabled;
+        public Switch meshBeaconEnabled;
         public EditText editSlotCount;
         public EditText editSlotTime;
         public Button btnDistribute;
@@ -444,10 +577,13 @@ public class SettingsFragment extends PluginPreferenceFragment
 
     /** Adds Administration section views to a scrollable dialog layout. */
     public static AdministrationUi appendAdministrationSection(Context ctx, LinearLayout layout) {
+        if (!AdminAccessGate.isUnlocked(ctx)) {
+            return null;
+        }
         AdministrationUi ui = new AdministrationUi();
 
         TextView header = new TextView(ctx);
-        header.setText("\nAdministration");
+        header.setText("\nAdministrative Settings");
         header.setTextColor(0xFF00BCD4);
         header.setTextSize(14);
         header.setTypeface(Typeface.DEFAULT_BOLD);
@@ -460,6 +596,30 @@ public class SettingsFragment extends PluginPreferenceFragment
         warning.setTypeface(Typeface.DEFAULT_BOLD);
         warning.setPadding(0, 8, 0, 8);
         layout.addView(warning);
+
+        TextView meshBeaconWarning = new TextView(ctx);
+        meshBeaconWarning.setText(
+                "Mesh Beacon: activated by national only. Do not use unless directed by your team leader.");
+        meshBeaconWarning.setTextColor(0xFFFFFFFF);
+        meshBeaconWarning.setTextSize(12);
+        meshBeaconWarning.setTypeface(Typeface.DEFAULT_BOLD);
+        meshBeaconWarning.setPadding(0, 4, 0, 8);
+        layout.addView(meshBeaconWarning);
+
+        LinearLayout rowMeshBeacon = new LinearLayout(ctx);
+        rowMeshBeacon.setOrientation(LinearLayout.HORIZONTAL);
+        rowMeshBeacon.setGravity(Gravity.CENTER_VERTICAL);
+        TextView labelMeshBeacon = new TextView(ctx);
+        labelMeshBeacon.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        labelMeshBeacon.setText("Enable Mesh Beacon");
+        labelMeshBeacon.setTextColor(0xFFFFFFFF);
+        labelMeshBeacon.setTextSize(13);
+        rowMeshBeacon.addView(labelMeshBeacon);
+        ui.meshBeaconEnabled = new Switch(ctx);
+        ui.meshBeaconEnabled.setChecked(isMeshBeaconEnabled(ctx));
+        rowMeshBeacon.addView(ui.meshBeaconEnabled);
+        layout.addView(rowMeshBeacon);
 
         LinearLayout rowAdmin = new LinearLayout(ctx);
         rowAdmin.setOrientation(LinearLayout.HORIZONTAL);
@@ -537,6 +697,8 @@ public class SettingsFragment extends PluginPreferenceFragment
         prefs.edit()
                 .putBoolean(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED,
                         ui.adminEnabled.isChecked())
+                .putBoolean(PREF_MESH_BEACON_ENABLED,
+                        ui.meshBeaconEnabled != null && ui.meshBeaconEnabled.isChecked())
                 .apply();
         try {
             int slots = Integer.parseInt(ui.editSlotCount.getText().toString().trim());

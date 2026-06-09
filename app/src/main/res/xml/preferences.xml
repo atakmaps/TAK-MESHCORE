@@ -81,9 +81,16 @@
 
     </PreferenceCategory>
 
+    <Preference
+        android:key="meshcore_admin_access"
+        android:title="Administrative Settings"
+        android:summary="Tap to enter password"
+        android:persistent="false"
+        android:selectable="true" />
+
     <PreferenceCategory
         android:key="meshcore_cat_administration"
-        android:title="Administration">
+        android:title="Administrative Settings">
 
         <Preference
             android:key="meshcore_admin_leadership_warning"
@@ -92,6 +99,29 @@
             android:selectable="false"
             android:persistent="false"
             android:enabled="true" />
+
+        <Preference
+            android:key="meshcore_mesh_beacon_national_warning"
+            android:title="Mesh Beacon — national activation only"
+            android:summary="Do not use unless directed by your team leader"
+            android:selectable="false"
+            android:persistent="false"
+            android:enabled="true" />
+
+        <com.atakmap.android.gui.PanCheckBoxPreference
+            android:key="meshcore_mesh_beacon_enabled"
+            android:title="Enable Mesh Beacon"
+            android:summary="Timed mesh position beacons"
+            android:defaultValue="false" />
+
+        <com.atakmap.android.gui.PanListPreference
+            android:key="meshcore_beacon_interval"
+            android:title="GPS Beacon Interval"
+            android:summary="Mesh beacon interval when Mesh Beacon is enabled"
+            android:defaultValue="60"
+            android:dialogTitle="Beacon Interval"
+            android:entries="@array/beacon_interval_labels"
+            android:entryValues="@array/beacon_interval_values" />
 
         <com.atakmap.android.gui.PanCheckBoxPreference
             android:key="meshcore_admin_settings_enabled"
