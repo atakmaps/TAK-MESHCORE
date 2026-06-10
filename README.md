@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.4.7`
+- Current version: `1.4.8`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -100,6 +100,12 @@ Includes:
 - Updated scan UX with active discovery pulse
 
 ## Changelog
+
+### v1.4.8
+
+- **Directed contact ping:** Directed `TYPE_PING` targets only the intended peer; reply toasts on the sender are filtered to that callsign.
+- **Radial Ping:** Adds **Ping** to the stock radial **Contact** submenu; uses cached mesh radio icon via `base64://` GL assets.
+- **Connector icons:** Ping, Send Message, and Favorite connectors cache `ic_meshcore` as `file://` URIs for reliable Connectors page rendering.
 
 ### v1.4.7
 
