@@ -47,9 +47,9 @@ public final class PingReplyNotifier {
         String target = targetCallsign != null ? targetCallsign.trim() : "";
         Log.d(TAG, "Directed ping to " + target + " via " + transportLabel);
         if (target.isEmpty()) {
-            showToast(context, "Position request sent");
+            showToast(context, "Ping sent");
         } else {
-            showToast(context, "Position request sent to " + target);
+            showToast(context, "Ping sent to " + target);
         }
     }
 

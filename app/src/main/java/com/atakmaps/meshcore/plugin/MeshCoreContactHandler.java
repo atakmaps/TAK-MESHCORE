@@ -169,8 +169,8 @@ public class MeshCoreContactHandler extends
                 }
                 boolean ok = PositionRequester.requestPosition(pluginContext, target);
                 Toast.makeText(pluginContext,
-                        ok ? "Position request sent to " + target
-                                : "Position request failed (radio not connected)",
+                        ok ? "Ping sent to " + target
+                                : "Ping failed (radio not connected)",
                         Toast.LENGTH_LONG).show();
                 return true;
             }

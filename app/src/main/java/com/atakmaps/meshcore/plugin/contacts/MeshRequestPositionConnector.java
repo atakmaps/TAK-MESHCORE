@@ -25,7 +25,7 @@ public final class MeshRequestPositionConnector extends Connector {
 
     @Override
     public String getConnectionLabel() {
-        return "Request position";
+        return "Ping";
     }
 
     @Override
