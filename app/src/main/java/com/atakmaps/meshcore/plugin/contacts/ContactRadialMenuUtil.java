@@ -49,6 +49,7 @@ public final class ContactRadialMenuUtil {
             try {
                 pingActionResource = encodeAssetAsBase64Menu(pluginContext,
                         "actions/radial_ping_contact.xml");
+                ContactConnectorIcons.warmCache(pluginContext);
                 menuFactory = new ContactRadialMenuFactory(pluginContext, pingActionResource);
                 registerFactoryWhenReady();
                 Log.i(TAG, "Contact radial Ping factory ready");

@@ -353,12 +353,10 @@ public class MeshCorePacket {
     }
 
     private static String decodeOptionalTargetCallsign(byte[] data) {
-        if (data == null || data.length <= 6) {
+        if (data == null || data.length < 12) {
             return null;
         }
-        int targetLen = Math.min(6, data.length - 6);
-        String target = new String(data, 6, targetLen,
-                java.nio.charset.StandardCharsets.US_ASCII).trim();
+        String target = decodeSixCharCallsign(data, 6);
         return target.isEmpty() ? null : target;
     }
 

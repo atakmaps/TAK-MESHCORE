@@ -117,6 +117,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
     public void onCreate(Context context, Intent intent, MapView view) {
         this.pluginContext = context;
         this.mapView = view;
+        com.atakmaps.meshcore.plugin.contacts.ContactConnectorIcons.warmCache(context);
 
         // Configure update-server TLS + prefs before BT/CoT subsystems start.
         // Mirrors the same call in the Lifecycle constructor (belt-and-suspenders).

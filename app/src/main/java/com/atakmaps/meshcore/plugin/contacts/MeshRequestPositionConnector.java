@@ -30,6 +30,10 @@ public final class MeshRequestPositionConnector extends Connector {
 
     @Override
     public String getIconUri() {
+        String cached = ContactConnectorIcons.getPingConnectorIconUri(null);
+        if (cached != null && !cached.isEmpty()) {
+            return cached;
+        }
         return "android.resource://" + PACKAGE + "/" + R.drawable.ic_meshcore;
     }
 }

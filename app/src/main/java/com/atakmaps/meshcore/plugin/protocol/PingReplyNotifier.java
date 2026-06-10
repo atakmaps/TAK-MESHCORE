@@ -24,6 +24,8 @@ public final class PingReplyNotifier {
     private static final long REPLY_WINDOW_BUFFER_MS = 8000L;
 
     private static volatile long pingSentAtMs;
+    /** Non-null after a directed ping — only this station may trigger a reply toast. */
+    private static volatile String directedPingTargetCallsign;
     private static final Set<String> toastedReplyKeys = ConcurrentHashMap.newKeySet();
 
     private PingReplyNotifier() {
@@ -32,6 +34,7 @@ public final class PingReplyNotifier {
     /** Call after a broadcast ping frame is successfully transmitted. */
     public static void notePingSent(Context context) {
         pingSentAtMs = System.currentTimeMillis();
+        directedPingTargetCallsign = null;
         toastedReplyKeys.clear();
         Log.d(TAG, "Ping sent — awaiting replies for up to "
                 + formatWaitSeconds(context) + "s");
@@ -45,6 +48,7 @@ public final class PingReplyNotifier {
         pingSentAtMs = System.currentTimeMillis();
         toastedReplyKeys.clear();
         String target = targetCallsign != null ? targetCallsign.trim() : "";
+        directedPingTargetCallsign = target.isEmpty() ? null : target;
         Log.d(TAG, "Directed ping to " + target + " via " + transportLabel);
         if (target.isEmpty()) {
             showToast(context, "Ping sent");
@@ -112,6 +116,15 @@ public final class PingReplyNotifier {
         if (elapsed > maxWait) {
             Log.d(TAG, "Skip ping-reply toast (" + source + "): outside window elapsed="
                     + elapsed + "ms max=" + maxWait + "ms peer=" + peerCallsign);
+            return;
+        }
+
+        String directedTarget = directedPingTargetCallsign;
+        if (directedTarget != null && !directedTarget.isEmpty()
+                && !CallsignUtil.isSameRadioStation(peerCallsign, directedTarget)) {
+            Log.d(TAG, "Skip ping-reply toast (" + source + "): peer=" + peerCallsign
+                    + " is not directed target " + directedTarget
+                    + " elapsed=" + elapsed + "ms");
             return;
         }
 

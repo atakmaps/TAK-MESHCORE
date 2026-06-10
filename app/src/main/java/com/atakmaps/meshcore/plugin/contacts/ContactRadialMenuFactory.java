@@ -39,7 +39,7 @@ public final class ContactRadialMenuFactory implements MapMenuFactory {
     private volatile boolean registered;
 
     public ContactRadialMenuFactory(Context pluginContext, String pingActionResource) {
-        this.pluginContext = pluginContext.getApplicationContext();
+        this.pluginContext = pluginContext;
         this.pingActionResource = pingActionResource;
         MapView mapView = MapView.getMapView();
         Context appContext = mapView.getContext();
@@ -196,8 +196,13 @@ public final class ContactRadialMenuFactory implements MapMenuFactory {
         if (mapView == null) {
             return null;
         }
+        WidgetIcon pingIcon = buildPingIcon();
+        if (pingIcon == null) {
+            android.util.Log.w("MeshCore.RadialMenu", "Ping icon unavailable — omitting radial button");
+            return null;
+        }
         MapMenuButtonWidget button = new MapMenuButtonWidget(mapView.getContext());
-        button.setIcon(buildPingIcon());
+        button.setIcon(pingIcon);
         button.setOnButtonClickHandler(new IMapMenuButtonWidget.OnButtonClickHandler() {
             @Override
             public boolean isSupported(Object target) {
@@ -215,8 +220,14 @@ public final class ContactRadialMenuFactory implements MapMenuFactory {
     }
 
     private WidgetIcon buildPingIcon() {
-        MapDataRef ref = MapDataRef.parseUri(
-                "android.resource://com.atakmaps.meshcore.plugin/drawable/ic_meshcore");
+        String iconUri = ContactConnectorIcons.getRadialPingIconDataUri(pluginContext);
+        if (iconUri == null || iconUri.isEmpty()) {
+            return null;
+        }
+        MapDataRef ref = MapDataRef.parseUri(iconUri);
+        if (ref == null) {
+            return null;
+        }
         return new WidgetIcon.Builder()
                 .setImageRef(0, ref)
                 .setAnchor(16, 16)
