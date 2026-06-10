@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.4.5`
+- Current version: `1.4.7`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -100,6 +100,16 @@ Includes:
 - Updated scan UX with active discovery pulse
 
 ## Changelog
+
+### v1.4.7
+
+- **Connection battery indicator:** Green percent badge beside the connected MeshCore node name in the plugin panel; polls via native battery packets and `GET_STATS` fallback when needed.
+- **Per-contact Ping (Connectors page):** Contact card page 3 adds a **Ping** action that sends a directed position request to that mesh peer over the active BLE transport.
+- **Contact card defaults:** Mesh contacts use native GeoChat as the default connector; plugin notification badge suppressed in favor of ATAK's conversation unread count.
+
+### v1.4.6
+
+- Password-gated admin settings and national Mesh Beacon toggle.
 
 ### v1.4.5
 
