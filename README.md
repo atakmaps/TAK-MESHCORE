@@ -41,6 +41,10 @@ adb install -r app/build/outputs/apk/civ/debug/ATAK-Plugin-Meshcore-*.apk
   - Minification strips non-essential detail to reduce fragment count
   - Immediate double-send (T+3s) for resilience against brief RF collisions
   - App-layer ACK + retry (15s × 5 attempts) — automatic retransmit until receiver confirms delivery
+- **Connection battery indicator** — green percent badge beside the connected node name in the plugin panel
+- **Per-contact Ping (Connectors page)** — contact card page 3 **Ping** sends a directed position request to that mesh peer over BLE
+- **Radial Ping (contact submenu)** — long-press contact → radial **Contact** icon → **Ping** (mesh radio icon); same directed ping path as Connectors
+- **Directed vs broadcast ping** — dropdown **Send Ping** broadcasts to all stations; per-contact Ping targets one callsign and filters reply toasts to that peer
 - Map status overlay with panel-open tap behavior
 
 ## Connection Modes
@@ -103,9 +107,9 @@ Includes:
 
 ### v1.4.8
 
-- **Directed contact ping:** Directed `TYPE_PING` targets only the intended peer; reply toasts on the sender are filtered to that callsign.
-- **Radial Ping:** Adds **Ping** to the stock radial **Contact** submenu; uses cached mesh radio icon via `base64://` GL assets.
-- **Connector icons:** Ping, Send Message, and Favorite connectors cache `ic_meshcore` as `file://` URIs for reliable Connectors page rendering.
+- **Directed contact ping:** Directed `TYPE_PING` targets only the intended peer; non-target stations ignore the ping for reply purposes; reply toasts on the sender are filtered to that callsign.
+- **Radial Ping:** Long-press contact → radial **Contact** submenu → **Ping**; uses cached mesh radio icon via `base64://` GL assets (stock friendly menu unchanged).
+- **Connector icons:** Ping, Send Message, and Favorite connectors cache `ic_meshcore` as `file://` URIs so icons render reliably on the Connectors page.
 
 ### v1.4.7
 
