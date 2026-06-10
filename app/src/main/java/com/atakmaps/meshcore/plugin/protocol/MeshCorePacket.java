@@ -1,5 +1,7 @@
 package com.atakmaps.meshcore.plugin.protocol;
 
+import com.atakmaps.meshcore.plugin.util.CallsignUtil;
+
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -346,19 +348,30 @@ public class MeshCorePacket {
             return null;
         }
         String source = decodeSixCharCallsign(data, 0);
-        String target = data.length >= 12 ? decodeSixCharCallsign(data, 6) : null;
-        if (target != null && target.isEmpty()) {
-            target = null;
-        }
+        String target = decodeOptionalTargetCallsign(data);
         return new PingPayload(source, target);
     }
 
+    private static String decodeOptionalTargetCallsign(byte[] data) {
+        if (data == null || data.length <= 6) {
+            return null;
+        }
+        int targetLen = Math.min(6, data.length - 6);
+        String target = new String(data, 6, targetLen,
+                java.nio.charset.StandardCharsets.US_ASCII).trim();
+        return target.isEmpty() ? null : target;
+    }
+
     private static byte[] encodePingPayload(String sender, String target) {
-        boolean directed = target != null && !target.trim().isEmpty();
+        String senderWire = CallsignUtil.toRadioCallsign(sender);
+        String targetWire = target != null && !target.trim().isEmpty()
+                ? CallsignUtil.toRadioCallsign(target)
+                : "";
+        boolean directed = !targetWire.isEmpty();
         byte[] out = new byte[directed ? 12 : 6];
-        copySixCharCallsign(out, 0, sender);
+        copySixCharCallsign(out, 0, senderWire);
         if (directed) {
-            copySixCharCallsign(out, 6, target);
+            copySixCharCallsign(out, 6, targetWire);
         }
         return out;
     }

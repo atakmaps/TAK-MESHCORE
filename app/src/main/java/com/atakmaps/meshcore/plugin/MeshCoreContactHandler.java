@@ -160,16 +160,17 @@ public class MeshCoreContactHandler extends
                             Toast.LENGTH_LONG).show();
                     return true;
                 }
-                String target = resolveRadioCallsignForContact(ic);
-                if (target == null || target.isEmpty()) {
+                String atakTarget = resolvePingTargetCallsign(ic);
+                if (atakTarget == null || atakTarget.isEmpty()) {
                     Toast.makeText(pluginContext,
                             "Could not resolve contact callsign",
                             Toast.LENGTH_LONG).show();
                     return true;
                 }
-                boolean ok = PositionRequester.requestPosition(pluginContext, target);
+                boolean ok = PositionRequester.requestPosition(
+                        pluginContext, uid, atakTarget);
                 Toast.makeText(pluginContext,
-                        ok ? "Ping sent to " + target
+                        ok ? "Ping sent to " + atakTarget
                                 : "Ping failed (radio not connected)",
                         Toast.LENGTH_LONG).show();
                 return true;
@@ -419,33 +420,97 @@ public class MeshCoreContactHandler extends
     }
 
     /**
-     * Resolves a 6-character radio callsign for directed ping / position request.
+     * Resolves the ATAK callsign for a directed ping to this specific contact.
      */
-    public static String resolveRadioCallsignForContact(IndividualContact contact) {
+    public static String resolvePingTargetCallsign(IndividualContact contact) {
         if (contact == null) {
             return "";
         }
         String uid = contact.getUID();
-        if (uid != null && uid.startsWith("ANDROID-")) {
-            return CallsignUtil.toRadioCallsign(uid.substring("ANDROID-".length()));
+        String contactName = contact.getName();
+
+        CotBridge bridge = ContactMergeUtil.getMergeRoutingBridge();
+        if (bridge != null && uid != null && !uid.trim().isEmpty()) {
+            String registered = bridge.resolveRegisteredCallsignForUid(uid, contactName);
+            if (registered != null && !registered.trim().isEmpty()) {
+                return stripMeshSuffix(registered.trim());
+            }
         }
+
+        String fromName = stripMeshSuffix(contactName);
+        if (!fromName.isEmpty()) {
+            return fromName;
+        }
+
         com.atakmap.android.maps.MapView mv = com.atakmap.android.maps.MapView.getMapView();
         if (mv != null && mv.getRootGroup() != null && uid != null) {
             MapItem item = mv.getRootGroup().deepFindUID(uid);
             if (item != null) {
                 String mapCall = item.getMetaString("callsign", item.getTitle());
                 if (mapCall != null && !mapCall.trim().isEmpty()) {
-                    return CallsignUtil.toRadioCallsign(mapCall.trim());
+                    return stripMeshSuffix(mapCall.trim());
                 }
             }
         }
-        String name = contact.getName();
-        if (name != null && !name.trim().isEmpty()) {
-            String base = name.trim();
-            if (base.toUpperCase(Locale.US).endsWith("-MESH")) {
-                base = base.substring(0, base.length() - 5).trim();
+
+        String geoChatCallsign = geoChatCallsignFromContact(contact);
+        if (!geoChatCallsign.isEmpty()) {
+            return stripMeshSuffix(geoChatCallsign);
+        }
+
+        if (uid != null && uid.startsWith("ANDROID-")) {
+            String bare = uid.substring("ANDROID-".length());
+            if (!CotBridge.isOpaqueDeviceUid(bare)) {
+                return stripMeshSuffix(bare);
             }
-            return CallsignUtil.toRadioCallsign(base);
+        }
+        return "";
+    }
+
+    /**
+     * Resolves a 6-character radio callsign for directed ping / position request.
+     */
+    public static String resolveRadioCallsignForContact(IndividualContact contact) {
+        String atakTarget = resolvePingTargetCallsign(contact);
+        if (atakTarget.isEmpty()) {
+            return "";
+        }
+        return CallsignUtil.toRadioCallsign(atakTarget);
+    }
+
+    private static String stripMeshSuffix(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String base = raw.trim();
+        if (base.isEmpty()) {
+            return "";
+        }
+        if (base.toUpperCase(Locale.US).endsWith("-MESH")) {
+            base = base.substring(0, base.length() - 5).trim();
+        }
+        return base;
+    }
+
+    private static String geoChatCallsignFromContact(IndividualContact contact) {
+        if (contact == null) {
+            return "";
+        }
+        try {
+            com.atakmap.android.contact.Connector conn =
+                    contact.getConnector(GeoChatConnector.CONNECTOR_TYPE);
+            if (!(conn instanceof GeoChatConnector)) {
+                return "";
+            }
+            String cs = conn.getConnectionString();
+            if (cs == null || cs.trim().isEmpty()) {
+                return "";
+            }
+            int lastColon = cs.lastIndexOf(':');
+            if (lastColon >= 0 && lastColon + 1 < cs.length()) {
+                return cs.substring(lastColon + 1).trim();
+            }
+        } catch (Exception ignored) {
         }
         return "";
     }

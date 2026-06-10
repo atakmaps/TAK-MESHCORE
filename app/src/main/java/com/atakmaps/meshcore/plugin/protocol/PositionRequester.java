@@ -34,6 +34,14 @@ public final class PositionRequester {
     }
 
     public static boolean requestPosition(Context context, String targetCallsign) {
+        return requestPosition(context, null, targetCallsign);
+    }
+
+    public static boolean requestPosition(Context context, String contactUid,
+                                          String targetCallsign) {
+        if (targetCallsign == null || targetCallsign.trim().isEmpty()) {
+            return false;
+        }
         BtConnectionManager tx = transport;
         if (tx == null || !tx.isConnected()) {
             Log.w(TAG, "Request position: not connected");
@@ -44,12 +52,21 @@ public final class PositionRequester {
             return false;
         }
         String sender = SettingsFragment.getCallsign(ctx);
-        String targetRadio = CallsignUtil.toRadioCallsign(targetCallsign.trim());
+        String atakTarget = targetCallsign.trim();
+        String targetRadio = CallsignUtil.toRadioCallsign(atakTarget);
         if (targetRadio.isEmpty()) {
             return false;
         }
+        Log.i(TAG, "Directed ping uid=" + contactUid
+                + " atak=" + atakTarget + " wire=" + targetRadio);
         try {
-            MeshCorePacket packet = MeshCorePacket.createDirectedPingPacket(sender, targetRadio);
+            MeshCorePacket packet = MeshCorePacket.createDirectedPingPacket(sender, atakTarget);
+            byte[] payload = packet.getPayload();
+            if (payload == null || payload.length != 12) {
+                Log.e(TAG, "Directed ping encode failed: payloadLen="
+                        + (payload == null ? 0 : payload.length));
+                return false;
+            }
             byte[] packetBytes = packet.encode();
             EncryptionManager em = encryptionManager;
             if (em != null && em.isEnabled()) {
@@ -62,7 +79,7 @@ public final class PositionRequester {
             Ax25Frame frame = Ax25Frame.createMeshCoreFrame(sender, 0, packetBytes);
             boolean ok = tx.sendKissFrame(frame.encode());
             if (ok) {
-                PingReplyNotifier.noteDirectedPingSent(ctx, targetRadio, "MeshCore");
+                PingReplyNotifier.noteDirectedPingSent(ctx, atakTarget, "MeshCore");
             }
             return ok;
         } catch (Exception e) {

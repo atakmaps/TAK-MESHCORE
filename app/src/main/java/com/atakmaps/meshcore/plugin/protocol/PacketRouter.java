@@ -214,33 +214,36 @@ public class PacketRouter {
                 if (pingPayload == null) {
                     break;
                 }
+                byte[] pingRawPayload = packet.getPayload();
+                int pingPayloadLen = pingRawPayload != null ? pingRawPayload.length : 0;
                 String pingCall = pingPayload.sourceCallsign;
                 Log.d(TAG, "Ping from: " + pingCall
                         + (pingPayload.isDirected()
                         ? " (directed to " + pingPayload.targetCallsign + ")"
-                        : " (broadcast)"));
+                        : " (broadcast)")
+                        + " payloadLen=" + pingPayloadLen);
                 MapView pingMv = MapView.getMapView();
-                if (pingMv != null) {
+                boolean shouldReply = !pingPayload.isDirected();
+                if (pingPayload.isDirected() && pingMv != null) {
+                    String selfAtak = com.atakmaps.meshcore.plugin.ui.SettingsFragment.getCallsign(
+                            pingMv.getContext());
+                    shouldReply = com.atakmaps.meshcore.plugin.util.CallsignUtil.isSameRadioStation(
+                            selfAtak, pingPayload.targetCallsign);
+                    if (!shouldReply) {
+                        Log.d(TAG, "Directed ping for " + pingPayload.targetCallsign
+                                + " — not this station (self="
+                                + com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(
+                                        selfAtak)
+                                + ")");
+                    }
+                }
+                if (pingMv != null && (shouldReply || !pingPayload.isDirected())) {
                     PingReplyNotifier.notifyPingReceived(pingMv.getContext(), pingCall);
                 }
                 contactTracker.handlePing(pingCall);
                 chatBridge.onPeerActivity(callsign);
                 if (!callsign.equalsIgnoreCase(pingCall)) {
                     chatBridge.onPeerActivity(pingCall);
-                }
-                boolean shouldReply = true;
-                if (pingPayload.isDirected() && pingMv != null) {
-                    String selfRadio = com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(
-                            com.atakmaps.meshcore.plugin.ui.SettingsFragment.getCallsign(
-                                    pingMv.getContext()));
-                    String targetRadio = com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(
-                            pingPayload.targetCallsign);
-                    if (!targetRadio.isEmpty()
-                            && !selfRadio.equalsIgnoreCase(targetRadio)) {
-                        shouldReply = false;
-                        Log.d(TAG, "Directed ping for " + pingPayload.targetCallsign
-                                + " — not this station");
-                    }
                 }
                 if (shouldReply) {
                     schedulePingReply();
@@ -370,6 +373,8 @@ public class PacketRouter {
                 if (item != null) {
                     item.setMetaBoolean("sendable", true);
                     item.setMetaString("endpoint", ChatBridge.ACTION_PLUGIN_CONTACT_GEOCHAT_SEND);
+                    com.atakmaps.meshcore.plugin.contacts.ContactRadialMenuUtil
+                            .applyPingCapableRadialMenu(item, ic);
                     ic.setMapItem(item);
                     ic.dispatchChangeEvent();
                     return;
@@ -412,6 +417,8 @@ public class PacketRouter {
             if (item != null) {
                 item.setMetaBoolean("sendable", true);
                 item.setMetaString("endpoint", ChatBridge.ACTION_PLUGIN_CONTACT_GEOCHAT_SEND);
+                com.atakmaps.meshcore.plugin.contacts.ContactRadialMenuUtil
+                        .applyPingCapableRadialMenu(item, c);
             }
         } catch (Exception e) {
             Log.e(TAG, "linkRadioIndividualContactToMapMarker failed uid=" + uid, e);

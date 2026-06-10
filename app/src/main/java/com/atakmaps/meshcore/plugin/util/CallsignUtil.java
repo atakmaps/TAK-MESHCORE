@@ -21,4 +21,14 @@ public class CallsignUtil {
 
         return cs;
     }
+
+    /** True when both names resolve to the same 6-character wire callsign. */
+    public static boolean isSameRadioStation(String callsignA, String callsignB) {
+        if (callsignA == null || callsignB == null) {
+            return false;
+        }
+        String wireA = toRadioCallsign(callsignA.trim());
+        String wireB = toRadioCallsign(callsignB.trim());
+        return !wireA.isEmpty() && wireA.equalsIgnoreCase(wireB);
+    }
 }

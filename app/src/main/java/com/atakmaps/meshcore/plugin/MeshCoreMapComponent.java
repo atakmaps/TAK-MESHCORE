@@ -93,6 +93,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
     private Handler meshIconsetReminderHandler;
     private Runnable meshIconsetReminderRunnable;
     private android.content.BroadcastReceiver beaconIntervalReceiver;
+    private android.content.BroadcastReceiver radialPingReceiver;
     private final SmartBeacon smartBeacon = new SmartBeacon();
     private android.location.LocationManager gpsLocationManager;
     private android.location.LocationListener gpsLocationListener;
@@ -275,6 +276,8 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         startMeshIconsetReminder(context, view.getContext());
         btConnectionManager.scheduleBootAutoConnect();
 
+        com.atakmaps.meshcore.plugin.contacts.ContactRadialMenuUtil.init(context);
+
         try {
             beaconIntervalReceiver = new android.content.BroadcastReceiver() {
                 @Override
@@ -294,6 +297,30 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                     .registerReceiver(beaconIntervalReceiver, beaconFilter);
         } catch (Exception e) {
             Log.e(TAG, "Failed to register beacon interval receiver", e);
+        }
+
+        try {
+            radialPingReceiver = new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(Context ctx, Intent i) {
+                    if (i == null) {
+                        return;
+                    }
+                    if (com.atakmaps.meshcore.plugin.contacts.ContactRadialMenuUtil
+                            .ACTION_RADIAL_PING_CONTACT.equals(i.getAction())) {
+                        com.atakmaps.meshcore.plugin.contacts.ContactRadialMenuUtil
+                                .handleRadialPingContact(ctx, i.getStringExtra("uid"));
+                    }
+                }
+            };
+            AtakBroadcast.DocumentedIntentFilter pingFilter =
+                    new AtakBroadcast.DocumentedIntentFilter();
+            pingFilter.addAction(
+                    com.atakmaps.meshcore.plugin.contacts.ContactRadialMenuUtil
+                            .ACTION_RADIAL_PING_CONTACT);
+            AtakBroadcast.getInstance().registerReceiver(radialPingReceiver, pingFilter);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to register radial ping receiver", e);
         }
 
         if (btConnectionManager.isConnected()) {
@@ -1999,6 +2026,13 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             } catch (Exception ignored) {
             }
             beaconIntervalReceiver = null;
+        }
+        if (radialPingReceiver != null) {
+            try {
+                AtakBroadcast.getInstance().unregisterReceiver(radialPingReceiver);
+            } catch (Exception ignored) {
+            }
+            radialPingReceiver = null;
         }
         if (gpsLocationManager != null && gpsLocationListener != null) {
             try {
