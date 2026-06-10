@@ -89,10 +89,13 @@ public class BtConnectionManager {
     private static final byte CMD_SET_SETTING_TEXT = 0x29;
     private static final byte CMD_SEND_CHANNEL_DATA = 0x3E;
     private static final byte CMD_GET_BATTERY = 0x14;
+    private static final byte CMD_GET_STATS = 0x38;
+    private static final byte STATS_TYPE_CORE = 0x00;
 
     // Companion notifications
     private static final byte RESP_CHANNEL_MSG = 0x08;
     private static final byte RESP_BATTERY = 0x0C;
+    private static final byte RESP_CODE_STATS = 0x18;
     private static final byte RESP_CONTACT_MSG = 0x07;
     private static final byte RESP_SELF_INFO = 0x05;
     private static final byte RESP_DEVICE_INFO = 0x0D;
@@ -1507,6 +1510,7 @@ public class BtConnectionManager {
             return;
         }
         enqueueCommand(new byte[]{CMD_GET_BATTERY});
+        enqueueCommand(new byte[]{CMD_GET_STATS, STATS_TYPE_CORE});
     }
 
     public static int meshBatteryMvToPercent(int batteryMv) {
@@ -1999,6 +2003,10 @@ public class BtConnectionManager {
             applyBatteryInfo(pkt);
             return;
         }
+        if (t == RESP_CODE_STATS) {
+            applyStatsBattery(pkt);
+            return;
+        }
         if (t == RESP_DEVICE_INFO) {
             logDeviceInfo(pkt);
             return;
@@ -2291,10 +2299,25 @@ public class BtConnectionManager {
             return;
         }
         int batteryMv = (pkt[1] & 0xFF) | ((pkt[2] & 0xFF) << 8);
+        publishBatteryReading(batteryMv, "PACKET_BATTERY");
+    }
+
+    private void applyStatsBattery(byte[] pkt) {
+        if (pkt == null || pkt.length < 4 || (pkt[1] & 0xFF) != STATS_TYPE_CORE) {
+            return;
+        }
+        int batteryMv = (pkt[2] & 0xFF) | ((pkt[3] & 0xFF) << 8);
+        publishBatteryReading(batteryMv, "STATS_CORE");
+    }
+
+    private void publishBatteryReading(int batteryMv, String source) {
         int batteryPercent = meshBatteryMvToPercent(batteryMv);
+        if (batteryPercent < 0) {
+            return;
+        }
         latestBatteryMv = batteryMv;
         latestBatteryPercent = batteryPercent;
-        Log.d(TAG, "BATTERY mv=" + batteryMv + " pct=" + batteryPercent);
+        Log.d(TAG, source + " mv=" + batteryMv + " pct=" + batteryPercent);
         notifyMeshBatteryUpdated(batteryMv, batteryPercent);
     }
 
