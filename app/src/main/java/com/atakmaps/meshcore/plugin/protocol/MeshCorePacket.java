@@ -311,13 +311,73 @@ public class MeshCorePacket {
         return new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
     }
 
+    /** Parsed TYPE_PING payload (6-byte broadcast or 12-byte directed). */
+    public static final class PingPayload {
+        public final String sourceCallsign;
+        /** {@code null} when the ping is broadcast (legacy 6-byte payload). */
+        public final String targetCallsign;
+
+        public PingPayload(String sourceCallsign, String targetCallsign) {
+            this.sourceCallsign = sourceCallsign;
+            this.targetCallsign = targetCallsign;
+        }
+
+        public boolean isDirected() {
+            return targetCallsign != null && !targetCallsign.isEmpty();
+        }
+    }
+
     /**
-     * Create a ping/discovery packet.
+     * Create a broadcast ping/discovery packet (all peers may reply).
      */
     public static MeshCorePacket createPingPacket(String callsign) {
-        byte[] callBytes = (callsign + "      ").substring(0, 6)
-                .getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-        return new MeshCorePacket(TYPE_PING, callBytes);
+        return new MeshCorePacket(TYPE_PING, encodePingPayload(callsign, null));
+    }
+
+    /** Create a directed ping — only the target callsign should send a ping reply. */
+    public static MeshCorePacket createDirectedPingPacket(String senderCallsign,
+                                                          String targetCallsign) {
+        return new MeshCorePacket(TYPE_PING,
+                encodePingPayload(senderCallsign, targetCallsign));
+    }
+
+    public static PingPayload decodePingPayload(byte[] data) {
+        if (data == null || data.length < 6) {
+            return null;
+        }
+        String source = decodeSixCharCallsign(data, 0);
+        String target = data.length >= 12 ? decodeSixCharCallsign(data, 6) : null;
+        if (target != null && target.isEmpty()) {
+            target = null;
+        }
+        return new PingPayload(source, target);
+    }
+
+    private static byte[] encodePingPayload(String sender, String target) {
+        boolean directed = target != null && !target.trim().isEmpty();
+        byte[] out = new byte[directed ? 12 : 6];
+        copySixCharCallsign(out, 0, sender);
+        if (directed) {
+            copySixCharCallsign(out, 6, target);
+        }
+        return out;
+    }
+
+    private static String decodeSixCharCallsign(byte[] data, int offset) {
+        return new String(data, offset, 6, java.nio.charset.StandardCharsets.US_ASCII).trim();
+    }
+
+    private static void copySixCharCallsign(byte[] dest, int offset, String callsign) {
+        String padded = (callsign == null ? "" : callsign);
+        if (padded.length() > 6) {
+            padded = padded.substring(0, 6);
+        } else if (padded.length() < 6) {
+            padded = (padded + "      ").substring(0, 6);
+        }
+        byte[] ascii = padded.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        for (int i = 0; i < 6; i++) {
+            dest[offset + i] = ascii[i];
+        }
     }
 
     // --- Getters ---

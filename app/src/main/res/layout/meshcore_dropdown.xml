@@ -81,15 +81,44 @@
                     android:textStyle="bold" />
             </LinearLayout>
 
-            <TextView
-                android:id="@+id/device_name"
+            <LinearLayout
+                android:id="@+id/device_row"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text=""
-                android:textColor="#FFAAAAAA"
-                android:textSize="12sp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
                 android:paddingTop="2dp"
-                android:visibility="gone" />
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/device_name"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text=""
+                    android:textColor="#FFAAAAAA"
+                    android:textSize="12sp" />
+
+                <ImageView
+                    android:id="@+id/mesh_battery_icon"
+                    android:layout_width="18dp"
+                    android:layout_height="10dp"
+                    android:layout_marginStart="8dp"
+                    android:contentDescription="Mesh node battery"
+                    android:src="@drawable/ic_mesh_battery"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/mesh_battery_pct"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:text=""
+                    android:textColor="#FF4CAF50"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/favorites_label"

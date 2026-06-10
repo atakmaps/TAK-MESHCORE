@@ -119,6 +119,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private static final String PREF_MESH_MAP_SET_POSITION_LON =
             "meshcore_mesh_map_set_position_lon";
     private static final long MESH_CALLSIGN_POSITION_PUSH_INTERVAL_MS = 15_000L;
+    private static final long MESH_BATTERY_POLL_INTERVAL_MS = 30_000L;
     private static final String MESH_NODE_MAP_POSITION_UID = "MESHCORE-NODE-MAP-POSITION";
     private static final String MESH_NODE_UID_PREFIX = "MESHCORE-NODE-";
     private static final String MESH_RPTR_UID_PREFIX = "MESHCORE-RPTR-";
@@ -149,7 +150,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private View rootView;
     private View statusDot;
     private TextView statusText;
+    private View deviceRow;
     private TextView deviceName;
+    private android.widget.ImageView meshBatteryIcon;
+    private TextView meshBatteryPct;
+    private int meshBatteryPercent = -1;
     private TextView callsignText;
     private TextView contactsText;
     private TextView packetsText;
@@ -210,6 +215,16 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private EditText meshNodeSettingsTxPowerField;
     private TextView meshNodeSettingsStatus;
     private ScrollView meshNodeSettingsScrollView;
+    private final Runnable meshBatteryPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (btManager == null || !btManager.isConnected()) {
+                return;
+            }
+            btManager.requestBattery();
+            scheduleMeshBatteryPoll();
+        }
+    };
     private final Runnable meshCallsignPositionSyncRunnable = new Runnable() {
         @Override
         public void run() {
@@ -354,6 +369,12 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                         refreshMeshNodeSettingsDialogFromState(false);
                         updateMeshNodeMapPositionMarkerLabel();
                     });
+                }
+
+                @Override
+                public void onMeshBatteryUpdated(int batteryPercent, int batteryMv) {
+                    meshBatteryPercent = batteryPercent;
+                    getMapView().post(() -> updateMeshBatteryUi(batteryPercent));
                 }
 
                 @Override
@@ -580,7 +601,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private void bindViews() {
         statusDot = rootView.findViewById(getId("status_dot"));
         statusText = rootView.findViewById(getId("status_text"));
+        deviceRow = rootView.findViewById(getId("device_row"));
         deviceName = rootView.findViewById(getId("device_name"));
+        meshBatteryIcon = rootView.findViewById(getId("mesh_battery_icon"));
+        meshBatteryPct = rootView.findViewById(getId("mesh_battery_pct"));
         callsignText = rootView.findViewById(getId("text_callsign"));
         contactsText = rootView.findViewById(getId("text_contacts"));
         packetsText = rootView.findViewById(getId("text_packets"));
@@ -3047,12 +3071,23 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (statusText != null) {
             statusText.setText(connected ? "Connected" : "Disconnected");
         }
-        if (deviceName != null) {
+        if (deviceRow != null) {
             if (connected && device != null) {
-                deviceName.setText(device);
-                deviceName.setVisibility(View.VISIBLE);
+                if (deviceName != null) {
+                    deviceName.setText(device);
+                }
+                deviceRow.setVisibility(View.VISIBLE);
+                if (btManager != null) {
+                    int cached = btManager.getLatestBatteryPercent();
+                    if (cached >= 0) {
+                        meshBatteryPercent = cached;
+                    }
+                }
+                updateMeshBatteryUi(meshBatteryPercent);
             } else {
-                deviceName.setVisibility(View.GONE);
+                deviceRow.setVisibility(View.GONE);
+                meshBatteryPercent = -1;
+                updateMeshBatteryUi(-1);
             }
         }
         if (btnScan != null) {
@@ -3061,7 +3096,47 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (btnDisconnect != null) {
             btnDisconnect.setEnabled(connected);
         }
+        if (connected) {
+            scheduleMeshBatteryPoll();
+            if (btManager != null) {
+                btManager.requestBattery();
+            }
+        } else {
+            stopMeshBatteryPoll();
+        }
         updateScanButtonText();
+    }
+
+    private void updateMeshBatteryUi(int batteryPercent) {
+        boolean show = btManager != null && btManager.isConnected() && batteryPercent >= 0;
+        if (meshBatteryIcon != null) {
+            meshBatteryIcon.setVisibility(show ? View.VISIBLE : View.GONE);
+        }
+        if (meshBatteryPct != null) {
+            if (show) {
+                meshBatteryPct.setText(batteryPercent + "%");
+                meshBatteryPct.setVisibility(View.VISIBLE);
+            } else {
+                meshBatteryPct.setText("");
+                meshBatteryPct.setVisibility(View.GONE);
+            }
+        }
+    }
+
+    private void scheduleMeshBatteryPoll() {
+        MapView mv = getMapView();
+        if (mv == null || btManager == null || !btManager.isConnected()) {
+            return;
+        }
+        mv.removeCallbacks(meshBatteryPollRunnable);
+        mv.postDelayed(meshBatteryPollRunnable, MESH_BATTERY_POLL_INTERVAL_MS);
+    }
+
+    private void stopMeshBatteryPoll() {
+        MapView mv = getMapView();
+        if (mv != null) {
+            mv.removeCallbacks(meshBatteryPollRunnable);
+        }
     }
 
     private void updateScanButtonText() {
@@ -4272,6 +4347,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         getMapView().removeCallbacks(meshGpsAugmentRunnable);
         getMapView().removeCallbacks(meshCallsignPositionSyncRunnable);
         getMapView().removeCallbacks(meshQueuedStatusTimeoutRunnable);
+        getMapView().removeCallbacks(meshBatteryPollRunnable);
         if (qrPollRunnable != null) {
             getMapView().removeCallbacks(qrPollRunnable);
             qrPollRunnable = null;

@@ -209,10 +209,16 @@ public class PacketRouter {
                 break;
 
             case MeshCorePacket.TYPE_PING:
-                byte[] pingBytes = packet.getPayload();
-                String pingCall = new String(pingBytes, java.nio.charset.StandardCharsets.US_ASCII).trim();
-                java.util.Arrays.fill(pingBytes, (byte) 0);
-                Log.d(TAG, "Ping from: " + pingCall);
+                MeshCorePacket.PingPayload pingPayload =
+                        MeshCorePacket.decodePingPayload(packet.getPayload());
+                if (pingPayload == null) {
+                    break;
+                }
+                String pingCall = pingPayload.sourceCallsign;
+                Log.d(TAG, "Ping from: " + pingCall
+                        + (pingPayload.isDirected()
+                        ? " (directed to " + pingPayload.targetCallsign + ")"
+                        : " (broadcast)"));
                 MapView pingMv = MapView.getMapView();
                 if (pingMv != null) {
                     PingReplyNotifier.notifyPingReceived(pingMv.getContext(), pingCall);
@@ -222,7 +228,23 @@ public class PacketRouter {
                 if (!callsign.equalsIgnoreCase(pingCall)) {
                     chatBridge.onPeerActivity(pingCall);
                 }
-                schedulePingReply();
+                boolean shouldReply = true;
+                if (pingPayload.isDirected() && pingMv != null) {
+                    String selfRadio = com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(
+                            com.atakmaps.meshcore.plugin.ui.SettingsFragment.getCallsign(
+                                    pingMv.getContext()));
+                    String targetRadio = com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(
+                            pingPayload.targetCallsign);
+                    if (!targetRadio.isEmpty()
+                            && !selfRadio.equalsIgnoreCase(targetRadio)) {
+                        shouldReply = false;
+                        Log.d(TAG, "Directed ping for " + pingPayload.targetCallsign
+                                + " — not this station");
+                    }
+                }
+                if (shouldReply) {
+                    schedulePingReply();
+                }
                 break;
 
             case MeshCorePacket.TYPE_NET_SLOT_CONFIG:

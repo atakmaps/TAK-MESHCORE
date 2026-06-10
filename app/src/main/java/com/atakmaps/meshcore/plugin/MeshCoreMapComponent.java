@@ -29,6 +29,7 @@ import com.atakmaps.meshcore.plugin.mesh.MeshDetailsDropDownReceiver;
 import com.atakmaps.meshcore.plugin.protocol.PacketRouter;
 import com.atakmaps.meshcore.plugin.ax25.MeshcoreIconsetInstaller;
 import com.atakmaps.meshcore.plugin.beacon.SmartBeacon;
+import com.atakmaps.meshcore.plugin.protocol.PositionRequester;
 import com.atakmaps.meshcore.plugin.ui.MeshStatusOverlay;
 import com.atakmaps.meshcore.plugin.ui.SettingsFragment;
 
@@ -165,6 +166,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         packetRouter.setEncryptionManager(encryptionManager);
 
         btConnectionManager = new BtConnectionManager(context, packetRouter);
+        PositionRequester.install(btConnectionManager, encryptionManager);
         btConnectionManager.addMeshAdvertListener(advert -> {
             if (advert == null || mapView == null || !advert.hasValidPosition()) {
                 return;
@@ -2021,6 +2023,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         if (contactTracker != null) {
             contactTracker.stop();
         }
+        PositionRequester.clear();
         if (btConnectionManager != null) {
             btConnectionManager.disconnect();
             btConnectionManager.shutdown();

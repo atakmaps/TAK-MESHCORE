@@ -37,6 +37,10 @@ public final class ContactMergeUtil {
         mergeRoutingBridge = bridge;
     }
 
+    public static CotBridge getMergeRoutingBridge() {
+        return mergeRoutingBridge;
+    }
+
     public static String resolveCanonicalPeerUid(String callsignRaw, String... candidateUids) {
         String callsign = callsignRaw != null ? callsignRaw.trim().toUpperCase(Locale.US) : "";
         try {

@@ -29,7 +29,7 @@ public final class PingReplyNotifier {
     private PingReplyNotifier() {
     }
 
-    /** Call after a ping frame is successfully transmitted. */
+    /** Call after a broadcast ping frame is successfully transmitted. */
     public static void notePingSent(Context context) {
         pingSentAtMs = System.currentTimeMillis();
         toastedReplyKeys.clear();
@@ -37,6 +37,20 @@ public final class PingReplyNotifier {
                 + formatWaitSeconds(context) + "s");
         showToast(context, "Ping sent — waiting for replies (~"
                 + formatWaitSeconds(context) + "s max)");
+    }
+
+    /** Call after a directed position-request ping is transmitted. */
+    public static void noteDirectedPingSent(Context context, String targetCallsign,
+                                            String transportLabel) {
+        pingSentAtMs = System.currentTimeMillis();
+        toastedReplyKeys.clear();
+        String target = targetCallsign != null ? targetCallsign.trim() : "";
+        Log.d(TAG, "Directed ping to " + target + " via " + transportLabel);
+        if (target.isEmpty()) {
+            showToast(context, "Position request sent");
+        } else {
+            showToast(context, "Position request sent to " + target);
+        }
     }
 
     /** Responder: incoming ping from a peer. */

@@ -13,9 +13,14 @@ import com.atakmap.android.contact.PluginConnector;
 import com.atakmap.android.preference.AtakPreferences;
 import com.atakmap.comms.NetConnectString;
 import com.atakmap.coremap.filesystem.FileSystemUtils;
+import com.atakmaps.meshcore.plugin.chat.ContactMergeUtil;
+import com.atakmaps.meshcore.plugin.cot.CotBridge;
 import com.atakmaps.meshcore.plugin.contacts.MeshFavoriteConnector;
+import com.atakmaps.meshcore.plugin.contacts.MeshRequestPositionConnector;
 import com.atakmaps.meshcore.plugin.contacts.MeshSendMessageConnector;
 import com.atakmaps.meshcore.plugin.contacts.PositionOnlyConnector;
+import com.atakmaps.meshcore.plugin.protocol.PositionRequester;
+import com.atakmaps.meshcore.plugin.util.CallsignUtil;
 
 import android.widget.Toast;
 
@@ -113,7 +118,8 @@ public class MeshCoreContactHandler extends
         return FileSystemUtils.isEquals(type, PluginConnector.CONNECTOR_TYPE)
                 || FileSystemUtils.isEquals(type, GeoChatConnector.CONNECTOR_TYPE)
                 || FileSystemUtils.isEquals(type, MeshFavoriteConnector.CONNECTOR_TYPE)
-                || FileSystemUtils.isEquals(type, MeshSendMessageConnector.CONNECTOR_TYPE);
+                || FileSystemUtils.isEquals(type, MeshSendMessageConnector.CONNECTOR_TYPE)
+                || FileSystemUtils.isEquals(type, MeshRequestPositionConnector.CONNECTOR_TYPE);
     }
 
     @Override
@@ -142,6 +148,30 @@ public class MeshCoreContactHandler extends
                             "Favorited " + ic.getName(),
                             Toast.LENGTH_SHORT).show();
                 }
+                return true;
+            }
+
+            if (FileSystemUtils.isEquals(connectorType,
+                    MeshRequestPositionConnector.CONNECTOR_TYPE)) {
+                String uid = ic.getUID();
+                if (uid != null && uid.startsWith(MESH_RPTR_UID_PREFIX)) {
+                    Toast.makeText(pluginContext,
+                            "Repeaters do not support position requests",
+                            Toast.LENGTH_LONG).show();
+                    return true;
+                }
+                String target = resolveRadioCallsignForContact(ic);
+                if (target == null || target.isEmpty()) {
+                    Toast.makeText(pluginContext,
+                            "Could not resolve contact callsign",
+                            Toast.LENGTH_LONG).show();
+                    return true;
+                }
+                boolean ok = PositionRequester.requestPosition(pluginContext, target);
+                Toast.makeText(pluginContext,
+                        ok ? "Position request sent to " + target
+                                : "Position request failed (radio not connected)",
+                        Toast.LENGTH_LONG).show();
                 return true;
             }
 
@@ -309,6 +339,9 @@ public class MeshCoreContactHandler extends
             if (contact.getConnector(MeshSendMessageConnector.CONNECTOR_TYPE) == null) {
                 contact.addConnector(new MeshSendMessageConnector());
             }
+            if (contact.getConnector(MeshRequestPositionConnector.CONNECTOR_TYPE) == null) {
+                contact.addConnector(new MeshRequestPositionConnector());
+            }
             // GeoChatConnector must be present for ATAK to honour the default-connector pref
             // and for openConversation() to find a valid stcp seed. It also provides the single
             // native unread badge (cleared automatically when the user opens the conversation).
@@ -371,6 +404,9 @@ public class MeshCoreContactHandler extends
             if (contact.getConnector(MeshSendMessageConnector.CONNECTOR_TYPE) == null) {
                 contact.addConnector(new MeshSendMessageConnector());
             }
+            if (contact.getConnector(MeshRequestPositionConnector.CONNECTOR_TYPE) == null) {
+                contact.addConnector(new MeshRequestPositionConnector());
+            }
             if (contact.getConnector(GeoChatConnector.CONNECTOR_TYPE) == null) {
                 contact.addConnector(new GeoChatConnector(
                         buildNativeConnectorSeed(contact.getName())));
@@ -380,6 +416,38 @@ public class MeshCoreContactHandler extends
         } catch (Exception e) {
             Log.w("MeshCore.Handler", "applyMeshContactConnectors failed", e);
         }
+    }
+
+    /**
+     * Resolves a 6-character radio callsign for directed ping / position request.
+     */
+    public static String resolveRadioCallsignForContact(IndividualContact contact) {
+        if (contact == null) {
+            return "";
+        }
+        String uid = contact.getUID();
+        if (uid != null && uid.startsWith("ANDROID-")) {
+            return CallsignUtil.toRadioCallsign(uid.substring("ANDROID-".length()));
+        }
+        com.atakmap.android.maps.MapView mv = com.atakmap.android.maps.MapView.getMapView();
+        if (mv != null && mv.getRootGroup() != null && uid != null) {
+            MapItem item = mv.getRootGroup().deepFindUID(uid);
+            if (item != null) {
+                String mapCall = item.getMetaString("callsign", item.getTitle());
+                if (mapCall != null && !mapCall.trim().isEmpty()) {
+                    return CallsignUtil.toRadioCallsign(mapCall.trim());
+                }
+            }
+        }
+        String name = contact.getName();
+        if (name != null && !name.trim().isEmpty()) {
+            String base = name.trim();
+            if (base.toUpperCase(Locale.US).endsWith("-MESH")) {
+                base = base.substring(0, base.length() - 5).trim();
+            }
+            return CallsignUtil.toRadioCallsign(base);
+        }
+        return "";
     }
 
     public static String formatMeshFavoriteName(String currentName, String uid) {
@@ -421,6 +489,47 @@ public class MeshCoreContactHandler extends
             upper = upper.substring(0, upper.length() - 5).trim();
         }
         return upper;
+    }
+
+    /**
+     * Secondary contact-card actions for established RF ATAK peers (beacon / BTECH registry),
+     * not mesh-flood synthesized {@code MESHCORE-*} contacts.
+     */
+    public static void applyEstablishedContactConnectors(IndividualContact contact) {
+        if (contact == null) {
+            return;
+        }
+        String uid = contact.getUID();
+        if (uid == null || uid.trim().isEmpty()) {
+            return;
+        }
+        String u = uid.trim();
+        String upper = u.toUpperCase(Locale.US);
+        if (upper.startsWith(MESH_NODE_UID_PREFIX) || upper.startsWith(MESH_RPTR_UID_PREFIX)) {
+            return;
+        }
+        if (!isEstablishedRfAtakContact(u)) {
+            return;
+        }
+        try {
+            if (contact.getConnector(MeshRequestPositionConnector.CONNECTOR_TYPE) == null) {
+                contact.addConnector(new MeshRequestPositionConnector());
+            }
+        } catch (Exception e) {
+            Log.w("MeshCore.Handler", "applyEstablishedContactConnectors failed", e);
+        }
+    }
+
+    private static boolean isEstablishedRfAtakContact(String uid) {
+        if (uid == null || uid.trim().isEmpty()) {
+            return false;
+        }
+        String u = uid.trim();
+        if (u.toUpperCase(Locale.US).startsWith("ANDROID-")) {
+            return true;
+        }
+        CotBridge bridge = ContactMergeUtil.getMergeRoutingBridge();
+        return bridge != null && bridge.isBtechContactUid(u);
     }
 
     public static NetConnectString buildNativeConnectorSeed(String callsign) {

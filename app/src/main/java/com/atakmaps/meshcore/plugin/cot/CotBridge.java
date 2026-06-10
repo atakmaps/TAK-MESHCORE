@@ -1123,6 +1123,7 @@ public class CotBridge {
                 registerBtechAliases(name.trim(), uid.trim(), null, null);
             }
         }
+        com.atakmaps.meshcore.plugin.MeshCoreContactHandler.applyEstablishedContactConnectors(contact);
     }
 
     /**

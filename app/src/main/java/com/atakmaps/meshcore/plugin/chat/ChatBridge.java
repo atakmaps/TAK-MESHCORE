@@ -1045,6 +1045,7 @@ public class ChatBridge {
                 if (ic.getConnector(IpConnector.CONNECTOR_TYPE) == null) {
                     ic.addConnector(new IpConnector((String) null));
                 }
+                com.atakmaps.meshcore.plugin.MeshCoreContactHandler.applyEstablishedContactConnectors(ic);
                 return uid;
             }
             if (existing != null) {
@@ -1912,22 +1913,21 @@ public class ChatBridge {
             Contact c = contacts.getContactByUuid(u);
             if (!(c instanceof IndividualContact)) return;
             IndividualContact ic = (IndividualContact) c;
-            if (ic.getConnector(MeshSendMessageConnector.CONNECTOR_TYPE) == null) {
-                ic.addConnector(new MeshSendMessageConnector());
-            }
-            MapView mv = MapView.getMapView();
-            if (mv == null) return;
-            AtakPreferences prefs = new AtakPreferences(mv.getContext());
-            prefs.set("contact.connector.default." + u, com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
-            prefs.set("contact.connector.default." + u.toUpperCase(java.util.Locale.US),
-                    com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
-            prefs.set("contact.connector.default." + u.toLowerCase(java.util.Locale.US),
-                    com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
-            // For MESHCORE-* contacts: GeoChatService.onCotEvent may internally call
-            // dispatchChangeEvent which re-renders the contact icon using a stale preference.
-            // Schedule a delayed dispatchChangeEvent so the contact list refreshes the correct
-            // chat-bubble icon after all message-processing is complete (Fragment already stable).
-            if (u.startsWith("MESHCORE-NODE-") || u.startsWith("MESHCORE-RPTR-")) {
+            String upper = u.toUpperCase(java.util.Locale.US);
+            if (upper.startsWith(MESH_NODE_UID_PREFIX) || upper.startsWith(MESH_RPTR_UID_PREFIX)) {
+                if (ic.getConnector(MeshSendMessageConnector.CONNECTOR_TYPE) == null) {
+                    ic.addConnector(new MeshSendMessageConnector());
+                }
+                MapView mv = MapView.getMapView();
+                if (mv == null) return;
+                AtakPreferences prefs = new AtakPreferences(mv.getContext());
+                prefs.set("contact.connector.default." + u, com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
+                prefs.set("contact.connector.default." + u.toUpperCase(java.util.Locale.US),
+                        com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
+                prefs.set("contact.connector.default." + u.toLowerCase(java.util.Locale.US),
+                        com.atakmap.android.chat.GeoChatConnector.CONNECTOR_TYPE);
+                // GeoChatService.onCotEvent may internally call dispatchChangeEvent which
+                // re-renders the contact icon using a stale preference.
                 final IndividualContact finalIc = ic;
                 android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
                 h.postDelayed(() -> {
@@ -1936,6 +1936,8 @@ public class ChatBridge {
                     } catch (Exception ignored) {
                     }
                 }, 600);
+            } else {
+                com.atakmaps.meshcore.plugin.MeshCoreContactHandler.applyEstablishedContactConnectors(ic);
             }
             // For ANDROID-* contacts: do NOT call ic.dispatchChangeEvent() here — doing so after
             // GeoChatService has just inserted a new message causes ATAK to reload the conversation
