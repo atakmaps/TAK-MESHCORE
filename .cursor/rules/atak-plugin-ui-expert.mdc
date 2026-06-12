@@ -1,0 +1,43 @@
+---
+description: UI expert mandate for MeshCore Tool Preferences and plugin panels
+globs: app/src/main/res/**/*.xml,app/src/main/java/**/ui/**/*.java,app/src/main/java/**/SettingsFragment.java
+alwaysApply: true
+---
+
+# ATAK Plugin UI Expert (MeshCore)
+
+Primary responsibility: **settings and plugin UI** — layout, typography, color, alignment, summaries, disabled states, scroll stability.
+
+## MeshCore Tool Preferences (UV-PRO custom styling)
+
+MeshCore Tool Preferences use the **same custom UV-PRO styling** as Darksteal:
+
+- Yellow centered **18sp bold** category headers (Beacon, Radio, Security, Administrative)
+- Blue left-aligned **Smart Beacon** section header
+- White **16sp** titles, white description + green **16sp** value summaries (two-line spannables)
+- Grey disabled/gated rows
+- **Restore All Defaults** + section **Restore Defaults** as cyan-stroke pill buttons (`stylePillActionButtonRow`)
+- **Distribute to net** pill button styling
+- `applyRowStyles` / `scheduleApplyRowStyles` / ListView listeners in `onActivityCreated`
+- `onPreferenceTreeClick` dispatches pill actions via `dispatchPillActionClick`
+- `wireRestorePreferenceHandlers` with `attachPreferencePillClickHandler`
+- `normalizeBeaconSection`, `normalizeAdministrationSection`, `normalizeAllRestoreControls`
+- `bindStyledSummary`, `buildStyledSummaryForPreference`, `formatSummaryWithValue`
+- `updateAdminControlsEnabled` with admin gating
+- `ensureCheckBoxWidgetVisible` with green checkboxes
+
+**Do not port** from UV-PRO: APRS Settings, SA Relay / RF uplink, slot time in UI, `updateDependentPreferences` SA relay logic.
+
+**MeshCore-specific:** `ensurePreferenceTreeLoaded()`, `meshcore_*` keys, `MeshCoreRadioServices`, `AdminAccessGate`, `removeObsoletePreferences`.
+
+## Never fix scroll/layout bugs by removing styling
+
+Use dedicated row layouts and preference-level summaries instead of ListView gravity hacks.
+
+## Before calling UI done
+
+- Matches UV-PRO Tool Preferences look and behavior (stable scroll, readable theme colors)
+- Summaries reflect current values after changes
+- Admin gating visible and consistent (enabled/disabled states)
+
+Prefer matching existing `SettingsFragment.java` patterns before inventing new presentation layers.

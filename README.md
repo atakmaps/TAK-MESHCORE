@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.4.8`
+- Current version: `1.4.9`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -30,7 +30,8 @@ adb install -r app/build/outputs/apk/civ/debug/ATAK-Plugin-Meshcore-*.apk
 - **Setup Favorite Mesh Devices** button — opens device management directly from the main panel
 - GeoChat over RF transport
 - Contact-targeted CoT relay behavior
-- Manual beacon send (operator-initiated only; no automatic or timed beacons)
+- Manual beacon send (operator-initiated only; no automatic mesh periodic beacon timer)
+- **Tool Preferences** (ATAK → Tools → MeshCore → Plugin Settings): UV-PRO–styled settings with Beacon, Radio, Security, and Administrative categories
 - MeshCore GPS controls:
   - `Enable MeshCore GPS` — hardware on/off at the node
   - `Use MeshCore GPS for Position` — selects node GPS as the advert position source (gated on hardware toggle)
@@ -75,9 +76,24 @@ Opened from **Plugin Settings**, **Beacon Settings**, or the **Setup Favorite Me
 Includes:
 
 - Bluetooth favorites/device management (rename, favorite, delete, forget all)
-- Beacon interval
-- Smart Beacon toggle + advanced settings
+- Beacon interval display and **Send Beacon** (manual)
+- Smart Beacon toggle (in-panel; advanced parameters in Tool Preferences)
 - Auto-reconnect toggle
+
+## Tool Preferences
+
+Opened from **Plugin Settings** in the main panel (ATAK native Tool Preferences screen).
+
+Styled like UV-PRO: yellow category headers, blue Smart Beacon section header, white titles, green value summaries, and cyan **Restore Defaults** pill buttons.
+
+| Category | Contents |
+|----------|----------|
+| **Beacon Settings** | ATAK callsign beacon interval; Smart Beacon thresholds (speed, rates, turn time/slope) |
+| **Radio Settings** | Send Ping Reply; message retry interval and max retries |
+| **Security** | RF encryption shared secret |
+| **Administrative Settings** | Password-gated leadership controls; **Disable Mesh Beacon Limiting** (admin checkbox — preference only until runtime limiting is wired) |
+
+Administrative rows unlock after the admin password is accepted. **Restore All Defaults** and per-section restore buttons reset preferences to plugin defaults (Smart Beacon fast rate **300 s**, min turn time **60 s**).
 
 ## 2026-05-31 Update (v1.3.2)
 
@@ -105,6 +121,14 @@ Includes:
 
 ## Changelog
 
+### v1.4.9
+
+- **Tool Preferences overhaul:** UV-PRO–styled Tool Preferences with Beacon, Radio, Security, and Administrative categories; styled summaries, pill restore buttons, and scroll-stable row layouts.
+- **Smart Beacon settings restored** in Tool Preferences (advanced speed/rate/turn parameters); defaults fast rate **300 s**, min turn time **60 s**; in-panel Smart Beacon toggle retained.
+- **Administrative Settings:** password gate, **Disable Mesh Beacon Limiting** checkbox (same description as UV-PRO; `SettingsFragment.isDisableMeshBeaconLimiting()` for runtime wiring).
+- **Removed** periodic mesh beacon UI (Enable Mesh Beacon, slot count, distribute-to-net, national mesh beacon warning); manual **Send Beacon** remains.
+- **Radio / Security prefs** grouped in Tool Preferences (ping reply, retry interval/max, encryption passphrase).
+
 ### v1.4.8
 
 - **Directed contact ping:** Directed `TYPE_PING` targets only the intended peer; non-target stations ignore the ping for reply purposes; reply toasts on the sender are filtered to that callsign.
@@ -119,7 +143,7 @@ Includes:
 
 ### v1.4.6
 
-- Password-gated admin settings and national Mesh Beacon toggle.
+- Password-gated admin settings and slot assignment controls.
 
 ### v1.4.5
 

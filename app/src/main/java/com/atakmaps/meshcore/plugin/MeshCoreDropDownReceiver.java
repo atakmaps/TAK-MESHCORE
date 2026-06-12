@@ -51,6 +51,7 @@ import com.atakmap.android.toolbar.ToolManagerBroadcastReceiver;
 import com.atakmap.android.toolbar.widgets.TextContainer;
 import com.atakmap.android.user.MapClickTool;
 import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
+import com.atakmaps.meshcore.plugin.beacon.SmartBeacon;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry.BtDeviceRecord;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
@@ -62,6 +63,7 @@ import com.atakmaps.meshcore.plugin.contacts.RadioContact;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
 import com.atakmaps.meshcore.plugin.crypto.EncryptionManager;
 import com.atakmaps.meshcore.plugin.protocol.MeshCorePacket;
+import com.atakmaps.meshcore.plugin.protocol.MeshCoreRadioServices;
 import com.atakmaps.meshcore.plugin.protocol.PacketRouter;
 import com.atakmaps.meshcore.plugin.protocol.PingReplyNotifier;
 import com.atakmaps.meshcore.plugin.ui.MeshStatusOverlay;
@@ -168,6 +170,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnSettings;
     private Button btnSendBeacon;
     private Button btnSendPing;
+    private Button btnManagePluginBeaconSettings;
+    private Switch switchSmartBeacon;
+    private View rowBeaconInterval;
+    private TextView gpsBeaconIntervalLabel;
+    private TextView beaconIntervalText;
     private Button btnPluginSettings;
     private Button btnMeshSendAdvert;
     private Switch switchMeshEnableGpsConnection; // CONNECTION section power switch
@@ -186,9 +193,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private EditText editMeshChannelMessage;
     private Button btnMeshChannelSend;
     private Switch switchMeshSendPositionWithAdvert;
-    private View rowMeshBeaconAdmin;
-    private Switch switchMeshBeaconEnabled;
-    private boolean suppressMeshBeaconSwitchCallbacks = false;
     private Switch switchMeshUseCallsignLocation;
     private Switch switchMeshUseCustomNodePosition;
     private TextView textMeshUseCallsignLocation;
@@ -196,9 +200,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Button btnMeshNodeSettings;
     private Button btnMeshcoreSetNodePositionMap;
     private Switch switchEncryption;
-    private View passphraseRow;
-    private EditText editPassphrase;
-    private Button btnSetPassphrase;
     private TextView encryptionStatusText;
 
     private boolean meshGpsEnableRequested = false;
@@ -242,6 +243,21 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
     private final List<BluetoothDevice> foundDevices = new ArrayList<>();
     private final LinkedList<String> logLines = new LinkedList<>();
+    private final CompoundButton.OnCheckedChangeListener smartBeaconCheckedListener =
+            (buttonView, isChecked) -> {
+                if (!buttonView.isPressed()) {
+                    return;
+                }
+                Context c = getMapView().getContext();
+                SmartBeacon.setEnabled(c, isChecked);
+                updateBeaconPanelUi();
+                appendLog("Smart beacon " + (isChecked ? "on" : "off"));
+                try {
+                    AtakBroadcast.getInstance().sendBroadcast(
+                            new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
+                } catch (Exception ignored) {
+                }
+            };
     private int txCount = 0;
     private int rxCount = 0;
     private boolean scanFoundAnyDevice = false;
@@ -587,10 +603,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (switchEncryption != null) {
             switchEncryption.setChecked(encOn);
         }
-        if (passphraseRow != null) {
-            passphraseRow.setVisibility(encOn ? View.VISIBLE : View.GONE);
-        }
+        syncEncryptionFromSettings();
         updateEncryptionStatus();
+        updateBeaconPanelUi();
         scheduleMeshCallsignPositionSync();
         scheduleMeshGpsAugmentTick();
         updateMeshChannelButtonLabel();
@@ -620,6 +635,12 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnSettings = rootView.findViewById(getId("btn_settings"));
         btnSendBeacon = rootView.findViewById(getId("btn_send_beacon"));
         btnSendPing = rootView.findViewById(getId("btn_send_ping"));
+        switchSmartBeacon = rootView.findViewById(getId("switch_smart_beacon"));
+        btnManagePluginBeaconSettings =
+                rootView.findViewById(getId("btn_manage_plugin_beacon_settings"));
+        rowBeaconInterval = rootView.findViewById(getId("row_beacon_interval"));
+        gpsBeaconIntervalLabel = rootView.findViewById(getId("text_gps_beacon_interval_label"));
+        beaconIntervalText = rootView.findViewById(getId("text_beacon_interval"));
         btnPluginSettings = rootView.findViewById(getId("btn_plugin_settings"));
         btnMeshSendAdvert = rootView.findViewById(getId("btn_meshcore_send_advert"));
         switchMeshEnableGpsConnection =
@@ -644,8 +665,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnMeshChannelSend = rootView.findViewById(getId("btn_mesh_channel_send"));
         switchMeshSendPositionWithAdvert =
                 rootView.findViewById(getId("switch_mesh_send_position_with_advert"));
-        rowMeshBeaconAdmin = rootView.findViewById(getId("row_mesh_beacon_admin"));
-        switchMeshBeaconEnabled = rootView.findViewById(getId("switch_mesh_beacon_enabled"));
         switchMeshUseCallsignLocation =
                 rootView.findViewById(getId("switch_mesh_use_callsign_location"));
         switchMeshUseCustomNodePosition =
@@ -657,9 +676,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnMeshcoreSetNodePositionMap =
                 rootView.findViewById(getId("btn_meshcore_set_node_position_map"));
         switchEncryption = rootView.findViewById(getId("switch_encryption"));
-        passphraseRow = rootView.findViewById(getId("passphrase_row"));
-        editPassphrase = rootView.findViewById(getId("edit_passphrase"));
-        btnSetPassphrase = rootView.findViewById(getId("btn_set_passphrase"));
         encryptionStatusText = rootView.findViewById(getId("text_encryption_status"));
 
         if (meshChannelLogText != null) {
@@ -704,6 +720,17 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (btnSendPing != null) {
             btnSendPing.setOnClickListener(v -> sendPing());
+        }
+        if (switchSmartBeacon != null) {
+            switchSmartBeacon.setOnCheckedChangeListener(smartBeaconCheckedListener);
+        }
+        if (btnManagePluginBeaconSettings != null) {
+            btnManagePluginBeaconSettings.setOnClickListener(v -> {
+                Context ctx = getMapView() != null ? getMapView().getContext() : null;
+                if (ctx != null) {
+                    SettingsFragment.openBeaconSettings(ctx);
+                }
+            });
         }
         if (btnPluginSettings != null) {
             btnPluginSettings.setOnClickListener(v -> SettingsFragment.openToolPreferences(getMapView().getContext()));
@@ -806,25 +833,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                     pushPhoneLocationToMeshNodeIfNeeded(true);
                 }
                 btManager.requestSelfInfo();
-            });
-        }
-        if (switchMeshBeaconEnabled != null) {
-            switchMeshBeaconEnabled.setOnCheckedChangeListener((buttonView, isChecked) -> {
-                if (suppressMeshBeaconSwitchCallbacks || !buttonView.isPressed()) {
-                    return;
-                }
-                Context ctx = getMapView() != null ? getMapView().getContext() : null;
-                if (ctx == null || !com.atakmaps.meshcore.plugin.ui.AdminAccessGate.isUnlocked(ctx)) {
-                    updateMeshBeaconAdminUi();
-                    return;
-                }
-                SettingsFragment.setMeshBeaconEnabled(ctx, isChecked);
-                appendLog("Mesh Beacon " + (isChecked ? "enabled" : "disabled"));
-                try {
-                    AtakBroadcast.getInstance().sendBroadcast(
-                            new Intent(MeshCoreMapComponent.ACTION_BEACON_INTERVAL_CHANGED));
-                } catch (Exception ignored) {
-                }
             });
         }
         if (switchMeshUseCallsignLocation != null) {
@@ -940,50 +948,55 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (switchEncryption != null) {
             switchEncryption.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                if (!buttonView.isPressed()) {
+                    return;
+                }
                 SharedPreferences prefs = PreferenceManager
                         .getDefaultSharedPreferences(getMapView().getContext());
                 prefs.edit().putBoolean(SettingsFragment.PREF_ENCRYPTION_ENABLED, isChecked).apply();
-                if (passphraseRow != null) {
-                    passphraseRow.setVisibility(isChecked ? View.VISIBLE : View.GONE);
-                }
-                if (!isChecked && encryptionManager != null) {
-                    encryptionManager.setSharedSecret(null);
-                    updateEncryptionStatus();
+                syncEncryptionFromSettings();
+                updateEncryptionStatus();
+                if (!isChecked) {
                     appendLog("Encryption disabled");
-                } else if (isChecked) {
-                    String existing = SettingsFragment.getEncryptionPassphrase(
+                } else {
+                    String pass = SettingsFragment.getEncryptionPassphrase(
                             getMapView().getContext());
-                    if (existing != null && !existing.isEmpty() && encryptionManager != null) {
-                        encryptionManager.setSharedSecret(existing);
-                        updateEncryptionStatus();
+                    if (pass != null && !pass.isEmpty()) {
                         appendLog("Encryption enabled (AES-256-GCM)");
                     } else {
-                        updateEncryptionStatus();
-                        appendLog("Configure shared secret to enable encryption");
+                        appendLog("Encryption enabled — set shared secret in Tool Preferences");
                     }
                 }
             });
         }
-        if (btnSetPassphrase != null) {
-            btnSetPassphrase.setOnClickListener(v -> {
-                if (editPassphrase == null) {
-                    return;
-                }
-                String pass = editPassphrase.getText().toString().trim();
-                if (pass.isEmpty()) {
-                    appendLog("Shared secret cannot be empty");
-                    return;
-                }
-                SharedPreferences prefs = PreferenceManager
-                        .getDefaultSharedPreferences(getMapView().getContext());
-                prefs.edit().putString(SettingsFragment.PREF_ENCRYPTION_PASSPHRASE, pass).apply();
-                if (encryptionManager != null) {
-                    encryptionManager.setSharedSecret(pass);
-                }
-                editPassphrase.setText("");
-                updateEncryptionStatus();
-                appendLog("Shared secret saved — encryption active");
-            });
+    }
+
+    private void syncEncryptionFromSettings() {
+        MeshCoreRadioServices.syncEncryptionFromSettings(
+                getMapView() != null ? getMapView().getContext() : null);
+    }
+
+    private void updateBeaconPanelUi() {
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        if (ctx == null) {
+            return;
+        }
+        int beaconSec = SettingsFragment.getBeaconIntervalSec(ctx);
+        if (beaconIntervalText != null) {
+            beaconIntervalText.setText(beaconSec + "s");
+        }
+        boolean smartOn = SmartBeacon.isEnabled(ctx);
+        if (switchSmartBeacon != null) {
+            switchSmartBeacon.setChecked(smartOn);
+        }
+        if (rowBeaconInterval != null) {
+            rowBeaconInterval.setAlpha(1.0f);
+        }
+        if (gpsBeaconIntervalLabel != null) {
+            gpsBeaconIntervalLabel.setTextColor(0xFFFFFFFF);
+        }
+        if (beaconIntervalText != null) {
+            beaconIntervalText.setTextColor(0xFF00BCD4);
         }
     }
 
@@ -998,10 +1011,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             encryptionStatusText.setText("\u2705 AES-256-GCM active");
             encryptionStatusText.setTextColor(0xFF4CAF50);
         } else if (encOn) {
-            encryptionStatusText.setText("\u26A0 Enter shared secret to activate");
+            encryptionStatusText.setText("\u26A0 Set shared secret in Tool Preferences");
             encryptionStatusText.setTextColor(0xFFFF9800);
         } else {
-            encryptionStatusText.setText("All radios must use the same shared secret");
+            encryptionStatusText.setText("Shared secret is configured in Tool Preferences");
             encryptionStatusText.setTextColor(0xFF888888);
         }
     }
@@ -2520,31 +2533,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         return v == null ? "-" : Integer.toString(v);
     }
 
-    private void updateMeshBeaconAdminUi() {
-        Context ctx = getMapView() != null ? getMapView().getContext() : null;
-        if (rowMeshBeaconAdmin == null) {
-            return;
-        }
-        boolean unlocked = ctx != null
-                && com.atakmaps.meshcore.plugin.ui.AdminAccessGate.isUnlocked(ctx);
-        rowMeshBeaconAdmin.setVisibility(unlocked ? View.VISIBLE : View.GONE);
-        if (!unlocked || switchMeshBeaconEnabled == null) {
-            return;
-        }
-        boolean meshConnected = btManager != null && btManager.isConnected();
-        suppressMeshBeaconSwitchCallbacks = true;
-        try {
-            switchMeshBeaconEnabled.setChecked(SettingsFragment.isMeshBeaconEnabled(ctx));
-            switchMeshBeaconEnabled.setEnabled(meshConnected);
-            switchMeshBeaconEnabled.setAlpha(meshConnected ? 1f : 0.45f);
-            rowMeshBeaconAdmin.setAlpha(meshConnected ? 1f : 0.85f);
-        } finally {
-            suppressMeshBeaconSwitchCallbacks = false;
-        }
-    }
-
     private void updateMeshGpsControlsUi() {
-        updateMeshBeaconAdminUi();
         boolean meshConnected = btManager != null && btManager.isConnected();
         boolean advertPositionEnabled = meshSendPositionWithAdvertRequested
                 || Boolean.TRUE.equals(meshSendPositionWithAdvertState);
@@ -4330,7 +4319,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             refreshFavoriteStrip();
             updateScanButtonText();
             checkPendingQrResult();
-            updateMeshBeaconAdminUi();
+            updateBeaconPanelUi();
         }
     }
 

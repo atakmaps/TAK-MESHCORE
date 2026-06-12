@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="meshcore_row_pref_key" type="id" />
+    <item name="meshcore_summary_watcher" type="id" />
+    <item name="meshcore_summary_rebind" type="id" />
+</resources>

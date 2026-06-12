@@ -39,40 +39,4 @@
         <item>5</item>
     </string-array>
 
-    <string-array name="aprs_ssid_labels">
-        <item>0 — Primary station</item>
-        <item>1 — Generic additional</item>
-        <item>2 — Generic additional</item>
-        <item>3 — Generic additional</item>
-        <item>4 — Generic additional</item>
-        <item>5 — Other network</item>
-        <item>6 — Satellite</item>
-        <item>7 — Handheld radio</item>
-        <item>8 — Boat / ship</item>
-        <item>9 — Mobile station</item>
-        <item>10 — APRS-IS only</item>
-        <item>11 — Balloon / aircraft</item>
-        <item>12 — APRStt / one-way</item>
-        <item>13 — Weather station</item>
-        <item>14 — Freight vehicle</item>
-        <item>15 — Generic additional</item>
-    </string-array>
-    <string-array name="aprs_ssid_values">
-        <item>0</item>
-        <item>1</item>
-        <item>2</item>
-        <item>3</item>
-        <item>4</item>
-        <item>5</item>
-        <item>6</item>
-        <item>7</item>
-        <item>8</item>
-        <item>9</item>
-        <item>10</item>
-        <item>11</item>
-        <item>12</item>
-        <item>13</item>
-        <item>14</item>
-        <item>15</item>
-    </string-array>
 </resources>

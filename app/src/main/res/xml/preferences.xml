@@ -1,21 +1,96 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <Preference
+        android:key="meshcore_restore_all_defaults"
+        android:title="Restore All Defaults"
+        android:summary=""
+        android:persistent="false"
+        android:selectable="true" />
+
     <PreferenceCategory
-        android:key="meshcore_cat_sa_relay"
-        android:title="SA Relay">
+        android:key="meshcore_cat_beacon"
+        android:title="Beacon Settings">
 
-        <com.atakmap.android.gui.PanCheckBoxPreference
-            android:key="meshcore_sa_relay_enabled"
-            android:title="Enable SA Relay"
-            android:summary="Re-broadcast inbound network positions over radio to off-grid users. Throttled to one update per contact per 30 seconds."
-            android:defaultValue="false" />
+        <Preference
+            android:key="meshcore_restore_beacon_defaults"
+            android:title="Restore Defaults"
+            android:summary=""
+            android:persistent="false"
+            android:selectable="true" />
 
-        <com.atakmap.android.gui.PanCheckBoxPreference
-            android:key="meshcore_rf_to_tak_uplink_enabled"
-            android:title="Enable RF to TAK Uplink Relay"
-            android:summary="When SA Relay is enabled, forward inbound RF CoT to TAK network. Use with care to avoid unintended rebroadcast loops."
-            android:defaultValue="false" />
+        <com.atakmap.android.gui.PanListPreference
+            android:key="meshcore_beacon_interval"
+            android:title="Beacon Interval"
+            android:summary="Sets the ATAK call sign beacon interval"
+            android:defaultValue="300"
+            android:dialogTitle="Beacon Interval"
+            android:entries="@array/beacon_interval_labels"
+            android:entryValues="@array/beacon_interval_values" />
+
+        <Preference
+            android:key="meshcore_smart_beacon_section_header"
+            android:title="Smart Beacon Settings"
+            android:summary="Sets automatic beacons based off of movement"
+            android:selectable="false"
+            android:persistent="false"
+            android:enabled="true" />
+
+        <com.atakmap.android.gui.PanEditTextPreference
+            android:key="meshcore_smart_beacon_low_speed"
+            android:title="Low Speed Threshold (mph)"
+            android:summary="Below this speed the slowest rate is used"
+            android:defaultValue="1"
+            android:dialogTitle="Low Speed Threshold (mph)"
+            android:inputType="number" />
+
+        <com.atakmap.android.gui.PanEditTextPreference
+            android:key="meshcore_smart_beacon_high_speed"
+            android:title="High Speed Threshold (mph)"
+            android:summary="Above this speed the fastest rate is used"
+            android:defaultValue="25"
+            android:dialogTitle="High Speed Threshold (mph)"
+            android:inputType="number" />
+
+        <com.atakmap.android.gui.PanEditTextPreference
+            android:key="meshcore_smart_beacon_slow_rate"
+            android:title="Slow Rate (seconds)"
+            android:summary="Max time between beacons when slow or stopped"
+            android:defaultValue="1800"
+            android:dialogTitle="Slow Rate (seconds)"
+            android:inputType="number" />
+
+        <com.atakmap.android.gui.PanEditTextPreference
+            android:key="meshcore_smart_beacon_fast_rate"
+            android:title="Fast Rate (seconds)"
+            android:summary="Min time between beacons when moving fast"
+            android:defaultValue="300"
+            android:dialogTitle="Fast Rate (seconds)"
+            android:inputType="number" />
+
+        <com.atakmap.android.gui.PanEditTextPreference
+            android:key="meshcore_smart_beacon_min_turn_time"
+            android:title="Min Turn Time (seconds)"
+            android:summary="Minimum delay between corner-pegging beacons"
+            android:defaultValue="60"
+            android:dialogTitle="Min Turn Time (seconds)"
+            android:inputType="number" />
+
+        <com.atakmap.android.gui.PanEditTextPreference
+            android:key="meshcore_smart_beacon_turn_threshold"
+            android:title="Turn Threshold (degrees)"
+            android:summary="Heading change needed to trigger an early beacon"
+            android:defaultValue="30"
+            android:dialogTitle="Turn Threshold (degrees)"
+            android:inputType="number" />
+
+        <com.atakmap.android.gui.PanEditTextPreference
+            android:key="meshcore_smart_beacon_turn_slope"
+            android:title="Turn Slope"
+            android:summary="Scales turn sensitivity with speed (higher = less sensitive at low speed)"
+            android:defaultValue="255"
+            android:dialogTitle="Turn Slope"
+            android:inputType="number" />
 
     </PreferenceCategory>
 
@@ -41,7 +116,7 @@
         <com.atakmap.android.gui.PanListPreference
             android:key="meshcore_retry_max"
             android:title="Max Retries"
-            android:summary="Number of retransmit attempts before declaring delivery failure"
+            android:summary="Number of retransmit attempts before declaring delivery failure. Will re-attempt upon receipt of beacon"
             android:defaultValue="3"
             android:dialogTitle="Max Retries"
             android:entries="@array/retry_max_labels"
@@ -52,12 +127,6 @@
     <PreferenceCategory
         android:key="meshcore_cat_security"
         android:title="Security">
-
-        <com.atakmap.android.gui.PanCheckBoxPreference
-            android:key="meshcore_encryption_enabled"
-            android:title="Enable Encryption"
-            android:summary="Encrypt all data sent over radio"
-            android:defaultValue="false" />
 
         <com.atakmap.android.gui.PanEditTextPreference
             android:key="meshcore_encryption_passphrase"
@@ -70,27 +139,15 @@
     </PreferenceCategory>
 
     <PreferenceCategory
-        android:key="meshcore_cat_bluetooth"
-        android:title="Bluetooth">
-
-        <com.atakmap.android.gui.PanCheckBoxPreference
-            android:key="meshcore_auto_reconnect"
-            android:title="Auto-Reconnect"
-            android:summary="Automatically reconnect to last known radio"
-            android:defaultValue="true" />
-
-    </PreferenceCategory>
-
-    <Preference
-        android:key="meshcore_admin_access"
-        android:title="Administrative Settings"
-        android:summary="Tap to enter password"
-        android:persistent="false"
-        android:selectable="true" />
-
-    <PreferenceCategory
         android:key="meshcore_cat_administration"
         android:title="Administrative Settings">
+
+        <Preference
+            android:key="meshcore_restore_admin_defaults"
+            android:title="Restore Defaults"
+            android:summary=""
+            android:persistent="false"
+            android:selectable="true" />
 
         <Preference
             android:key="meshcore_admin_leadership_warning"
@@ -100,65 +157,17 @@
             android:persistent="false"
             android:enabled="true" />
 
-        <Preference
-            android:key="meshcore_mesh_beacon_national_warning"
-            android:title="Mesh Beacon — national activation only"
-            android:summary="Do not use unless directed by your team leader"
-            android:selectable="false"
-            android:persistent="false"
-            android:enabled="true" />
-
-        <com.atakmap.android.gui.PanCheckBoxPreference
-            android:key="meshcore_mesh_beacon_enabled"
-            android:title="Enable Mesh Beacon"
-            android:summary="Timed mesh position beacons"
-            android:defaultValue="false" />
-
-        <com.atakmap.android.gui.PanListPreference
-            android:key="meshcore_beacon_interval"
-            android:title="GPS Beacon Interval"
-            android:summary="Mesh beacon interval when Mesh Beacon is enabled"
-            android:defaultValue="60"
-            android:dialogTitle="Beacon Interval"
-            android:entries="@array/beacon_interval_labels"
-            android:entryValues="@array/beacon_interval_values" />
-
         <com.atakmap.android.gui.PanCheckBoxPreference
             android:key="meshcore_admin_settings_enabled"
             android:title="Enable administrative settings"
             android:summary="Unlock slot assignment controls for net leadership"
             android:defaultValue="false" />
 
-        <com.atakmap.android.gui.PanEditTextPreference
-            android:key="meshcore_ping_slot_count"
-            android:title="Slot count"
-            android:summary="Ping-reply slots (default 20)"
-            android:defaultValue="20"
-            android:dialogTitle="Slot count"
-            android:inputType="number" />
-
-        <com.atakmap.android.gui.PanEditTextPreference
-            android:key="meshcore_ping_slot_time_sec"
-            android:title="Slot time"
-            android:summary="Seconds between slot start times (default 2.5 s)"
-            android:defaultValue="2.5"
-            android:dialogTitle="Slot time (seconds)"
-            android:inputType="numberDecimal" />
-
-        <Preference
-            android:key="meshcore_distribute_net_slots"
-            android:title="Distribute to net"
-            android:summary="Ensure all stations are in radio range to receive slot assignments"
-            android:persistent="false"
-            android:selectable="true" />
-
-        <Preference
-            android:key="meshcore_admin_current_slot_status"
-            android:title="Currently set on this device"
-            android:summary="Slot count: 20 — Slot time: 2.5 s"
-            android:selectable="false"
-            android:persistent="false"
-            android:enabled="true" />
+        <com.atakmap.android.gui.PanCheckBoxPreference
+            android:key="meshcore_disable_mesh_beacon_limiting"
+            android:title="Disable Mesh Beacon Limiting"
+            android:summary="When disabled, this allows mesh beaconing to follow all smart beacon settings without mesh limits"
+            android:defaultValue="false" />
 
     </PreferenceCategory>
 

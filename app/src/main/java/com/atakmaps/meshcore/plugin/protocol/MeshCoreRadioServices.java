@@ -27,6 +27,23 @@ public final class MeshCoreRadioServices {
         encryptionManager = encryption;
     }
 
+    /** Apply encryption toggle + shared secret from ATAK SharedPreferences. */
+    public static void syncEncryptionFromSettings(Context context) {
+        EncryptionManager em = encryptionManager;
+        if (em == null) {
+            return;
+        }
+        Context ctx = resolveContext(context);
+        if (ctx == null) {
+            return;
+        }
+        if (SettingsFragment.isEncryptionEnabled(ctx)) {
+            em.setSharedSecret(SettingsFragment.getEncryptionPassphrase(ctx));
+        } else {
+            em.setSharedSecret(null);
+        }
+    }
+
     public static void clear() {
         btManager = null;
         encryptionManager = null;

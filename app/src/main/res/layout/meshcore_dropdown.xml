@@ -375,46 +375,11 @@
                     android:checked="false" />
             </LinearLayout>
 
-            <LinearLayout
-                android:id="@+id/passphrase_row"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingTop="8dp"
-                android:visibility="gone">
-
-                <EditText
-                    android:id="@+id/edit_passphrase"
-                    android:layout_width="0dp"
-                    android:layout_height="40dp"
-                    android:layout_weight="1"
-                    android:hint="Shared secret"
-                    android:textColor="#FFFFFFFF"
-                    android:textColorHint="#FF666666"
-                    android:textSize="13sp"
-                    android:background="#FF1B1B1B"
-                    android:padding="8dp"
-                    android:inputType="textPassword"
-                    android:singleLine="true"
-                    android:layout_marginEnd="4dp" />
-
-                <Button
-                    android:id="@+id/btn_set_passphrase"
-                    style="@style/MeshcorePillButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="SET"
-                    android:textSize="11sp"
-                    android:background="@drawable/bg_meshcore_connection_button_red"
-                    android:minWidth="60dp" />
-            </LinearLayout>
-
             <TextView
                 android:id="@+id/text_encryption_status"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="All radios must use the same shared secret"
+                android:text="Shared secret is configured in Tool Preferences"
                 android:textColor="#FF888888"
                 android:textSize="11sp"
                 android:paddingTop="4dp" />
@@ -454,7 +419,74 @@
                 style="@style/MeshcorePillButton.Beacon"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
                 android:text="Send Ping"
+                android:background="@drawable/bg_meshcore_beacon_button_blue" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingTop="4dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Smart Beacon"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="13sp" />
+
+                <Switch
+                    android:id="@+id/switch_smart_beacon"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Adapts beacon rate to speed and heading changes."
+                android:textColor="#FF888888"
+                android:textSize="11sp"
+                android:paddingTop="2dp"
+                android:paddingBottom="4dp" />
+
+            <LinearLayout
+                android:id="@+id/row_beacon_interval"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingTop="8dp">
+
+                <TextView
+                    android:id="@+id/text_gps_beacon_interval_label"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="GPS Beacon Interval"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/text_beacon_interval"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="300s"
+                    android:textColor="#FF00BCD4"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btn_manage_plugin_beacon_settings"
+                style="@style/MeshcorePillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Beacon Settings"
                 android:background="@drawable/bg_meshcore_beacon_button_blue" />
         </LinearLayout>
 
@@ -517,43 +549,6 @@
                     android:layout_height="wrap_content" />
             </LinearLayout>
 
-            <LinearLayout
-                android:id="@+id/row_mesh_beacon_admin"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:visibility="gone"
-                android:paddingBottom="6dp">
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="Mesh Beacon: activated by national only. Do not use unless directed by your team leader."
-                    android:textColor="#FFFFFFFF"
-                    android:textSize="11sp"
-                    android:textStyle="bold"
-                    android:paddingBottom="4dp" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Enable Mesh Beacon"
-                        android:textColor="#FFFFFFFF"
-                        android:textSize="13sp" />
-
-                    <Switch
-                        android:id="@+id/switch_mesh_beacon_enabled"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content" />
-                </LinearLayout>
-            </LinearLayout>
 
             <LinearLayout
                 android:layout_width="match_parent"
