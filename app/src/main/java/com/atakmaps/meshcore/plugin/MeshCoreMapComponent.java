@@ -16,9 +16,12 @@ import com.atakmap.android.maps.MapEvent;
 import com.atakmap.android.maps.MapEventDispatcher;
 import com.atakmap.android.maps.MapItem;
 import com.atakmap.android.maps.MapView;
+import com.atakmap.android.maps.PointMapItem;
 import com.atakmap.app.preferences.ToolsPreferenceFragment;
 import com.atakmap.coremap.maps.coords.GeoCalculations;
 import com.atakmap.coremap.maps.coords.GeoPoint;
+import com.atakmaps.meshcore.plugin.beacon.MeshBeaconLimits;
+import com.atakmaps.meshcore.plugin.beacon.SmartBeacon;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.chat.ChatBridge;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
@@ -92,6 +95,26 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
     private Handler meshIconsetReminderHandler;
     private Runnable meshIconsetReminderRunnable;
     private android.content.BroadcastReceiver radialPingReceiver;
+    private android.content.BroadcastReceiver beaconIntervalReceiver;
+    private Handler beaconHandler;
+    private Runnable beaconRunnable;
+    private Runnable beaconWaitForPositionRunnable;
+    private boolean forceFirstPostConnectBeacon = false;
+    private final SmartBeacon smartBeacon = new SmartBeacon();
+    private android.location.LocationManager gpsLocationManager;
+    private android.location.LocationListener gpsLocationListener;
+    private volatile android.location.Location lastGpsLocation = null;
+    private double lastBeaconLatDeg = Double.NaN;
+    private double lastBeaconLonDeg = Double.NaN;
+    private long lastBeaconPositionMs = 0;
+
+    /** Smart Beacon prefs are stored in ATAK default prefs, not plugin prefs. */
+    private Context getBeaconPrefsContext() {
+        if (mapView != null && mapView.getContext() != null) {
+            return mapView.getContext();
+        }
+        return pluginContext;
+    }
 
     @Override
     public void onCreate(Context context, Intent intent, MapView view) {
@@ -174,6 +197,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             @Override
             public void onConnected(android.bluetooth.BluetoothDevice device) {
                 MeshStatusOverlay.setConnected(true);
+                startBeaconTimer();
                 if (cotBridge != null) {
                     cotBridge.setBtManager(btConnectionManager);
                     cotBridge.refreshSendableMapItems();
@@ -196,6 +220,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             @Override
             public void onDisconnected(String reason) {
                 MeshStatusOverlay.setConnected(false);
+                stopBeaconTimer();
             }
 
             @Override
@@ -256,6 +281,32 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         com.atakmaps.meshcore.plugin.contacts.ContactRadialMenuUtil.init(context);
 
         try {
+            beaconIntervalReceiver = new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(Context ctx, Intent i) {
+                    if (i == null) {
+                        return;
+                    }
+                    if (ACTION_BEACON_INTERVAL_CHANGED.equals(i.getAction())) {
+                        if (btConnectionManager != null && btConnectionManager.isConnected()) {
+                            Log.d(TAG, "Beacon settings changed — rescheduling timer");
+                            startBeaconTimer();
+                        } else {
+                            Log.d(TAG, "Beacon settings changed while disconnected — timer deferred");
+                        }
+                    }
+                }
+            };
+            AtakBroadcast.DocumentedIntentFilter beaconFilter =
+                    new AtakBroadcast.DocumentedIntentFilter();
+            beaconFilter.addAction(ACTION_BEACON_INTERVAL_CHANGED);
+            AtakBroadcast.getInstance()
+                    .registerReceiver(beaconIntervalReceiver, beaconFilter);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to register beacon interval receiver", e);
+        }
+
+        try {
             radialPingReceiver = new android.content.BroadcastReceiver() {
                 @Override
                 public void onReceive(Context ctx, Intent i) {
@@ -280,6 +331,233 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         }
 
         Log.i(TAG, "MeshCore plugin initialized");
+        startGpsSpeedListener(view.getContext());
+        if (btConnectionManager.isConnected()) {
+            startBeaconTimer();
+        }
+    }
+
+    private void startGpsSpeedListener(Context ctx) {
+        try {
+            gpsLocationManager = (android.location.LocationManager)
+                    ctx.getSystemService(Context.LOCATION_SERVICE);
+            if (gpsLocationManager == null) {
+                Log.w(TAG, "GPS: LocationManager unavailable");
+                return;
+            }
+            gpsLocationListener = new android.location.LocationListener() {
+                @Override public void onLocationChanged(android.location.Location loc) {
+                    lastGpsLocation = loc;
+                }
+                @Override public void onStatusChanged(String p, int s, android.os.Bundle e) {}
+                @Override public void onProviderEnabled(String p) {}
+                @Override public void onProviderDisabled(String p) {}
+            };
+            gpsLocationManager.requestLocationUpdates(
+                    android.location.LocationManager.GPS_PROVIDER,
+                    1000L, 0f, gpsLocationListener,
+                    android.os.Looper.getMainLooper());
+            Log.i(TAG, "GPS speed listener started");
+        } catch (SecurityException se) {
+            Log.w(TAG, "GPS: location permission denied — falling back to derived speed", se);
+        } catch (Exception e) {
+            Log.w(TAG, "GPS: listener start failed — falling back to derived speed", e);
+        }
+    }
+
+    private void startBeaconTimer() {
+        stopBeaconTimer();
+        smartBeacon.reset();
+        forceFirstPostConnectBeacon = true;
+
+        beaconHandler = new Handler(Looper.getMainLooper());
+        beaconRunnable = new Runnable() {
+            @Override
+            public void run() {
+                sendBeaconIfConnected(forceFirstPostConnectBeacon);
+                forceFirstPostConnectBeacon = false;
+                long nextCheckMs = getBeaconTimerDelayMs();
+                beaconHandler.postDelayed(this, nextCheckMs);
+            }
+        };
+        if (hasValidSelfPosition()) {
+            Log.d(TAG, "Beacon timer armed: valid self position already present");
+            beaconHandler.postDelayed(beaconRunnable, 30_000L);
+            return;
+        }
+        beaconWaitForPositionRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (beaconHandler == null
+                        || btConnectionManager == null || !btConnectionManager.isConnected()) {
+                    return;
+                }
+                if (hasValidSelfPosition()) {
+                    Log.d(TAG, "Valid self position acquired; startup beacon in 30s");
+                    beaconHandler.postDelayed(beaconRunnable, 30_000L);
+                    beaconWaitForPositionRunnable = null;
+                    return;
+                }
+                beaconHandler.postDelayed(this, 2_000L);
+            }
+        };
+        Log.d(TAG, "Beacon timer waiting for valid self position before startup countdown");
+        beaconHandler.postDelayed(beaconWaitForPositionRunnable, 2_000L);
+    }
+
+    private void stopBeaconTimer() {
+        if (beaconHandler != null) {
+            if (beaconRunnable != null) {
+                beaconHandler.removeCallbacks(beaconRunnable);
+            }
+            if (beaconWaitForPositionRunnable != null) {
+                beaconHandler.removeCallbacks(beaconWaitForPositionRunnable);
+            }
+        }
+        beaconWaitForPositionRunnable = null;
+        forceFirstPostConnectBeacon = false;
+    }
+
+    private long getBeaconTimerDelayMs() {
+        Context beaconCtx = getBeaconPrefsContext();
+        boolean meshLimits = MeshBeaconLimits.isActive(beaconCtx);
+        if (SmartBeacon.isEnabled(beaconCtx)) {
+            int checkSec = SmartBeacon.getRecommendedCheckIntervalSec(beaconCtx, meshLimits);
+            return Math.max(1, checkSec) * 1000L;
+        }
+        int intervalSec = SettingsFragment.getBeaconIntervalSec(pluginContext);
+        if (intervalSec < 1) {
+            intervalSec = 1;
+        }
+        if (meshLimits) {
+            intervalSec = MeshBeaconLimits.capIntervalSec(beaconCtx, intervalSec);
+        }
+        return intervalSec * 1000L;
+    }
+
+    private boolean hasValidSelfPosition() {
+        if (mapView == null) {
+            return false;
+        }
+        PointMapItem self = mapView.getSelfMarker();
+        if (self == null) {
+            return false;
+        }
+        GeoPoint gp = self.getPoint();
+        return gp != null && gp.isValid();
+    }
+
+    private void sendBeaconIfConnected(boolean forceImmediate) {
+        if (btConnectionManager == null || !btConnectionManager.isConnected()) {
+            Log.d(TAG, forceImmediate
+                    ? "Startup beacon skipped: MeshCore not connected"
+                    : "Periodic beacon skipped: MeshCore not connected");
+            return;
+        }
+        if (cotBridge == null || mapView == null) {
+            return;
+        }
+
+        try {
+            PointMapItem self = mapView.getSelfMarker();
+            if (self == null) {
+                return;
+            }
+            GeoPoint gp = self.getPoint();
+
+            double speedMs = 0.0;
+            double course = 0.0;
+            String speedSrc;
+            android.location.Location gpsLoc = lastGpsLocation;
+            if (gpsLoc != null && gpsLoc.hasSpeed()) {
+                speedMs = Math.max(0.0, gpsLoc.getSpeed());
+                course = gpsLoc.hasBearing() ? gpsLoc.getBearing() : 0.0;
+                speedSrc = "gps";
+            } else {
+                double currentLat = gp.getLatitude();
+                double currentLon = gp.getLongitude();
+                long nowMs = System.currentTimeMillis();
+                speedSrc = "meta";
+                if (!Double.isNaN(lastBeaconLatDeg) && lastBeaconPositionMs > 0) {
+                    long dtMs = nowMs - lastBeaconPositionMs;
+                    if (dtMs > 500 && dtMs < 120_000L) {
+                        try {
+                            GeoPoint prev = new GeoPoint(lastBeaconLatDeg, lastBeaconLonDeg);
+                            GeoPoint curr = new GeoPoint(currentLat, currentLon);
+                            double distM = GeoCalculations.distanceTo(prev, curr);
+                            double derivedMs = distM / (dtMs / 1000.0);
+                            if (derivedMs >= 0.0 && derivedMs < 120.0) {
+                                speedMs = derivedMs;
+                                speedSrc = "derived";
+                                course = GeoCalculations.bearingTo(prev, curr);
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+                lastBeaconLatDeg = currentLat;
+                lastBeaconLonDeg = currentLon;
+                lastBeaconPositionMs = nowMs;
+                if (!speedSrc.equals("derived")) {
+                    try {
+                        course = Double.parseDouble(self.getMetaString("course", "0"));
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            double speedMph = speedMs * 2.23694;
+
+            Context beaconCtx = getBeaconPrefsContext();
+            final boolean meshLimitedBeacon = MeshBeaconLimits.isActive(beaconCtx);
+            if (!forceImmediate && SmartBeacon.isEnabled(beaconCtx)) {
+                boolean smartFire = smartBeacon.shouldBeacon(
+                        beaconCtx, speedMph, course, meshLimitedBeacon);
+                int fixedIntervalSec = SettingsFragment.getBeaconIntervalSec(pluginContext);
+                if (fixedIntervalSec < 1) {
+                    fixedIntervalSec = 60;
+                }
+                if (meshLimitedBeacon) {
+                    fixedIntervalSec = MeshBeaconLimits.capIntervalSec(
+                            beaconCtx, fixedIntervalSec);
+                }
+                boolean floorFire = smartBeacon.elapsedSinceLastBeaconSec() >= fixedIntervalSec;
+                Log.d(TAG, "Smart beacon check: speed=" + String.format(Locale.US, "%.1f", speedMph)
+                        + "mph (src=" + speedSrc + ")"
+                        + " course=" + String.format(Locale.US, "%.0f", course) + "°"
+                        + " meshLimited=" + meshLimitedBeacon
+                        + " smartFire=" + smartFire + " floorFire=" + floorFire
+                        + " floorSec=" + fixedIntervalSec);
+                if (!smartFire && !floorFire) {
+                    return;
+                }
+                smartBeacon.recordBeacon(course);
+                Log.d(TAG, "Smart beacon fired (smartFire=" + smartFire
+                        + " floorFire=" + floorFire + ")");
+            } else if (forceImmediate) {
+                Log.d(TAG, "Post-connect startup beacon fired (30s)");
+            } else {
+                int intervalSec = SettingsFragment.getBeaconIntervalSec(pluginContext);
+                if (intervalSec < 1) {
+                    intervalSec = 60;
+                }
+                if (meshLimitedBeacon) {
+                    intervalSec = MeshBeaconLimits.capIntervalSec(beaconCtx, intervalSec);
+                }
+                if (smartBeacon.elapsedSinceLastBeaconSec() < intervalSec) {
+                    return;
+                }
+                smartBeacon.recordBeacon(course);
+            }
+
+            cotBridge.sendPositionOverRadio(
+                    gp.getLatitude(), gp.getLongitude(),
+                    gp.getAltitude(), (float) speedMs, (float) course, -1);
+            String beaconKind = forceImmediate ? "Startup" : "Periodic";
+            Log.d(TAG, beaconKind + " MeshCore GPS beacon sent"
+                    + (meshLimitedBeacon ? " [mesh limits]" : ""));
+        } catch (Exception e) {
+            Log.e(TAG, "Error sending periodic beacon", e);
+        }
     }
 
     /**
@@ -1715,6 +1993,22 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
 
     @Override
     protected void onDestroyImpl(Context context, MapView view) {
+        if (gpsLocationManager != null && gpsLocationListener != null) {
+            try {
+                gpsLocationManager.removeUpdates(gpsLocationListener);
+            } catch (Exception ignored) {
+            }
+            gpsLocationManager = null;
+            gpsLocationListener = null;
+        }
+        stopBeaconTimer();
+        if (beaconIntervalReceiver != null) {
+            try {
+                AtakBroadcast.getInstance().unregisterReceiver(beaconIntervalReceiver);
+            } catch (Exception ignored) {
+            }
+            beaconIntervalReceiver = null;
+        }
         try {
             if (dropDownReceiver != null) {
                 dropDownReceiver.dispose();

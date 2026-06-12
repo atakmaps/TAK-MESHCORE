@@ -1336,7 +1336,7 @@ public class SettingsFragment extends PluginPreferenceFragment
                 false);
         forceCheckBoxPreference(admin, NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED,
                 "Enable administrative settings",
-                "Unlock slot assignment controls for net leadership",
+                "",
                 false);
     }
 
@@ -1506,8 +1506,6 @@ public class SettingsFragment extends PluginPreferenceFragment
 
         setCheckBoxDescriptionSummary(PREF_DISABLE_MESH_BEACON_LIMITING,
                 DISABLE_MESH_BEACON_LIMITING_DESC);
-        setCheckBoxDescriptionSummary(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED,
-                "Unlock slot assignment controls for net leadership");
     }
 
     @Override
@@ -3316,9 +3314,6 @@ public class SettingsFragment extends PluginPreferenceFragment
         }
         if (PREF_DISABLE_MESH_BEACON_LIMITING.equals(key)) {
             return DISABLE_MESH_BEACON_LIMITING_DESC;
-        }
-        if (NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED.equals(key)) {
-            return "Unlock slot assignment controls for net leadership";
         }
         return null;
     }

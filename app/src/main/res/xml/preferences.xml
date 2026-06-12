@@ -160,7 +160,7 @@
         <com.atakmap.android.gui.PanCheckBoxPreference
             android:key="meshcore_admin_settings_enabled"
             android:title="Enable administrative settings"
-            android:summary="Unlock slot assignment controls for net leadership"
+            android:summary=""
             android:defaultValue="false" />
 
         <com.atakmap.android.gui.PanCheckBoxPreference

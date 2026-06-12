@@ -51,6 +51,7 @@ import com.atakmap.android.toolbar.ToolManagerBroadcastReceiver;
 import com.atakmap.android.toolbar.widgets.TextContainer;
 import com.atakmap.android.user.MapClickTool;
 import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
+import com.atakmaps.meshcore.plugin.beacon.MeshBeaconLimits;
 import com.atakmaps.meshcore.plugin.beacon.SmartBeacon;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry;
 import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry.BtDeviceRecord;
@@ -3605,7 +3606,13 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 || Boolean.TRUE.equals(meshSendPositionWithAdvertState))
                 && !Boolean.TRUE.equals(meshGpsEnabledState);
         if (shouldRun) {
-            mv.postDelayed(meshCallsignPositionSyncRunnable, MESH_CALLSIGN_POSITION_PUSH_INTERVAL_MS);
+            long delayMs = MESH_CALLSIGN_POSITION_PUSH_INTERVAL_MS;
+            if (MeshBeaconLimits.isActive(ctx)) {
+                int cappedSec = MeshBeaconLimits.capIntervalSec(ctx,
+                        (int) (MESH_CALLSIGN_POSITION_PUSH_INTERVAL_MS / 1000L));
+                delayMs = cappedSec * 1000L;
+            }
+            mv.postDelayed(meshCallsignPositionSyncRunnable, delayMs);
         }
     }
 

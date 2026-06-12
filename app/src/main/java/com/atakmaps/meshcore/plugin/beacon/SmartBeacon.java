@@ -129,6 +129,14 @@ public class SmartBeacon {
      * @return true if a beacon should be transmitted
      */
     public boolean shouldBeacon(Context ctx, double speedMph, double headingDeg) {
+        return shouldBeacon(ctx, speedMph, headingDeg, false);
+    }
+
+    /**
+     * @param applyMeshLimits when true, enforce {@link MeshBeaconLimits} floors on rates
+     */
+    public boolean shouldBeacon(Context ctx, double speedMph, double headingDeg,
+                                boolean applyMeshLimits) {
         long nowMs = System.currentTimeMillis();
         long elapsedSec = (nowMs - lastBeaconTimeMs) / 1000L;
 
@@ -137,6 +145,11 @@ public class SmartBeacon {
         int slowRate      = getSlowRate(ctx);
         int fastRate      = getFastRate(ctx);
         int minTurnTime   = Math.max(1, getMinTurnTime(ctx));
+        if (applyMeshLimits) {
+            slowRate = MeshBeaconLimits.capSlowRateSec(ctx, slowRate);
+            fastRate = MeshBeaconLimits.capFastRateSec(ctx, fastRate);
+            minTurnTime = MeshBeaconLimits.capMinTurnTimeSec(ctx, minTurnTime);
+        }
         int turnThreshold = Math.max(1, getTurnThreshold(ctx));
         int turnSlope     = Math.max(0, getTurnSlope(ctx));
         lowSpeed = Math.max(1, lowSpeed);
@@ -200,8 +213,16 @@ public class SmartBeacon {
      * Uses the tighter of fast-rate and min-turn-time so we do not miss turn triggers.
      */
     public static int getRecommendedCheckIntervalSec(Context ctx) {
+        return getRecommendedCheckIntervalSec(ctx, false);
+    }
+
+    public static int getRecommendedCheckIntervalSec(Context ctx, boolean applyMeshLimits) {
         int fastRate = Math.max(1, getFastRate(ctx));
         int minTurnTime = Math.max(1, getMinTurnTime(ctx));
+        if (applyMeshLimits) {
+            fastRate = MeshBeaconLimits.capFastRateSec(ctx, fastRate);
+            minTurnTime = MeshBeaconLimits.capMinTurnTimeSec(ctx, minTurnTime);
+        }
         return Math.max(1, Math.min(fastRate, minTurnTime));
     }
 }
