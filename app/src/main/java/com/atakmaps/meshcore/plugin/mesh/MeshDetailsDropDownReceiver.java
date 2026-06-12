@@ -11,6 +11,8 @@ import android.widget.Toast;
 
 import com.atakmap.android.dropdown.DropDown;
 import com.atakmap.android.dropdown.DropDownReceiver;
+import com.atakmap.android.contact.Contact;
+import com.atakmap.android.contact.Contacts;
 import com.atakmap.android.maps.MapItem;
 import com.atakmap.android.maps.MapView;
 import com.atakmap.android.ipc.AtakBroadcast;
@@ -36,6 +38,7 @@ public class MeshDetailsDropDownReceiver extends DropDownReceiver
     private TextView bodyView;
     private Button favoriteButton;
     private Button sendMessageButton;
+    private Button deleteContactButton;
     private String openUid;
     private boolean dropDownVisible;
 
@@ -73,6 +76,7 @@ public class MeshDetailsDropDownReceiver extends DropDownReceiver
         refreshBody(item);
         wireFavoriteButton(uid, title);
         wireSendMessageButton(uid, title);
+        wireDeleteContactButton(uid, title);
 
         try {
             setSelected(item, "asset:/icons/outline.png");
@@ -100,6 +104,8 @@ public class MeshDetailsDropDownReceiver extends DropDownReceiver
                 .getIdentifier("mesh_details_favorite", "id", pluginContext.getPackageName()));
         sendMessageButton = panelView.findViewById(pluginContext.getResources()
                 .getIdentifier("mesh_details_send_message", "id", pluginContext.getPackageName()));
+        deleteContactButton = panelView.findViewById(pluginContext.getResources()
+                .getIdentifier("mesh_details_delete_contact", "id", pluginContext.getPackageName()));
         if (bodyView != null) {
             bodyView.setMovementMethod(new ScrollingMovementMethod());
         }
@@ -160,6 +166,39 @@ public class MeshDetailsDropDownReceiver extends DropDownReceiver
         });
     }
 
+    private void wireDeleteContactButton(String uid, String displayName) {
+        if (deleteContactButton == null) {
+            return;
+        }
+        deleteContactButton.setOnClickListener(v -> deleteMeshContact(uid, displayName));
+    }
+
+    private void deleteMeshContact(String markerUid, String displayName) {
+        MapView mv = getMapView();
+        Context ctx = mv != null ? mv.getContext() : pluginContext;
+        if (mv == null || mv.getRootGroup() == null || markerUid == null || markerUid.isEmpty()) {
+            return;
+        }
+        MapItem marker = mv.getRootGroup().deepFindUID(markerUid);
+        if (marker != null && marker.getGroup() != null && CotBridge.isMeshcoreMeshMarker(marker)) {
+            marker.getGroup().removeItem(marker);
+        }
+        try {
+            Contacts contacts = Contacts.getInstance();
+            Contact contact = contacts.getContactByUuid(markerUid);
+            if (contact != null) {
+                contacts.removeContact(contact);
+                contacts.updateTotalUnreadCount();
+            }
+        } catch (Exception ignored) {
+        }
+        MeshCoreContactHandler.clearUnread(markerUid);
+        String label = displayName != null && !displayName.trim().isEmpty()
+                ? displayName.trim() : markerUid;
+        Toast.makeText(ctx, "Deleted contact " + label, Toast.LENGTH_SHORT).show();
+        closeDropDown();
+    }
+
     @Override
     public void onDropDownVisible(boolean v) {
         dropDownVisible = v;
@@ -187,6 +226,7 @@ public class MeshDetailsDropDownReceiver extends DropDownReceiver
         bodyView = null;
         favoriteButton = null;
         sendMessageButton = null;
+        deleteContactButton = null;
         openUid = null;
         dropDownVisible = false;
     }
