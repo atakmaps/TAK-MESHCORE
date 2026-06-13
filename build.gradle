@@ -6,7 +6,6 @@
 
 buildscript {
     ext.PLUGIN_VERSION = "1.5.0"
-    ext.ATAK_VERSION = "5.5.1"
 
     def takdevVersion = '2.+'
 
@@ -28,6 +27,11 @@ buildscript {
             getValueFromPropertiesFile(project.rootProject.file('local.properties'), name)
         return (null == prop) ? defValue : prop
     }
+
+    // ATAK_VERSION selects which ATAK SDK this plugin builds against. Override with
+    // -Patak.version=5.6.0 (or atak.version=5.6.0 in local.properties) to produce builds
+    // for newer ATAK releases. Defaults to 5.5.1 for backward compatibility.
+    ext.ATAK_VERSION = getProperty('atak.version', '5.5.1')
 
     def urlKey = 'takrepo.url'
 
