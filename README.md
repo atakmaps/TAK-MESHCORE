@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.4.9`
+- Current version: `1.5.0`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -120,6 +120,10 @@ Administrative rows unlock after the admin password is accepted. **Restore All D
 - Updated scan UX with active discovery pulse
 
 ## Changelog
+
+### v1.5.0
+
+- **Send Ping Reply default ON:** New installs and restore-defaults reset **Send Ping Reply** to enabled (`DEFAULT_PING_REPLY_ENABLED`).
 
 ### v1.4.9
 

@@ -130,6 +130,7 @@ public class SettingsFragment extends PluginPreferenceFragment
     private static final String DISABLE_MESH_BEACON_LIMITING_TITLE =
             "Disable Mesh Beacon Limiting";
     public static final String PREF_PING_REPLY_ENABLED = "meshcore_ping_reply_enabled";
+    public static final boolean DEFAULT_PING_REPLY_ENABLED = true;
     public static final String PREF_BEACON_INTERVAL = "meshcore_beacon_interval";
 
     public static final String KEY_UNLOCK_ADMIN = "meshcore_admin_access";
@@ -476,7 +477,7 @@ public class SettingsFragment extends PluginPreferenceFragment
         PreferenceCategory radio = (PreferenceCategory) findPreference(KEY_CAT_RADIO);
         if (radio != null) {
             ensureCheckBoxPreferenceOrReplace(radio, PREF_PING_REPLY_ENABLED,
-                    "Send Ping Reply", PING_REPLY_DESC, true);
+                    "Send Ping Reply", PING_REPLY_DESC, DEFAULT_PING_REPLY_ENABLED);
         }
     }
 
@@ -521,7 +522,7 @@ public class SettingsFragment extends PluginPreferenceFragment
         wireListPreference(PREF_BEACON_INTERVAL);
         wireListPreference(PREF_RETRY_INTERVAL_MIN);
         wireListPreference(PREF_RETRY_MAX);
-        wireCheckBoxPreference(PREF_PING_REPLY_ENABLED, true);
+        wireCheckBoxPreference(PREF_PING_REPLY_ENABLED, DEFAULT_PING_REPLY_ENABLED);
         wireCheckBoxPreference(PREF_DISABLE_MESH_BEACON_LIMITING, false);
         wireCheckBoxPreference(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false);
         wireEditTextPreference(PREF_ENCRYPTION_PASSPHRASE);
@@ -883,7 +884,7 @@ public class SettingsFragment extends PluginPreferenceFragment
         }
         getPrefs(ctx).edit()
                 .putString(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL)
-                .putBoolean(PREF_PING_REPLY_ENABLED, true)
+                .putBoolean(PREF_PING_REPLY_ENABLED, DEFAULT_PING_REPLY_ENABLED)
                 .putString(PREF_RETRY_INTERVAL_MIN, DEFAULT_RETRY_INTERVAL_MIN)
                 .putString(PREF_RETRY_MAX, DEFAULT_RETRY_MAX)
                 .putString(PREF_ENCRYPTION_PASSPHRASE, "")
@@ -908,7 +909,7 @@ public class SettingsFragment extends PluginPreferenceFragment
                 SmartBeacon.DEFAULT_TURN_SLOPE);
         AdminAccessGate.lock(ctx);
         setListPreferenceValue(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL);
-        setCheckBoxPreferenceValue(PREF_PING_REPLY_ENABLED, true);
+        setCheckBoxPreferenceValue(PREF_PING_REPLY_ENABLED, DEFAULT_PING_REPLY_ENABLED);
         setListPreferenceValue(PREF_RETRY_INTERVAL_MIN, DEFAULT_RETRY_INTERVAL_MIN);
         setListPreferenceValue(PREF_RETRY_MAX, DEFAULT_RETRY_MAX);
         setEditTextPreferenceText(PREF_ENCRYPTION_PASSPHRASE, "");
@@ -957,7 +958,7 @@ public class SettingsFragment extends PluginPreferenceFragment
         setListPreferenceValue(PREF_RETRY_MAX,
                 atak.getString(PREF_RETRY_MAX, DEFAULT_RETRY_MAX));
         setCheckBoxPreferenceValue(PREF_PING_REPLY_ENABLED,
-                atak.getBoolean(PREF_PING_REPLY_ENABLED, true));
+                atak.getBoolean(PREF_PING_REPLY_ENABLED, DEFAULT_PING_REPLY_ENABLED));
         setCheckBoxPreferenceValue(PREF_DISABLE_MESH_BEACON_LIMITING,
                 atak.getBoolean(PREF_DISABLE_MESH_BEACON_LIMITING, false));
         setCheckBoxPreferenceValue(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED,
@@ -1616,7 +1617,7 @@ public class SettingsFragment extends PluginPreferenceFragment
 
     public static boolean isPingReplyEnabled(Context context) {
         return getPrefs(context)
-                .getBoolean(PREF_PING_REPLY_ENABLED, true);
+                .getBoolean(PREF_PING_REPLY_ENABLED, DEFAULT_PING_REPLY_ENABLED);
     }
 
     public static boolean isRfToTakUplinkEnabled(Context context) {
@@ -3353,7 +3354,7 @@ public class SettingsFragment extends PluginPreferenceFragment
             return String.valueOf(SmartBeacon.getTurnSlope(ctx));
         }
         if (PREF_PING_REPLY_ENABLED.equals(key)) {
-            return getCheckBoxPreferenceValueLabel(key, true);
+            return getCheckBoxPreferenceValueLabel(key, DEFAULT_PING_REPLY_ENABLED);
         }
         if (PREF_DISABLE_MESH_BEACON_LIMITING.equals(key)) {
             return getCheckBoxPreferenceValueLabel(key, false);
