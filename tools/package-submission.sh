@@ -17,8 +17,13 @@ APK_PREFIX="${APK_PREFIX:-ATAK-Plugin-Meshcore}"
 
 VERSION="$(sed -n 's/.*ext\.PLUGIN_VERSION *= *"\([^"]*\)".*/\1/p' build.gradle | head -1)"
 ATAK_VER="$(sed -n 's/.*ext\.ATAK_VERSION *= *"\([^"]*\)".*/\1/p' build.gradle | head -1)"
-if [[ -z "${VERSION}" || -z "${ATAK_VER}" ]]; then
-  echo "Could not read PLUGIN_VERSION / ATAK_VERSION from build.gradle" >&2
+if [[ -z "${ATAK_VER}" ]]; then
+  ATAK_VER="$(sed -n "s/.*getProperty('atak.version', '\([^']*\)').*/\1/p" build.gradle | head -1)"
+fi
+# Override for 5.6+ submission zips: ATAK_VERSION=5.6.0 ./tools/package-submission.sh
+ATAK_VER="${ATAK_VERSION:-${ATAK_VER:-5.5.1}}"
+if [[ -z "${VERSION}" ]]; then
+  echo "Could not read PLUGIN_VERSION from build.gradle" >&2
   exit 1
 fi
 
