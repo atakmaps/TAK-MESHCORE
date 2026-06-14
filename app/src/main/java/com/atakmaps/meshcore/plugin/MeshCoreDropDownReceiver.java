@@ -4107,10 +4107,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
     private boolean getMeshUseGpsForPositionPreference(Context ctx) {
         if (ctx == null) {
-            return false;
+            return true;
         }
         return PreferenceManager.getDefaultSharedPreferences(ctx)
-                .getBoolean(PREF_MESH_USE_GPS_FOR_POSITION, false);
+                .getBoolean(PREF_MESH_USE_GPS_FOR_POSITION, true);
     }
 
     private void setMeshUseGpsForPositionPreference(boolean enabled) {
