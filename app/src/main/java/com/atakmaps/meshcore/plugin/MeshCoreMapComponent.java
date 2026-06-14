@@ -449,9 +449,12 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
 
     private void sendBeaconIfConnected(boolean forceImmediate) {
         if (btConnectionManager == null || !btConnectionManager.isConnected()) {
-            Log.d(TAG, forceImmediate
-                    ? "Startup beacon skipped: MeshCore not connected"
-                    : "Periodic beacon skipped: MeshCore not connected");
+            Log.d(TAG, (forceImmediate ? "Startup" : "Periodic")
+                    + " beacon skipped: MeshCore not connected");
+            if (forceImmediate && dropDownReceiver != null) {
+                dropDownReceiver.appendPluginLog(
+                        "Startup beacon not sent — MeshCore not connected");
+            }
             return;
         }
         if (cotBridge == null || mapView == null) {
@@ -461,6 +464,10 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         try {
             PointMapItem self = mapView.getSelfMarker();
             if (self == null) {
+                if (forceImmediate && dropDownReceiver != null) {
+                    dropDownReceiver.appendPluginLog(
+                            "Startup beacon not sent — no self-location available");
+                }
                 return;
             }
             GeoPoint gp = self.getPoint();
@@ -509,6 +516,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
 
             Context beaconCtx = getBeaconPrefsContext();
             final boolean meshLimitedBeacon = MeshBeaconLimits.isActive(beaconCtx);
+            int meshLimitSec = -1;
             if (!forceImmediate && SmartBeacon.isEnabled(beaconCtx)) {
                 boolean smartFire = smartBeacon.shouldBeacon(
                         beaconCtx, speedMph, course, meshLimitedBeacon);
@@ -530,6 +538,15 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 if (!smartFire && !floorFire) {
                     return;
                 }
+                if (meshLimitedBeacon) {
+                    if (smartFire) {
+                        meshLimitSec = smartBeacon.getFiringLimitSec(
+                                beaconCtx, speedMph, course, true);
+                    }
+                    if (meshLimitSec < 1 && floorFire) {
+                        meshLimitSec = fixedIntervalSec;
+                    }
+                }
                 smartBeacon.recordBeacon(course);
                 Log.d(TAG, "Smart beacon fired (smartFire=" + smartFire
                         + " floorFire=" + floorFire + ")");
@@ -546,6 +563,9 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 if (smartBeacon.elapsedSinceLastBeaconSec() < intervalSec) {
                     return;
                 }
+                if (meshLimitedBeacon) {
+                    meshLimitSec = intervalSec;
+                }
                 smartBeacon.recordBeacon(course);
             }
 
@@ -555,9 +575,30 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             String beaconKind = forceImmediate ? "Startup" : "Periodic";
             Log.d(TAG, beaconKind + " MeshCore GPS beacon sent"
                     + (meshLimitedBeacon ? " [mesh limits]" : ""));
+            logBeaconSentToPluginUi(formatBeaconSentLog(
+                    beaconKind, meshLimitedBeacon, meshLimitSec));
         } catch (Exception e) {
             Log.e(TAG, "Error sending periodic beacon", e);
+            if (dropDownReceiver != null) {
+                dropDownReceiver.appendPluginLog((forceImmediate ? "Startup" : "Periodic")
+                        + " beacon not sent — " + e.getMessage());
+            }
         }
+    }
+
+    private void logBeaconSentToPluginUi(String message) {
+        if (dropDownReceiver != null) {
+            dropDownReceiver.appendPluginLog(message);
+        }
+    }
+
+    private static String formatBeaconSentLog(String beaconKind, boolean meshLimited,
+                                              int limitSec) {
+        String base = String.format(Locale.US, "%s beacon sent (MeshCore OPENRL)", beaconKind);
+        if (meshLimited && limitSec > 0) {
+            return base + String.format(Locale.US, " (limited to %d seconds)", limitSec);
+        }
+        return base;
     }
 
     /**

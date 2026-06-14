@@ -137,6 +137,31 @@ public class SmartBeacon {
      */
     public boolean shouldBeacon(Context ctx, double speedMph, double headingDeg,
                                 boolean applyMeshLimits) {
+        return evaluateBeacon(ctx, speedMph, headingDeg, applyMeshLimits).shouldFire;
+    }
+
+    /**
+     * When {@link #shouldBeacon} would return true, the minimum interval (seconds)
+     * governed this trigger (turn time or speed-derived rate). Otherwise -1.
+     */
+    public int getFiringLimitSec(Context ctx, double speedMph, double headingDeg,
+                                 boolean applyMeshLimits) {
+        BeaconEval eval = evaluateBeacon(ctx, speedMph, headingDeg, applyMeshLimits);
+        return eval.shouldFire ? eval.limitSec : -1;
+    }
+
+    private static final class BeaconEval {
+        final boolean shouldFire;
+        final int limitSec;
+
+        BeaconEval(boolean shouldFire, int limitSec) {
+            this.shouldFire = shouldFire;
+            this.limitSec = limitSec;
+        }
+    }
+
+    private BeaconEval evaluateBeacon(Context ctx, double speedMph, double headingDeg,
+                                      boolean applyMeshLimits) {
         long nowMs = System.currentTimeMillis();
         long elapsedSec = (nowMs - lastBeaconTimeMs) / 1000L;
 
@@ -164,14 +189,14 @@ public class SmartBeacon {
 
             double effectiveThreshold = turnThreshold + turnSlope / Math.max(speedMph, 1.0);
             if (delta > effectiveThreshold && elapsedSec >= minTurnTime) {
-                return true;
+                return new BeaconEval(true, minTurnTime);
             }
         }
 
         // Speed-interval beacons only fire above lowSpeed threshold.
         // Below lowSpeed: rely on floor interval in caller; no periodic speed beacons.
         if (speedMph <= lowSpeed) {
-            return false;
+            return new BeaconEval(false, -1);
         }
 
         // Proportional rate: fastRate at highSpeed, scaling up toward slowRate at lowSpeed.
@@ -183,7 +208,10 @@ public class SmartBeacon {
         }
         beaconRate = Math.max(fastRate, Math.min(slowRate, beaconRate));
 
-        return elapsedSec >= beaconRate;
+        if (elapsedSec >= beaconRate) {
+            return new BeaconEval(true, beaconRate);
+        }
+        return new BeaconEval(false, -1);
     }
 
     /**

@@ -610,7 +610,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         scheduleMeshCallsignPositionSync();
         scheduleMeshGpsAugmentTick();
         updateMeshChannelButtonLabel();
-        appendLog("MeshCore ready");
+        appendConnectionStatusLog("Plugin panel opened");
         return rootView;
     }
 
@@ -738,17 +738,17 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (btnMeshSendAdvert != null) {
             btnMeshSendAdvert.setOnClickListener(v -> {
-                if (!btManager.isConnected()) {
-                    appendLog("Connect to MeshCore before sending advert");
+                if (!isMeshConnected()) {
+                    appendLog("Self advert not sent — MeshCore not connected");
                     return;
                 }
                 pushPhoneLocationToMeshNodeIfNeeded(false);
                 if (btManager.sendSelfAdvert()) {
-                    appendLog("Requested MeshCore self advert");
+                    appendLog("MeshCore self advert sent");
                     Toast.makeText(getMapView().getContext(),
                             "Advert Sent", Toast.LENGTH_SHORT).show();
                 } else {
-                    appendLog("Failed to request self advert");
+                    appendLog("MeshCore self advert not sent — request failed");
                 }
             });
         }
@@ -757,8 +757,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 if (suppressMeshGpsSwitchCallbacks || !buttonView.isPressed()) {
                     return;
                 }
-                if (!btManager.isConnected()) {
-                    appendLog("Connect to MeshCore before changing GPS state");
+                if (!isMeshConnected()) {
+                    appendLog("MeshCore GPS setting not changed — MeshCore not connected");
                     updateMeshGpsControlsUi();
                     return;
                 }
@@ -770,8 +770,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 if (suppressMeshGpsSwitchCallbacks || !buttonView.isPressed()) {
                     return;
                 }
-                if (!btManager.isConnected()) {
-                    appendLog("Connect to MeshCore before changing GPS state");
+                if (!isMeshConnected()) {
+                    appendLog("MeshCore GPS setting not changed — MeshCore not connected");
                     updateMeshGpsControlsUi();
                     return;
                 }
@@ -794,8 +794,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                     }
                     return;
                 }
-                if (!btManager.isConnected()) {
-                    appendLog("Connect to MeshCore before changing GPS state");
+                if (!isMeshConnected()) {
+                    appendLog("MeshCore GPS setting not changed — MeshCore not connected");
                     updateMeshGpsControlsUi();
                     return;
                 }
@@ -933,8 +933,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (btnMeshRequestChannels != null) {
             btnMeshRequestChannels.setOnClickListener(v -> {
-                if (!btManager.isConnected()) {
-                    appendLog("Connect to MeshCore before requesting channels");
+                if (!isMeshConnected()) {
+                    appendLog("Channel list request not sent — MeshCore not connected");
                     return;
                 }
                 btManager.requestAllChannelInfo();
@@ -1030,8 +1030,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private void sendMeshChannelText() {
-        if (!btManager.isConnected()) {
-            appendLog("Connect to MeshCore before sending channel message");
+        if (!isMeshConnected()) {
+            appendLog("Channel message not sent — MeshCore not connected");
             return;
         }
         if (editMeshChannelMessage == null) {
@@ -1054,7 +1054,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             meshChannelChatActiveIndex = channelIndex;
             renderMeshChannelChatLog(channelIndex);
         } else {
-            appendLog("Failed to send channel message");
+            appendLog("Channel message not sent — transmit failed");
         }
     }
 
@@ -2640,8 +2640,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private void requestManualMeshGpsUpdate() {
-        if (!btManager.isConnected()) {
-            appendLog("Connect to MeshCore first");
+        if (!isMeshConnected()) {
+            appendLog("MeshCore GPS update not sent — MeshCore not connected");
             return;
         }
         BtConnectionManager.MeshLocationFix cached = btManager.getLatestSelfLocation();
@@ -2759,13 +2759,13 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private void sendManualBeacon() {
-        if (cotBridge == null || !btManager.isConnected()) {
-            appendLog("Not connected");
+        if (cotBridge == null || !isMeshConnected()) {
+            appendLog("Manual beacon not sent — MeshCore not connected");
             return;
         }
         com.atakmap.android.maps.MapItem self = getMapView().getSelfMarker();
         if (!(self instanceof com.atakmap.android.maps.PointMapItem)) {
-            appendLog("No self-location available");
+            appendLog("Manual beacon not sent — no self-location available");
             return;
         }
         com.atakmap.coremap.maps.coords.GeoPoint gp =
@@ -2777,12 +2777,12 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 0f,
                 0f,
                 -1);
-        appendLog("Beacon sent");
+        appendLog("Manual beacon sent (MeshCore OPENRL)");
     }
 
     private void sendPing() {
-        if (!btManager.isConnected()) {
-            appendLog("Not connected");
+        if (!isMeshConnected()) {
+            appendLog("Ping not sent — MeshCore not connected");
             return;
         }
         try {
@@ -2793,16 +2793,16 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             if (encryptionManager != null && encryptionManager.isEnabled()) {
                 packetBytes = encryptionManager.encrypt(packetBytes);
                 if (packetBytes == null) {
-                    appendLog("Ping encryption failed");
+                    appendLog("Ping not sent — encryption failed");
                     return;
                 }
             }
             Ax25Frame frame = Ax25Frame.createMeshCoreFrame(callsign, 0, packetBytes);
             btManager.sendKissFrame(frame.encode());
             PingReplyNotifier.notePingSent(getMapView().getContext());
-            appendLog("Ping sent over MeshCore");
+            appendLog("Ping sent (MeshCore)");
         } catch (Exception e) {
-            appendLog("Ping failed: " + e.getMessage());
+            appendLog("Ping not sent — " + e.getMessage());
         }
     }
 
@@ -2828,9 +2828,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
         foundDevices.clear();
         scanFoundAnyDevice = false;
-        updateScanButtonText();
         appendLog("Scanning for MeshCore devices...");
         startScanDiscoveryPulse();
+        updateScanButtonText();
         btManager.startScan();
     }
 
@@ -2871,6 +2871,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (foundDevices.isEmpty()) {
             appendLog("No MeshCore devices found");
             btManager.endScanPickerSession();
+            updateScanButtonText();
             return;
         }
 
@@ -2910,7 +2911,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                             return;
                         }
                         BluetoothDevice selected = foundDevices.get(which);
-                        appendLog("Connecting to " + names[which] + "...");
+                        appendLog("Connecting MeshCore to " + names[which] + "...");
                         startConnectButtonPulse();
                         btManager.connectUserSelected(selected);
                         dialog.dismiss();
@@ -3133,9 +3134,17 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (btnScan == null) {
             return;
         }
-        // Favorites removed: the button is always SCAN & CONNECT when not connected (it doubles as
-        // Disconnect while connected, handled by the caller's UI state).
-        btnScan.setText("SCAN & CONNECT");
+        if (btManager != null && btManager.isConnected()) {
+            btnScan.setText("Connected");
+        } else if (isScanButtonPulsing()) {
+            btnScan.setText("Scanning");
+        } else {
+            btnScan.setText("Scan and Connect");
+        }
+    }
+
+    private boolean isScanButtonPulsing() {
+        return scanDiscoveryPulseActive || connectPulseAnimator != null;
     }
 
     private void refreshFavoriteStrip() {
@@ -3229,6 +3238,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             btnScan.invalidate();
         });
         connectPulseAnimator.start();
+        updateScanButtonText();
     }
 
     private void startScanDiscoveryPulse() {
@@ -3238,6 +3248,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         // Keep scan pulse independent from touch/ripple pressed-state behavior.
         stopConnectButtonPulse(false);
         getMapView().post(scanDiscoveryPulseRunnable);
+        updateScanButtonText();
     }
 
     private void stopScanDiscoveryPulse() {
@@ -3248,6 +3259,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         getMapView().removeCallbacks(scanDiscoveryPulseRunnable);
         if (!btManager.isConnecting() && !btManager.isConnected()) {
             stopConnectButtonPulse(true);
+        } else {
+            updateScanButtonText();
         }
     }
 
@@ -3264,6 +3277,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (restoreBackground && btnScan != null) {
             restoreScanButtonDefaultBackground();
         }
+        updateScanButtonText();
     }
 
     private void restoreScanButtonDefaultBackground() {
@@ -3279,6 +3293,31 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btnScan.setBackgroundTintList(null);
         btnScan.setBackground(buildPillButtonBackground(
                 COLOR_PILL_BUTTON_PRIMARY, COLOR_CONNECTION_STROKE_RED));
+    }
+
+    /**
+     * Append a line to the plugin log window from non-UI callers (e.g. MapComponent).
+     */
+    public void appendPluginLog(String message) {
+        if (message == null || message.isEmpty()) {
+            return;
+        }
+        MapView mv = getMapView();
+        if (mv != null) {
+            mv.post(() -> appendLog(message));
+        }
+    }
+
+    private void appendConnectionStatusLog(String event) {
+        appendLog(event + " — " + formatLinkStatusSummary());
+    }
+
+    private String formatLinkStatusSummary() {
+        return isMeshConnected() ? "MeshCore connected" : "MeshCore not connected";
+    }
+
+    private boolean isMeshConnected() {
+        return btManager != null && btManager.isConnected();
     }
 
     private void appendLog(String line) {
@@ -3332,7 +3371,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             updateConnectionUI(true, display);
             updateMeshGpsControlsUi();
             refreshFavoriteStrip();
-            appendLog("Connected to " + display);
+            appendLog("MeshCore connected to " + display);
             btManager.queryMeshGpsEnabled();
             btManager.requestSelfInfo();
             if (meshSendPositionWithAdvertRequested) {
@@ -3340,6 +3379,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             }
             scheduleMeshCallsignPositionSync();
             scheduleMeshGpsAugmentTick();
+            updateScanButtonText();
         });
     }
 
@@ -3362,7 +3402,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             updateConnectionUI(false, null);
             updateMeshGpsControlsUi();
             scheduleMeshCallsignPositionSync();
-            appendLog("Disconnected: " + reason);
+            appendLog("MeshCore disconnected: " + reason);
         });
     }
 
@@ -3372,7 +3412,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             stopScanDiscoveryPulse();
             stopConnectButtonPulse(true);
             MeshStatusOverlay.setConnected(false);
-            appendLog("Error: " + error);
+            appendLog("MeshCore error: " + error);
         });
     }
 
