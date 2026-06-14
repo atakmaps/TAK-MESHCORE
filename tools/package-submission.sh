@@ -59,10 +59,16 @@ git archive --format=zip --prefix="${TPP_ROOT}/" -o "${SOURCE_PATH}" HEAD
 
 APK=""
 shopt -s nullglob
-for f in "${ROOT}"/app/build/outputs/apk/civ/release/${APK_PREFIX}-"${VERSION}"-*-civ-release.apk; do
+for f in "${ROOT}"/app/build/outputs/apk/civ/release/${APK_PREFIX}-"${VERSION}"-*-"${ATAK_VER}"-civ-release.apk; do
   APK="$f"
   break
 done
+if [[ -z "${APK}" ]]; then
+  for f in "${ROOT}"/app/build/outputs/apk/civ/release/${APK_PREFIX}-"${VERSION}"-*-civ-release.apk; do
+    APK="$f"
+    break
+  done
+fi
 shopt -u nullglob
 
 APK_NAME=""
@@ -71,7 +77,7 @@ if [[ -n "${APK}" && -f "${APK}" ]]; then
   cp -f "${APK}" "${PLUGINS_DIR}/${APK_NAME}"
 fi
 
-MANIFEST="${PLUGINS_DIR}/${PLUGIN_SLUG}-${VERSION}-submission-MANIFEST.txt"
+MANIFEST="${PLUGINS_DIR}/${PLUGIN_SLUG}-${VERSION}-ATAK-${ATAK_VER}-submission-MANIFEST.txt"
 cat > "${MANIFEST}" << EOF
 ${PLUGIN_SLUG} ${VERSION} submission pack (local)
 Package: com.atakmaps.meshcore.plugin

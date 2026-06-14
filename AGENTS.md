@@ -34,12 +34,25 @@ APK naming: `ATAK-Plugin-Meshcore-<version>-<git>-5.5.1-civ-release.apk`
 
 See `Plugins/Handoff Docs/MESHCORE-TPC-SUBMISSION.md`.
 
+**Dual ATAK targets (5.5.1 + 5.6.0)** — default for “ready for zip”:
+
 ```bash
-./gradlew :app:assembleCivRelease
-./tools/package-submission.sh
+./tools/build-submission-zips.sh
 ```
 
-Upload `MeshCore-<version>-ATAK-5.5.1-source.zip` from `Plugins/TAK Submissions/`.
+Produces both `MeshCore-<ver>-ATAK-5.5.1-source.zip` and `MeshCore-<ver>-ATAK-5.6.0-source.zip` in `Plugins/TAK Submissions/`. Uses `tools/use-atak-sdk.sh` to swap SDK jars; restores 5.5.1 when done.
+
+5.6 SDK default path: `~/Documents/ATAK/Versions/ATAK-CIV-5.6.0.18-SDK` (override with `ATAK_560_SDK`).
+
+Single-target build (legacy):
+
+```bash
+./tools/use-atak-sdk.sh 5.5.1   # or 5.6.0
+./gradlew :app:assembleCivRelease   # add -Patak.version=5.6.0 for 5.6
+ATAK_VERSION=5.5.1 ./tools/package-submission.sh
+```
+
+Upload the zip matching your TPC portal ATAK compatibility (5.5.1 or 5.6.0).
 
 ## Versioning
 
