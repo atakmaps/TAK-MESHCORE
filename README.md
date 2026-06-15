@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.5.0`
+- Current version: `1.5.2`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -120,6 +120,10 @@ Administrative rows unlock after the admin password is accepted. **Restore All D
 - Updated scan UX with active discovery pulse
 
 ## Changelog
+
+### v1.5.2
+
+- Version bump for release tagging; signed-plugin cloud deploy docs updated for dual ATAK **5.5.1** / **5.6.0** catalog paths.
 
 ### v1.5.0
 

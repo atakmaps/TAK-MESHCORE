@@ -8,20 +8,55 @@ alwaysApply: true
 When the user provides a signed plugin zip path (TPC/TAK Signed) for **MeshCore**, perform this flow end-to-end:
 
 1. Verify `main` is current and pushed on `atakmaps/TAK-MESHCORE`.
-2. Inspect the zip and extract the signed APK (`ATAK-Plugin-Meshcore-*-tpc-5.5.1-civ-release.apk`).
+2. Inspect the zip and extract the signed APK (`ATAK-Plugin-Meshcore-*-tpc-*-civ-release.apk`).
 3. Validate APK: `package: com.atakmaps.meshcore.plugin`, `versionCode` / `versionName` match release intent.
-4. Create/push tag `v<version>` on the release commit; create GitHub Release on **TAK-MESHCORE** with title **`TAK-MeshCore <version>`** (not plain "MeshCore"), signed APK, AAB, and `MeshCore-*-ATAK-5.5.1-source.zip`.
-5. **Do not** deploy to `com.uvpro.plugin.apk` — that is UV-PRO only.
-6. **Always** upload MeshCore signed APK to cloud:
-   - `scp … root@31.220.30.74:/var/www/html/plugins/com.atakmaps.meshcore.plugin.apk`
-7. **Always** update MeshCore row in server `generate_infz.py` (`name`: **`TAK-MeshCore`**, plus `version` + `version_code` for `com.atakmaps.meshcore.plugin`).
-8. Regenerate catalog: `python3 /var/www/html/plugins/generate_infz.py`
-9. Mirror: `cp -f /var/www/html/plugins/product.infz /var/www/html/plugins/5.5.1/product.infz`
-10. Verify:
-    - `product.inf` row for `com.atakmaps.meshcore.plugin` matches signed APK hash/size
-    - `https://atakmaps.com/plugins/com.atakmaps.meshcore.plugin.apk` → 200
-    - `https://atakmaps.com/plugins/5.5.1/plugins/com.atakmaps.meshcore.plugin.apk` → 200
-11. Report release URL, SHA256, catalog version, and URLs.
+4. **TPC-only APK** — use files from `TAK Signed/*.zip` (`-tpc-` in filename). Never deploy git-hash local builds from `TAK Submissions/` (ATAK marks them Incompatible).
+5. Create/push tag `v<version>` on the release commit; create GitHub Release on **TAK-MESHCORE** with title **`TAK-MeshCore <version>`**, signed APK(s), and source zip(s) for each ATAK target submitted.
+6. **Do not** deploy to `com.uvpro.plugin.apk` — that is UV-PRO only.
+
+## Cloud deploy (per ATAK target)
+
+**Always sequential** — scp APK first, then edit `generate_infz.py`, then regenerate. Never parallel scp + catalog update.
+
+### ATAK 5.5.1
+
+```bash
+scp "$APK" root@31.220.30.74:/var/www/html/plugins/com.atakmaps.meshcore.plugin.apk
+ssh root@31.220.30.74 "
+  # Edit generate_infz.py: CATALOGS['5.5.1'] TAK-MeshCore version + version_code only
+  python3 /var/www/html/plugins/generate_infz.py
+"
+```
+
+### ATAK 5.6.0
+
+```bash
+scp "$APK" root@31.220.30.74:/var/www/html/plugins/com.atakmaps.meshcore.plugin-5.6.0.apk
+ssh root@31.220.30.74 "
+  # Edit generate_infz.py: CATALOGS['5.6.0'] TAK-MeshCore version + version_code only
+  python3 /var/www/html/plugins/generate_infz.py
+"
+```
+
+`generate_infz.py` writes `product.inf` + `product.infz` and refreshes `5.6.0/plugins/` symlinks automatically.
+
+## Post-deploy verification (required)
+
+```bash
+# 5.6.0 catalog (ATAK 5.6 fetches product.inf, not .infz)
+curl -fsS https://atakmaps.com/plugins/5.6.0/product.inf | grep com.atakmaps.meshcore.plugin
+curl -sI https://atakmaps.com/plugins/5.6.0/product.inf | head -3
+
+# OTA download paths ATAK constructs for 5.6.0 catalog rows
+curl -sI https://atakmaps.com/plugins/5.6.0/plugins/com.atakmaps.meshcore.plugin-5.6.0.apk | head -3
+curl -sI https://atakmaps.com/plugins/com.atakmaps.meshcore.plugin-5.6.0.apk | head -3
+
+# 5.5.1
+curl -fsS https://atakmaps.com/plugins/5.5.1/product.inf | grep com.atakmaps.meshcore.plugin
+curl -sI https://atakmaps.com/plugins/5.5.1/plugins/com.atakmaps.meshcore.plugin.apk | head -3
+```
+
+Hash in `product.inf` must match `sha256sum` of the deployed APK. Do not report success until version, versionCode, hash, size, and URLs all match.
 
 ## TPC submission (before signing)
 
@@ -31,5 +66,7 @@ When the user provides a signed plugin zip path (TPC/TAK Signed) for **MeshCore*
 - `app/src/main/assets/isrg-root-x1.pem`
 
 Same CA bundle as UV-PRO (`atakatak` / `meshcore_trust_bundle_p12_key` in strings.xml).
+
+Dual ATAK builds: `./tools/build-submission-zips.sh` (separate `*-ATAK-5.5.1-*` and `*-ATAK-5.6.0-*` source zips).
 
 Prefer explicit verification over assumptions. If any step fails, stop and report the exact blocker.
