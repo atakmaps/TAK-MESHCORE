@@ -171,7 +171,7 @@ public class MeshCoreContactHandler extends
                         pluginContext, uid, atakTarget);
                 Toast.makeText(pluginContext,
                         ok ? "Ping sent to " + atakTarget
-                                : "Ping failed (radio not connected)",
+                                : "Ping failed (MeshCore not connected / WiFi/TAK unavailable)",
                         Toast.LENGTH_LONG).show();
                 return true;
             }

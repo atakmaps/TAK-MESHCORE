@@ -9,9 +9,13 @@ import com.atakmap.android.contact.IpConnector;
 import com.atakmap.android.maps.MapItem;
 import com.atakmap.android.maps.MapView;
 
+import com.atakmap.coremap.cot.event.CotDetail;
+import com.atakmap.coremap.cot.event.CotEvent;
+
 import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
 import com.atakmaps.meshcore.plugin.chat.ChatBridge;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
+import com.atakmaps.meshcore.plugin.cot.CotBuilder;
 import com.atakmaps.meshcore.plugin.util.CallsignUtil;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
 import com.atakmaps.meshcore.plugin.contacts.MeshSendMessageConnector;
@@ -246,7 +250,7 @@ public class PacketRouter {
                     chatBridge.onPeerActivity(pingCall);
                 }
                 if (shouldReply) {
-                    schedulePingReply();
+                    schedulePingReply(RfInboundTransport.MESHCORE);
                 }
                 break;
 
@@ -425,11 +429,73 @@ public class PacketRouter {
         }
     }
 
-    private void schedulePingReply() {
+    private void schedulePingReply(RfInboundTransport inboundTransport) {
         MapView mv = MapView.getMapView();
         if (mv == null) {
             return;
         }
-        pingReplyScheduler.scheduleReply(mv.getContext());
+        pingReplyScheduler.scheduleReply(mv.getContext(), inboundTransport);
+    }
+
+    /**
+     * Inbound Wi‑Fi/TAK ping CoT (MeshCore or UV-PRO WiFi ping remarks).
+     */
+    public void handleInboundWifiPing(CotEvent event) {
+        if (event == null) {
+            return;
+        }
+        MeshCorePacket.PingPayload payload = decodeWifiPingPayload(event);
+        if (payload == null) {
+            return;
+        }
+        String pingCall = payload.sourceCallsign;
+        if (pingCall == null || pingCall.trim().isEmpty()) {
+            return;
+        }
+        Log.d(TAG, "WiFi ping from: " + pingCall
+                + (payload.isDirected()
+                ? " (directed to " + payload.targetCallsign + ")"
+                : " (broadcast)"));
+        MapView pingMv = MapView.getMapView();
+        boolean shouldReply = !payload.isDirected();
+        if (payload.isDirected() && pingMv != null) {
+            String selfAtak = com.atakmaps.meshcore.plugin.ui.SettingsFragment.getCallsign(
+                    pingMv.getContext());
+            shouldReply = CallsignUtil.isSameRadioStation(
+                    selfAtak, payload.targetCallsign);
+            if (!shouldReply) {
+                Log.d(TAG, "Directed WiFi ping for " + payload.targetCallsign
+                        + " — not this station");
+            }
+        }
+        if (pingMv != null && (shouldReply || !payload.isDirected())) {
+            PingReplyNotifier.notifyPingReceived(pingMv.getContext(), pingCall);
+        }
+        contactTracker.handlePing(pingCall);
+        chatBridge.onPeerActivity(pingCall);
+        if (shouldReply) {
+            schedulePingReply(RfInboundTransport.WIFI);
+        }
+    }
+
+    private static MeshCorePacket.PingPayload decodeWifiPingPayload(CotEvent event) {
+        try {
+            CotDetail detail = event.getDetail();
+            if (detail == null) {
+                return null;
+            }
+            CotDetail contact = detail.getFirstChildByName(0, "contact");
+            String source = contact != null ? contact.getAttribute("callsign") : null;
+            if (source == null || source.trim().isEmpty()) {
+                return null;
+            }
+            String target = CotBuilder.extractWifiPingTarget(event);
+            if (target.isEmpty()) {
+                return new MeshCorePacket.PingPayload(source.trim(), null);
+            }
+            return new MeshCorePacket.PingPayload(source.trim(), target);
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

@@ -165,11 +165,12 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         cotBridge.setEncryptionManager(encryptionManager);
         chatBridge.setEncryptionManager(encryptionManager);
         packetRouter.setEncryptionManager(encryptionManager);
+        cotBridge.setPacketRouter(packetRouter);
 
         btConnectionManager = new BtConnectionManager(context, packetRouter);
         MeshCoreRadioServices.install(btConnectionManager, encryptionManager);
         MeshCoreRadioServices.syncEncryptionFromSettings(context);
-        PositionRequester.install(btConnectionManager, encryptionManager);
+        PositionRequester.install(btConnectionManager, encryptionManager, cotBridge);
         btConnectionManager.addMeshAdvertListener(advert -> {
             if (advert == null || mapView == null || !advert.hasValidPosition()) {
                 return;

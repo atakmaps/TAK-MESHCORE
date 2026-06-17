@@ -4,9 +4,13 @@ import android.util.Log;
 
 import com.atakmaps.meshcore.plugin.ax25.MeshcoreIconset;
 
+import com.atakmap.android.cot.CotMapComponent;
+import com.atakmap.android.maps.MapView;
+import com.atakmap.android.maps.PointMapItem;
 import com.atakmap.coremap.cot.event.CotDetail;
 import com.atakmap.coremap.cot.event.CotEvent;
 import com.atakmap.coremap.cot.event.CotPoint;
+import com.atakmap.coremap.maps.coords.GeoPoint;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -36,6 +40,14 @@ import java.util.zip.GZIPOutputStream;
 public class CotBuilder {
 
     private static final String TAG = "MeshCore.CotBuilder";
+
+    /** Broadcast/directed ping over TAK/Wi‑Fi (not RF TYPE_PING). */
+    public static final String WIFI_PING_REMARKS_SOURCE = "MeshCore WiFi ping";
+    /** Slotted ping reply sent over TAK/Wi‑Fi (not RF OPENRL). */
+    public static final String WIFI_PING_REPLY_REMARKS_SOURCE = "MeshCore WiFi ping reply";
+    /** UV-PRO plugin uses this source — accept for cross-plugin WiFi ping. */
+    private static final String UVPRO_WIFI_PING_REMARKS_SOURCE = "UV-PRO WiFi ping";
+    private static final String UVPRO_WIFI_PING_REPLY_REMARKS_SOURCE = "UV-PRO WiFi ping reply";
 
     /** Stale interval for radio contacts: 5 minutes */
     private static final long STALE_MILLIS = 5 * 60 * 1000L;
@@ -630,6 +642,192 @@ public class CotBuilder {
         } catch (Exception e) {
             Log.e(TAG, "Failed to decompress CoT", e);
             return null;
+        }
+    }
+
+    /**
+     * Build a mini self-SA for TAK/Wi‑Fi (local device UID, endpoint, position).
+     */
+    public static CotEvent buildSelfWifiKeepaliveCot(MapView mapView, long staleMillis) {
+        if (mapView == null) {
+            return null;
+        }
+        PointMapItem self;
+        try {
+            self = mapView.getSelfMarker();
+        } catch (Exception e) {
+            return null;
+        }
+        if (self == null) {
+            return null;
+        }
+        GeoPoint gp = self.getPoint();
+        if (gp == null || !gp.isValid()) {
+            return null;
+        }
+
+        String uid;
+        try {
+            uid = MapView.getDeviceUid();
+        } catch (Exception e) {
+            return null;
+        }
+        if (uid == null || uid.trim().isEmpty()) {
+            return null;
+        }
+
+        String callsign = mapView.getDeviceCallsign();
+        if (callsign == null || callsign.trim().isEmpty()) {
+            callsign = self.getMetaString("callsign", "UNKNOWN");
+        }
+
+        String teamColor = "Cyan";
+        try {
+            String deviceTeam = mapView.getMapData().getMetaString("deviceTeam", null);
+            if (deviceTeam != null && !deviceTeam.trim().isEmpty()) {
+                teamColor = deviceTeam.trim();
+            }
+        } catch (Exception ignored) {
+        }
+
+        double speedMs = 0.0;
+        double course = 0.0;
+        try {
+            speedMs = Double.parseDouble(self.getMetaString("Speed", "0"));
+        } catch (Exception ignored) {
+        }
+        try {
+            course = Double.parseDouble(self.getMetaString("course", "0"));
+        } catch (Exception ignored) {
+        }
+
+        CotEvent event = buildPositionCot(
+                callsign,
+                gp.getLatitude(),
+                gp.getLongitude(),
+                gp.getAltitude(),
+                (float) speedMs,
+                (float) course,
+                teamColor,
+                staleMillis,
+                null);
+
+        if (event == null || event.getDetail() == null) {
+            return event;
+        }
+        event.setUID(uid.trim());
+
+        CotDetail detail = event.getDetail();
+        CotDetail contact = detail.getFirstChildByName(0, "contact");
+        if (contact == null) {
+            contact = new CotDetail("contact");
+            contact.setAttribute("callsign", callsign.trim().toUpperCase(Locale.US));
+            detail.addChild(contact);
+        }
+
+        try {
+            String endpoint = CotMapComponent.getEndpoint();
+            if (endpoint != null && !endpoint.trim().isEmpty()) {
+                contact.setAttribute("endpoint", endpoint.trim());
+            }
+        } catch (Exception ignored) {
+        }
+
+        CotDetail remarks = detail.getFirstChildByName(0, "remarks");
+        if (remarks == null) {
+            remarks = new CotDetail("remarks");
+            detail.addChild(remarks);
+        }
+        remarks.setInnerText("");
+
+        return event;
+    }
+
+    public static CotEvent buildWifiPingCot(MapView mapView, String targetCallsign) {
+        CotEvent event = buildSelfWifiKeepaliveCot(mapView, 60_000L);
+        if (event == null) {
+            return null;
+        }
+        event.setType("t-x-v-p");
+        CotDetail detail = event.getDetail();
+        if (detail == null) {
+            return null;
+        }
+        CotDetail remarks = detail.getFirstChildByName(0, "remarks");
+        if (remarks == null) {
+            remarks = new CotDetail("remarks");
+            detail.addChild(remarks);
+        }
+        remarks.setAttribute("source", WIFI_PING_REMARKS_SOURCE);
+        remarks.setInnerText("");
+        String target = targetCallsign != null ? targetCallsign.trim() : "";
+        if (!target.isEmpty()) {
+            remarks.setAttribute("to", target);
+        }
+        return event;
+    }
+
+    public static CotEvent buildWifiPingReplyCot(MapView mapView) {
+        CotEvent event = buildSelfWifiKeepaliveCot(mapView, STALE_MILLIS);
+        if (event == null) {
+            return null;
+        }
+        CotDetail detail = event.getDetail();
+        if (detail == null) {
+            return null;
+        }
+        CotDetail remarks = detail.getFirstChildByName(0, "remarks");
+        if (remarks == null) {
+            remarks = new CotDetail("remarks");
+            detail.addChild(remarks);
+        }
+        remarks.setAttribute("source", WIFI_PING_REPLY_REMARKS_SOURCE);
+        remarks.setInnerText("");
+        return event;
+    }
+
+    public static boolean isWifiPingCot(CotEvent event) {
+        return remarksSourceEquals(event, WIFI_PING_REMARKS_SOURCE)
+                || remarksSourceEquals(event, UVPRO_WIFI_PING_REMARKS_SOURCE);
+    }
+
+    public static boolean isWifiPingReplyCot(CotEvent event) {
+        return remarksSourceEquals(event, WIFI_PING_REPLY_REMARKS_SOURCE)
+                || remarksSourceEquals(event, UVPRO_WIFI_PING_REPLY_REMARKS_SOURCE);
+    }
+
+    public static boolean isWifiNetworkOnlyCot(CotEvent event) {
+        return isWifiPingCot(event) || isWifiPingReplyCot(event);
+    }
+
+    public static String extractWifiPingTarget(CotEvent event) {
+        if (event == null || event.getDetail() == null) {
+            return "";
+        }
+        try {
+            CotDetail remarks = event.getDetail().getFirstChildByName(0, "remarks");
+            if (remarks == null) {
+                return "";
+            }
+            String to = remarks.getAttribute("to");
+            return to != null ? to.trim() : "";
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private static boolean remarksSourceEquals(CotEvent event, String source) {
+        if (event == null || event.getDetail() == null || source == null) {
+            return false;
+        }
+        try {
+            CotDetail remarks = event.getDetail().getFirstChildByName(0, "remarks");
+            if (remarks == null) {
+                return false;
+            }
+            return source.equals(remarks.getAttribute("source"));
+        } catch (Exception ignored) {
+            return false;
         }
     }
 }

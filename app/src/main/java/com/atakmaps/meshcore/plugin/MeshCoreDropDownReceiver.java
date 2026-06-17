@@ -2781,28 +2781,35 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private void sendPing() {
-        if (!isMeshConnected()) {
-            appendLog("Ping not sent — MeshCore not connected");
-            return;
-        }
-        try {
-            String callsign = getMapView().getSelfMarker().getMetaString("callsign", "UNKNOWN");
-            MeshCorePacket packet = MeshCorePacket.createPingPacket(
-                    CallsignUtil.toRadioCallsign(callsign));
-            byte[] packetBytes = packet.encode();
-            if (encryptionManager != null && encryptionManager.isEnabled()) {
-                packetBytes = encryptionManager.encrypt(packetBytes);
-                if (packetBytes == null) {
-                    appendLog("Ping not sent — encryption failed");
-                    return;
+        if (isMeshConnected()) {
+            try {
+                String callsign = getMapView().getSelfMarker().getMetaString("callsign", "UNKNOWN");
+                MeshCorePacket packet = MeshCorePacket.createPingPacket(
+                        CallsignUtil.toRadioCallsign(callsign));
+                byte[] packetBytes = packet.encode();
+                if (encryptionManager != null && encryptionManager.isEnabled()) {
+                    packetBytes = encryptionManager.encrypt(packetBytes);
+                    if (packetBytes == null) {
+                        appendLog("Ping not sent — encryption failed");
+                        return;
+                    }
                 }
+                Ax25Frame frame = Ax25Frame.createMeshCoreFrame(callsign, 0, packetBytes);
+                btManager.sendKissFrame(frame.encode());
+                PingReplyNotifier.notePingSent(getMapView().getContext());
+                appendLog("Ping sent (MeshCore)");
+            } catch (Exception e) {
+                appendLog("Ping not sent — " + e.getMessage());
             }
-            Ax25Frame frame = Ax25Frame.createMeshCoreFrame(callsign, 0, packetBytes);
-            btManager.sendKissFrame(frame.encode());
-            PingReplyNotifier.notePingSent(getMapView().getContext());
-            appendLog("Ping sent (MeshCore)");
-        } catch (Exception e) {
-            appendLog("Ping not sent — " + e.getMessage());
+        } else if (cotBridge != null && cotBridge.canSendPingOverWifiNetwork()) {
+            if (cotBridge.sendPingOverWifiNetwork(null)) {
+                PingReplyNotifier.notePingSent(getMapView().getContext());
+                appendLog("Ping sent (ATAK WiFi)");
+            } else {
+                appendLog("Ping not sent — WiFi/TAK dispatch failed");
+            }
+        } else {
+            appendLog("Ping not sent — MeshCore not connected");
         }
     }
 

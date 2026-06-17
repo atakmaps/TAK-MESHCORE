@@ -181,6 +181,39 @@ public class SettingsFragment extends PluginPreferenceFragment
                 || isCheckboxPreferenceKey(pref.getKey()));
     }
 
+    private static boolean defaultForCheckboxKey(String key) {
+        if (PREF_PING_REPLY_ENABLED.equals(key)) {
+            return DEFAULT_PING_REPLY_ENABLED;
+        }
+        return false;
+    }
+
+    /** ATAK default SharedPreferences are the runtime source of truth for checkbox prefs. */
+    private boolean readBooleanPrefFromAtak(String key, boolean defaultValue) {
+        Context ctx = resolveSettingsContext();
+        if (ctx == null) {
+            return defaultValue;
+        }
+        return getPrefs(ctx).getBoolean(key, defaultValue);
+    }
+
+    private void syncCheckBoxPreferenceFromAtak(String key, boolean defaultValue) {
+        setCheckBoxPreferenceValue(key, readBooleanPrefFromAtak(key, defaultValue));
+    }
+
+    private void persistBooleanPrefToAtak(String key, boolean value) {
+        Context ctx = resolveSettingsContext();
+        if (ctx == null) {
+            return;
+        }
+        getPrefs(ctx).edit().putBoolean(key, value).commit();
+    }
+
+    /** ATAK default SharedPreferences — never the plugin package store. */
+    private SharedPreferences atakPrefs() {
+        return getPrefs(resolveSettingsContext());
+    }
+
     public static final String DEFAULT_BEACON_INTERVAL = "300";
     public static final String DEFAULT_RETRY_INTERVAL_MIN = "2";
     public static final String DEFAULT_RETRY_MAX = "3";
@@ -292,6 +325,7 @@ public class SettingsFragment extends PluginPreferenceFragment
                 .registerOnSharedPreferenceChangeListener(this);
         styleAdminLeadershipWarning();
         syncAdminSettingsGateOnResume();
+        syncAllPreferencesFromAtakToUi();
         updateAdminControlsEnabled();
         syncSmartBeaconPreferenceValues();
         updateSummaries();
@@ -508,6 +542,7 @@ public class SettingsFragment extends PluginPreferenceFragment
         pref.setTitle(title);
         pref.setSummary(summary);
         pref.setDefaultValue(defaultValue);
+        pref.setPersistent(false);
         parent.addPreference(pref);
     }
 
@@ -524,7 +559,6 @@ public class SettingsFragment extends PluginPreferenceFragment
         wireListPreference(PREF_RETRY_MAX);
         wireCheckBoxPreference(PREF_PING_REPLY_ENABLED, DEFAULT_PING_REPLY_ENABLED);
         wireCheckBoxPreference(PREF_DISABLE_MESH_BEACON_LIMITING, false);
-        wireCheckBoxPreference(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false);
         wireEditTextPreference(PREF_ENCRYPTION_PASSPHRASE);
     }
 
@@ -533,23 +567,15 @@ public class SettingsFragment extends PluginPreferenceFragment
         if (!(pref instanceof CheckBoxPreference)) {
             return;
         }
+        pref.setPersistent(false);
+        syncCheckBoxPreferenceFromAtak(key, defaultValue);
         pref.setOnPreferenceChangeListener((preference, newValue) -> {
             boolean checked = Boolean.TRUE.equals(newValue);
-            Context ctx = resolveSettingsContext();
-            if (ctx != null) {
-                getPrefs(ctx).edit().putBoolean(key, checked).apply();
-            }
-            if (preference instanceof CheckBoxPreference) {
-                ((CheckBoxPreference) preference).setChecked(checked);
-            }
-            if (PREF_PING_REPLY_ENABLED.equals(key)) {
+            persistBooleanPrefToAtak(key, checked);
+            syncCheckBoxPreferenceFromAtak(key, defaultValue);
+            if (PREF_PING_REPLY_ENABLED.equals(key)
+                    || PREF_DISABLE_MESH_BEACON_LIMITING.equals(key)) {
                 notifyRuntimeSettingsChanged();
-            }
-            if (PREF_DISABLE_MESH_BEACON_LIMITING.equals(key)) {
-                notifyRuntimeSettingsChanged();
-            }
-            if (NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED.equals(key)) {
-                updateAdminControlsEnabled();
             }
             updateSummaries();
             ListView list = getPreferenceListView();
@@ -957,12 +983,9 @@ public class SettingsFragment extends PluginPreferenceFragment
                 atak.getString(PREF_RETRY_INTERVAL_MIN, DEFAULT_RETRY_INTERVAL_MIN));
         setListPreferenceValue(PREF_RETRY_MAX,
                 atak.getString(PREF_RETRY_MAX, DEFAULT_RETRY_MAX));
-        setCheckBoxPreferenceValue(PREF_PING_REPLY_ENABLED,
-                atak.getBoolean(PREF_PING_REPLY_ENABLED, DEFAULT_PING_REPLY_ENABLED));
-        setCheckBoxPreferenceValue(PREF_DISABLE_MESH_BEACON_LIMITING,
-                atak.getBoolean(PREF_DISABLE_MESH_BEACON_LIMITING, false));
-        setCheckBoxPreferenceValue(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED,
-                atak.getBoolean(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false));
+        syncCheckBoxPreferenceFromAtak(PREF_PING_REPLY_ENABLED, DEFAULT_PING_REPLY_ENABLED);
+        syncCheckBoxPreferenceFromAtak(PREF_DISABLE_MESH_BEACON_LIMITING, false);
+        syncCheckBoxPreferenceFromAtak(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false);
         setEditTextPreferenceText(PREF_ENCRYPTION_PASSPHRASE,
                 atak.getString(PREF_ENCRYPTION_PASSPHRASE, ""));
         syncSmartBeaconPreferenceValues();
@@ -1146,6 +1169,7 @@ public class SettingsFragment extends PluginPreferenceFragment
             return;
         }
         CheckBoxPreference adminCheck = (CheckBoxPreference) adminToggle;
+        adminCheck.setPersistent(false);
         adminCheck.setOnPreferenceChangeListener((preference, newValue) ->
                 handleAdminSettingsChange((CheckBoxPreference) preference,
                         Boolean.TRUE.equals(newValue)));
@@ -1245,7 +1269,7 @@ public class SettingsFragment extends PluginPreferenceFragment
     private void enableAdminSettings(CheckBoxPreference checkbox, Context prefsCtx) {
         getPrefs(prefsCtx).edit()
                 .putBoolean(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, true)
-                .apply();
+                .commit();
         checkbox.setChecked(true);
         refreshAdminGateUi();
     }
@@ -1264,18 +1288,19 @@ public class SettingsFragment extends PluginPreferenceFragment
         if (prefsCtx == null) {
             return;
         }
-        SharedPreferences prefs = getPreferenceManager().getSharedPreferences();
+        SharedPreferences prefs = atakPrefs();
         Preference adminToggle = findPreference(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED);
         if (!AdminAccessGate.isUnlocked(prefsCtx)) {
-            if (prefs.getBoolean(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false)) {
+            if (prefs != null
+                    && prefs.getBoolean(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false)) {
                 prefs.edit()
                         .putBoolean(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false)
-                        .apply();
+                        .commit();
             }
             if (adminToggle instanceof CheckBoxPreference) {
                 ((CheckBoxPreference) adminToggle).setChecked(false);
             }
-        } else if (adminToggle instanceof CheckBoxPreference) {
+        } else if (adminToggle instanceof CheckBoxPreference && prefs != null) {
             ((CheckBoxPreference) adminToggle).setChecked(
                     prefs.getBoolean(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false));
         }
@@ -1374,11 +1399,12 @@ public class SettingsFragment extends PluginPreferenceFragment
             created.setSummary(summary);
             created.setDefaultValue(defaultValue);
             created.setOrder(order);
-            created.setPersistent(true);
+            created.setPersistent(false);
             parent.addPreference(created);
             pref = created;
         }
         pref.setChecked(checked);
+        pref.setPersistent(false);
     }
 
     private void wireAdministrationPreferences() {
@@ -1399,8 +1425,8 @@ public class SettingsFragment extends PluginPreferenceFragment
 
     private void updateAdminControlsEnabled() {
         Context ctx = resolveSettingsContext();
-        SharedPreferences prefs = getPreferenceManager().getSharedPreferences();
-        boolean adminOn = prefs.getBoolean(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false);
+        boolean adminOn = ctx != null
+                && getPrefs(ctx).getBoolean(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false);
         boolean unlocked = ctx != null && AdminAccessGate.isUnlocked(ctx);
         boolean enableChildren = adminOn && unlocked;
 
@@ -2614,32 +2640,56 @@ public class SettingsFragment extends PluginPreferenceFragment
         }
         widgetFrame.setVisibility(View.VISIBLE);
         ViewGroup widgetGroup = (ViewGroup) widgetFrame;
-        CheckBox box = null;
-        for (int i = 0; i < widgetGroup.getChildCount(); i++) {
-            View child = widgetGroup.getChildAt(i);
-            if (child instanceof CheckBox && EMBEDDED_CHECKBOX_TAG.equals(child.getTag())) {
-                box = (CheckBox) child;
-                break;
-            }
-        }
-        if (box == null) {
-            widgetGroup.removeAllViews();
-            box = new CheckBox(row.getContext());
-            box.setTag(EMBEDDED_CHECKBOX_TAG);
-            box.setFocusable(false);
-            box.setClickable(false);
-            widgetGroup.addView(box, new ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT));
-        }
         CheckBoxPreference checkPref = (CheckBoxPreference) pref;
-        box.setChecked(checkPref.isChecked());
+        boolean checked = readBooleanPrefFromAtak(
+                checkPref.getKey(), defaultForCheckboxKey(checkPref.getKey()));
+        if (checkPref.isChecked() != checked) {
+            checkPref.setChecked(checked);
+        }
+        CheckBox box = resolveRowCheckBox(widgetGroup);
+        box.setChecked(checked);
         box.setEnabled(pref.isEnabled());
         try {
             box.setButtonTintList(ColorStateList.valueOf(
                     pref.isEnabled() ? COLOR_VALUE_GREEN : COLOR_DISABLED_GREY));
         } catch (Exception ignored) {
         }
+    }
+
+    /** Prefer the framework/Pan checkbox; avoid duplicate embedded boxes that desync on scroll. */
+    private CheckBox resolveRowCheckBox(ViewGroup widgetGroup) {
+        CheckBox embedded = null;
+        CheckBox framework = null;
+        for (int i = 0; i < widgetGroup.getChildCount(); i++) {
+            View child = widgetGroup.getChildAt(i);
+            if (!(child instanceof CheckBox)) {
+                continue;
+            }
+            if (EMBEDDED_CHECKBOX_TAG.equals(child.getTag())) {
+                embedded = (CheckBox) child;
+            } else {
+                framework = (CheckBox) child;
+            }
+        }
+        if (framework != null) {
+            if (embedded != null) {
+                widgetGroup.removeView(embedded);
+            }
+            framework.setFocusable(false);
+            framework.setClickable(false);
+            return framework;
+        }
+        if (embedded != null) {
+            return embedded;
+        }
+        CheckBox box = new CheckBox(widgetGroup.getContext());
+        box.setTag(EMBEDDED_CHECKBOX_TAG);
+        box.setFocusable(false);
+        box.setClickable(false);
+        widgetGroup.addView(box, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return box;
     }
 
     private void styleBlueSectionHeaderRow(View row, Preference pref) {
@@ -3229,17 +3279,7 @@ public class SettingsFragment extends PluginPreferenceFragment
     }
 
     private String getCheckBoxPreferenceValueLabel(String key, boolean defaultChecked) {
-        Preference pref = findPreference(key);
-        boolean checked = defaultChecked;
-        if (pref instanceof CheckBoxPreference) {
-            checked = ((CheckBoxPreference) pref).isChecked();
-        } else {
-            Context ctx = resolveSettingsContext();
-            if (ctx != null) {
-                checked = getPrefs(ctx).getBoolean(key, defaultChecked);
-            }
-        }
-        return checked ? "On" : "Off";
+        return readBooleanPrefFromAtak(key, defaultChecked) ? "On" : "Off";
     }
 
     private CharSequence buildStyledSummaryForPreference(Preference pref) {

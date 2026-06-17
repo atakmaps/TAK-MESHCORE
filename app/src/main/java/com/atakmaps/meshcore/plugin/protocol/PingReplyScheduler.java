@@ -21,6 +21,7 @@ public final class PingReplyScheduler {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final CotBridge cotBridge;
     private Runnable pendingReply;
+    private RfInboundTransport pendingInboundTransport = RfInboundTransport.MESHCORE;
 
     public PingReplyScheduler(CotBridge cotBridge) {
         this.cotBridge = cotBridge;
@@ -29,7 +30,7 @@ public final class PingReplyScheduler {
     /**
      * Queue a position reply after the configured slot delay for this device.
      */
-    public void scheduleReply(Context context) {
+    public void scheduleReply(Context context, RfInboundTransport inboundTransport) {
         if (context == null || cotBridge == null) {
             return;
         }
@@ -40,6 +41,28 @@ public final class PingReplyScheduler {
         if (mv == null) {
             return;
         }
+        RfInboundTransport incoming = inboundTransport != null
+                ? inboundTransport
+                : RfInboundTransport.MESHCORE;
+
+        if (pendingReply != null) {
+            if (pendingInboundTransport == RfInboundTransport.WIFI
+                    && incoming != RfInboundTransport.WIFI) {
+                Log.d(TAG, "Ping reply already scheduled on WiFi; ignoring duplicate on "
+                        + incoming);
+                return;
+            }
+            if (pendingInboundTransport == RfInboundTransport.MESHCORE
+                    && incoming == RfInboundTransport.WIFI) {
+                Log.d(TAG, "Upgrading ping reply transport MeshCore RF → WiFi");
+                cancelPending();
+            } else {
+                Log.d(TAG, "Ping reply already pending on " + pendingInboundTransport);
+                return;
+            }
+        }
+
+        pendingInboundTransport = incoming;
         String callsign = SettingsFragment.getCallsign(context);
         long delayMs = NetSlotConfig.computeReplyDelayMs(context, callsign);
         int slot = NetSlotConfig.computeSlotIndex(callsign, NetSlotConfig.getSlotCount(context));
@@ -48,7 +71,8 @@ public final class PingReplyScheduler {
         final Context appCtx = context.getApplicationContext();
         pendingReply = () -> transmitReply(appCtx);
         handler.postDelayed(pendingReply, delayMs);
-        Log.d(TAG, "Ping reply scheduled in " + delayMs + "ms (slot " + slot + ")");
+        Log.d(TAG, "Ping reply scheduled in " + delayMs + "ms (slot " + slot
+                + ", inbound=" + pendingInboundTransport + ")");
     }
 
     public void cancelPending() {
@@ -70,6 +94,15 @@ public final class PingReplyScheduler {
             if (mv == null) {
                 return;
             }
+            if (pendingInboundTransport == RfInboundTransport.WIFI) {
+                if (cotBridge.sendSelfPositionOverWifiNetwork()) {
+                    Log.d(TAG, "Ping reply sent (slotted) over WiFi/TAK");
+                    PingReplyNotifier.notifyPingReplySent(context);
+                } else {
+                    Log.w(TAG, "Ping reply skipped — WiFi/TAK unavailable");
+                }
+                return;
+            }
             PointMapItem self = mv.getSelfMarker();
             if (self == null) {
                 return;
@@ -88,7 +121,7 @@ public final class PingReplyScheduler {
             cotBridge.sendPositionOverRadio(
                     gp.getLatitude(), gp.getLongitude(),
                     gp.getAltitude(), (float) speedMs, (float) course, -1);
-            Log.d(TAG, "Ping reply sent (slotted)");
+            Log.d(TAG, "Ping reply sent (slotted) over MeshCore RF");
             PingReplyNotifier.notifyPingReplySent(context);
         } catch (Exception e) {
             Log.w(TAG, "Ping reply transmit failed: " + e.getMessage());

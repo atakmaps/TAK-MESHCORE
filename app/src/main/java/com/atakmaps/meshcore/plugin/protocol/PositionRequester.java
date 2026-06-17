@@ -11,7 +11,8 @@ import com.atakmaps.meshcore.plugin.ui.SettingsFragment;
 import com.atakmaps.meshcore.plugin.util.CallsignUtil;
 
 /**
- * Transmits directed position-request pings (TYPE_PING with target callsign) over MeshCore RF.
+ * Transmits directed position-request pings (TYPE_PING with target callsign) over MeshCore RF
+ * or TAK/Wi‑Fi when RF is unavailable.
  */
 public final class PositionRequester {
 
@@ -19,6 +20,7 @@ public final class PositionRequester {
 
     private static volatile BtConnectionManager transport;
     private static volatile EncryptionManager encryptionManager;
+    private static volatile com.atakmaps.meshcore.plugin.cot.CotBridge cotBridge;
 
     private PositionRequester() {
     }
@@ -28,9 +30,16 @@ public final class PositionRequester {
         encryptionManager = encryption;
     }
 
+    public static void install(BtConnectionManager bt, EncryptionManager encryption,
+                               com.atakmaps.meshcore.plugin.cot.CotBridge bridge) {
+        install(bt, encryption);
+        cotBridge = bridge;
+    }
+
     public static void clear() {
         transport = null;
         encryptionManager = null;
+        cotBridge = null;
     }
 
     public static boolean requestPosition(Context context, String targetCallsign) {
@@ -42,17 +51,25 @@ public final class PositionRequester {
         if (targetCallsign == null || targetCallsign.trim().isEmpty()) {
             return false;
         }
-        BtConnectionManager tx = transport;
-        if (tx == null || !tx.isConnected()) {
-            Log.w(TAG, "Request position: not connected");
-            return false;
-        }
         Context ctx = resolveContext(context);
         if (ctx == null) {
             return false;
         }
-        String sender = SettingsFragment.getCallsign(ctx);
         String atakTarget = targetCallsign.trim();
+        BtConnectionManager tx = transport;
+        if (tx == null || !tx.isConnected()) {
+            com.atakmaps.meshcore.plugin.cot.CotBridge bridge = cotBridge;
+            if (bridge != null && bridge.canSendPingOverWifiNetwork()) {
+                boolean wifiOk = bridge.sendPingOverWifiNetwork(atakTarget);
+                if (wifiOk) {
+                    PingReplyNotifier.noteDirectedPingSent(ctx, atakTarget, "ATAK WiFi");
+                }
+                return wifiOk;
+            }
+            Log.w(TAG, "Request position: not connected");
+            return false;
+        }
+        String sender = SettingsFragment.getCallsign(ctx);
         String targetRadio = CallsignUtil.toRadioCallsign(atakTarget);
         if (targetRadio.isEmpty()) {
             return false;
