@@ -2137,6 +2137,11 @@ public class CotBridge {
             @Override
             public void logReceive(CotEvent event, String src, String dest) {
                 maybeHandleInboundNetworkWifiPing(event);
+                MapView pingMv = MapView.getMapView();
+                if (pingMv != null) {
+                    PingReplyNotifier.maybeNotifyPingReplyFromCot(
+                            pingMv.getContext(), event);
+                }
                 maybeSaRelayInboundNetworkCot(event);
             }
         };

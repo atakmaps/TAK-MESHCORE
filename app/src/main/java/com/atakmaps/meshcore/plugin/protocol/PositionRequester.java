@@ -56,9 +56,17 @@ public final class PositionRequester {
             return false;
         }
         String atakTarget = targetCallsign.trim();
+        com.atakmaps.meshcore.plugin.cot.CotBridge bridge = cotBridge;
+        if (bridge != null && bridge.canSendPingOverWifiNetwork()
+                && preferWifiPingForContact(contactUid)) {
+            boolean wifiOk = bridge.sendPingOverWifiNetwork(atakTarget);
+            if (wifiOk) {
+                PingReplyNotifier.noteDirectedPingSent(ctx, atakTarget, "ATAK WiFi");
+                return true;
+            }
+        }
         BtConnectionManager tx = transport;
         if (tx == null || !tx.isConnected()) {
-            com.atakmaps.meshcore.plugin.cot.CotBridge bridge = cotBridge;
             if (bridge != null && bridge.canSendPingOverWifiNetwork()) {
                 boolean wifiOk = bridge.sendPingOverWifiNetwork(atakTarget);
                 if (wifiOk) {
@@ -103,6 +111,17 @@ public final class PositionRequester {
             Log.e(TAG, "requestPosition failed", e);
             return false;
         }
+    }
+
+    private static boolean preferWifiPingForContact(String contactUid) {
+        if (contactUid == null || contactUid.trim().isEmpty()) {
+            return true;
+        }
+        String uid = contactUid.trim();
+        if (uid.startsWith("MESHCORE-NODE-") || uid.startsWith("MESHCORE-RPTR-")) {
+            return false;
+        }
+        return uid.startsWith("ANDROID-");
     }
 
     private static Context resolveContext(Context context) {
