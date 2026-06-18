@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.5.3`
+- Current version: `1.5.7`
 - Target ATAK: `5.5.1` (CIV)
 
 ## Quick Start
@@ -95,6 +95,11 @@ Styled like UV-PRO: yellow category headers, blue Smart Beacon section header, w
 
 Administrative rows unlock after the admin password is accepted. **Restore All Defaults** and per-section restore buttons reset preferences to plugin defaults (Smart Beacon fast rate **300 s**, min turn time **60 s**).
 
+## 2026-06-17 Update (v1.5.7)
+
+- **SA Relay RF throttle:** WiFi/TAK → mesh radio SA Relay is limited to **one chirp per contact every 10 minutes** (was 30 seconds).
+- **Auto Send map points on RF:** Net-wide map marker rebroadcasts (ATAK Auto Send) relay to RF at most **once per marker every 2 minutes**, with no ACK retry storm and no duplicate outbound hooks.
+
 ## 2026-05-31 Update (v1.3.2)
 
 - **Ghost contact elimination** — `ContactMergeUtil` collapses duplicate callsign aliases and removes orphan synthetic radio markers on connect; canonical peer UID is resolved across BLE, mesh-node, and mesh-repeater transports
@@ -120,6 +125,10 @@ Administrative rows unlock after the admin password is accepted. **Restore All D
 - Updated scan UX with active discovery pulse
 
 ## Changelog
+
+### v1.5.7
+
+- SA Relay RF broadcast throttle (10 min per contact); throttled Auto Send map RF chirp (2 min, no retries).
 
 ### v1.5.3
 
