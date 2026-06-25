@@ -3,6 +3,8 @@ package com.atakmaps.meshcore.plugin.protocol;
 import android.content.Context;
 import android.util.Log;
 
+import androidx.annotation.Nullable;
+
 import com.atakmap.android.maps.MapView;
 import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
@@ -52,6 +54,11 @@ public final class MeshCoreRadioServices {
     public static boolean isConnected() {
         BtConnectionManager bt = btManager;
         return bt != null && bt.isConnected();
+    }
+
+    @Nullable
+    public static BtConnectionManager getBtManager() {
+        return btManager;
     }
 
     /**
