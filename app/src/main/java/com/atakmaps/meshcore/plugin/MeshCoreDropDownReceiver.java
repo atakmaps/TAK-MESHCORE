@@ -186,6 +186,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private Switch switchMeshShowNodes;
     private Button btnMeshRequestChannels;
     private Button btnAddMeshChannel;
+    private Button btnMeshContacts;
     private LinearLayout stripMeshChannels;
     private TextView meshChannelTitleView;
     private TextView meshChannelLogText;
@@ -427,6 +428,13 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private TextView meshChannelChatLogView;
     private TextView meshChannelChatTitleView;
     private int meshChannelChatActiveIndex = -1;
+    private static final int ADV_TYPE_REPEATER = 0x02;
+    private static final int MAX_MESH_CONTACT_CHAT_LINES = 120;
+    private boolean meshContactChatActive = false;
+    private String meshContactChatPubKeyHex = null;
+    private String meshContactChatDisplayName = null;
+    private String meshContactChatPrefixHex = null;
+    private final LinkedList<String> meshContactChatLines = new LinkedList<>();
     private static final int MAX_MESH_CHANNEL_MESSAGES = 120;
     private static final long MESH_CHANNEL_QUEUE_TIMEOUT_MS = 8000L;
     private boolean meshChannelHistoryLoaded = false;
@@ -462,6 +470,26 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 }
             };
 
+    private final BtConnectionManager.MeshNativeDmListener meshNativeDmListener =
+            new BtConnectionManager.MeshNativeDmListener() {
+                @Override
+                public void onNativeDirectMessage(String senderPubKeyPrefixHex, String text) {
+                    if (!meshContactChatActive || meshContactChatPrefixHex == null) {
+                        return;
+                    }
+                    if (senderPubKeyPrefixHex == null
+                            || meshContactChatPubKeyHex == null
+                            || !meshContactChatPubKeyHex.toUpperCase(Locale.US)
+                            .startsWith(senderPubKeyPrefixHex.toUpperCase(Locale.US))) {
+                        return;
+                    }
+                    getMapView().post(() -> {
+                        appendMeshContactChatLine(false, text);
+                        renderMeshContactChatLog();
+                    });
+                }
+            };
+
     public MeshCoreDropDownReceiver(MapView mapView,
                                  Context pluginContext,
                                  BtConnectionManager btManager,
@@ -475,6 +503,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btManager.addListener(this);
         btManager.addMeshStateListener(meshStateListener);
         btManager.addMeshChannelListener(meshChannelListener);
+        btManager.addMeshNativeDmListener(meshNativeDmListener);
         contactTracker.setListener(this);
     }
 
@@ -657,6 +686,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         switchMeshShowNodes = rootView.findViewById(getId("switch_mesh_show_nodes"));
         btnMeshRequestChannels = rootView.findViewById(getId("btn_mesh_request_channels"));
         btnAddMeshChannel = rootView.findViewById(getId("btn_add_mesh_channel"));
+        btnMeshContacts = rootView.findViewById(getId("btn_mesh_contacts"));
         stripMeshChannels = rootView.findViewById(getId("strip_mesh_channels"));
         meshChannelTitleView = rootView.findViewById(getId("text_mesh_channel_title"));
         meshChannelLogText = rootView.findViewById(getId("text_mesh_channel_log"));
@@ -947,6 +977,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (btnAddMeshChannel != null) {
             btnAddMeshChannel.setOnClickListener(v -> showAddChannelDialog());
         }
+        if (btnMeshContacts != null) {
+            btnMeshContacts.setOnClickListener(v -> showDeviceContactsDialog());
+        }
         if (switchEncryption != null) {
             switchEncryption.setOnCheckedChangeListener((buttonView, isChecked) -> {
                 if (!buttonView.isPressed()) {
@@ -1041,6 +1074,16 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (text.isEmpty()) {
             return;
         }
+        if (meshContactChatActive && meshContactChatPubKeyHex != null) {
+            if (btManager.sendContactTextMessage(meshContactChatPubKeyHex, text)) {
+                editMeshChannelMessage.setText("");
+                appendMeshContactChatLine(true, text);
+                renderMeshContactChatLog();
+            } else {
+                appendLog("Direct message not sent — transmit failed");
+            }
+            return;
+        }
         int channelIndex = 0;
         if (editMeshChannelIndex != null) {
             try {
@@ -1128,6 +1171,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
      * field targets it.
      */
     private void selectMeshChannelForInlineWindow(int channelIndex) {
+        meshContactChatActive = false;
+        meshContactChatPubKeyHex = null;
+        meshContactChatDisplayName = null;
+        meshContactChatPrefixHex = null;
         meshChannelChatActiveIndex = channelIndex;
         if (editMeshChannelIndex != null) {
             editMeshChannelIndex.setText(String.valueOf(channelIndex));
@@ -1573,6 +1620,197 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     // ─── Channel management dialogs ──────────────────────────────────────────
+
+    private void showDeviceContactsDialog() {
+        if (!isMeshConnected()) {
+            Toast.makeText(getMapView().getContext(),
+                    "Connect to a MeshCore node first.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        Toast.makeText(ctx, "Loading contacts from device…", Toast.LENGTH_SHORT).show();
+        btManager.requestDeviceContacts(new BtConnectionManager.DeviceContactsListener() {
+            @Override
+            public void onDeviceContactsReady(java.util.List<BtConnectionManager.MeshDeviceContact> contacts) {
+                getMapView().post(() -> showDeviceContactsPicker(contacts));
+            }
+
+            @Override
+            public void onDeviceContactsFailed(String reason) {
+                getMapView().post(() -> Toast.makeText(ctx,
+                        reason != null ? reason : "Could not load contacts",
+                        Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void showDeviceContactsPicker(java.util.List<BtConnectionManager.MeshDeviceContact> contacts) {
+        Context ctx = getMapView().getContext();
+        if (contacts == null || contacts.isEmpty()) {
+            Toast.makeText(ctx, "No contacts on device.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String[] labels = new String[contacts.size()];
+        for (int i = 0; i < contacts.size(); i++) {
+            BtConnectionManager.MeshDeviceContact c = contacts.get(i);
+            String star = c.isFavorite() ? "★ " : "";
+            labels[i] = star + c.name + "  (" + deviceContactTypeLabel(c.type) + ")";
+        }
+        new AlertDialog.Builder(ctx)
+                .setTitle("MeshCore Contacts")
+                .setItems(labels, (dialog, which) -> {
+                    if (which >= 0 && which < contacts.size()) {
+                        showDeviceContactActions(contacts.get(which));
+                    }
+                })
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private void showDeviceContactActions(BtConnectionManager.MeshDeviceContact contact) {
+        if (contact == null) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        new AlertDialog.Builder(ctx)
+                .setTitle(contact.name)
+                .setItems(new String[]{"Favorite", "Send Message"}, (dialog, which) -> {
+                    if (which == 0) {
+                        favoriteDeviceContact(contact);
+                    } else if (which == 1) {
+                        openDeviceContactChat(contact);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void favoriteDeviceContact(BtConnectionManager.MeshDeviceContact contact) {
+        Context ctx = getMapView().getContext();
+        boolean ok = MeshCoreContactHandler.favoriteDeviceContact(btManager, contact);
+        Toast.makeText(ctx,
+                ok ? "Favorited " + MeshCoreContactHandler.formatMeshFavoriteName(
+                        contact.name, MeshCoreContactHandler.uidForDeviceContact(contact))
+                        : "Could not favorite contact",
+                Toast.LENGTH_LONG).show();
+        if (ok) {
+            appendLog("Favorited device contact " + contact.name);
+        }
+    }
+
+    private void openDeviceContactChat(BtConnectionManager.MeshDeviceContact contact) {
+        if (contact == null) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        if (contact.type == ADV_TYPE_REPEATER) {
+            Toast.makeText(ctx, "Repeaters do not support direct messages.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (contact.pubKeyHex == null || contact.pubKeyHex.length() < 12) {
+            Toast.makeText(ctx, "Invalid contact pubkey.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        meshContactChatActive = true;
+        meshContactChatPubKeyHex = contact.pubKeyHex.trim();
+        meshContactChatPrefixHex = meshContactChatPubKeyHex.substring(0, 12);
+        meshContactChatDisplayName = contact.name != null ? contact.name.trim() : "Contact";
+        meshChannelChatActiveIndex = -1;
+        meshContactChatLines.clear();
+        MeshCoreContactHandler.ensureMeshInboundChatContact(meshContactChatPrefixHex);
+        showInlineContactChat(meshContactChatDisplayName);
+        appendLog("Opened chat with " + meshContactChatDisplayName);
+    }
+
+    private void showInlineContactChat(String displayName) {
+        meshChannelChatLogView = meshChannelLogText;
+        meshChannelChatTitleView = meshChannelTitleView;
+        if (meshChannelTitleView != null) {
+            meshChannelTitleView.setText("Chat: " + displayName);
+            meshChannelTitleView.setVisibility(View.VISIBLE);
+        }
+        if (meshChannelLogText != null) {
+            meshChannelLogText.setVisibility(View.VISIBLE);
+            renderMeshContactChatLog();
+        }
+        if (rowMeshChannelInput != null) {
+            rowMeshChannelInput.setVisibility(View.VISIBLE);
+        }
+        if (editMeshChannelMessage != null) {
+            editMeshChannelMessage.setHint("Message to " + displayName);
+            editMeshChannelMessage.setText("");
+        }
+        refreshMeshChannelStripSelection();
+    }
+
+    private void appendMeshContactChatLine(boolean outbound, String text) {
+        if (text == null || text.trim().isEmpty()) {
+            return;
+        }
+        String ts = new SimpleDateFormat("HH:mm:ss", Locale.US)
+                .format(new Date(System.currentTimeMillis()));
+        String who = outbound ? "You" : (meshContactChatDisplayName != null
+                ? meshContactChatDisplayName : "Peer");
+        meshContactChatLines.add("[" + ts + "] " + who + ": " + text.trim());
+        while (meshContactChatLines.size() > MAX_MESH_CONTACT_CHAT_LINES) {
+            meshContactChatLines.removeFirst();
+        }
+    }
+
+    private void renderMeshContactChatLog() {
+        if (meshChannelLogText == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String line : meshContactChatLines) {
+            sb.append(line).append('\n');
+        }
+        if (sb.length() == 0) {
+            sb.append("(No messages yet)\n");
+        }
+        meshChannelLogText.setText(sb.toString());
+        meshChannelLogText.post(() -> {
+            android.text.Layout layout = meshChannelLogText.getLayout();
+            if (layout == null) {
+                return;
+            }
+            int scrollY = layout.getHeight() - meshChannelLogText.getHeight();
+            meshChannelLogText.scrollTo(0, Math.max(0, scrollY));
+        });
+    }
+
+    private void refreshMeshChannelStripSelection() {
+        if (stripMeshChannels == null) {
+            return;
+        }
+        for (int i = 0; i < stripMeshChannels.getChildCount(); i++) {
+            View child = stripMeshChannels.getChildAt(i);
+            if (!(child instanceof Button)) {
+                continue;
+            }
+            Object tag = child.getTag();
+            if (tag instanceof Integer) {
+                applyMeshChannelButtonStyle((Button) child,
+                        !meshContactChatActive && meshChannelChatActiveIndex == (Integer) tag);
+            }
+        }
+    }
+
+    private static String deviceContactTypeLabel(int type) {
+        switch (type) {
+            case 1:
+                return "Chat";
+            case 2:
+                return "Repeater";
+            case 3:
+                return "Room";
+            case 4:
+                return "Sensor";
+            default:
+                return "Node";
+        }
+    }
 
     private void showAddChannelDialog() {
         if (!btManager.isConnected()) {
@@ -4357,6 +4595,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         meshChannelChatLogView = null;
         meshChannelChatTitleView = null;
         meshChannelChatActiveIndex = -1;
+        meshContactChatActive = false;
+        meshContactChatPubKeyHex = null;
+        meshContactChatDisplayName = null;
+        meshContactChatPrefixHex = null;
     }
 
     @Override
@@ -4382,6 +4624,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btManager.removeListener(this);
         btManager.removeMeshStateListener(meshStateListener);
         btManager.removeMeshChannelListener(meshChannelListener);
+        btManager.removeMeshNativeDmListener(meshNativeDmListener);
         contactTracker.setListener(null);
         stopConnectButtonPulse(true);
         pendingManualMeshGpsUpdate = false;
@@ -4402,5 +4645,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         meshChannelChatLogView = null;
         meshChannelChatTitleView = null;
         meshChannelChatActiveIndex = -1;
+        meshContactChatActive = false;
+        meshContactChatPubKeyHex = null;
+        meshContactChatDisplayName = null;
+        meshContactChatPrefixHex = null;
     }
 }

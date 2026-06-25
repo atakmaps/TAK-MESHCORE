@@ -696,6 +696,15 @@
                 android:text="+ Add Channel"
                 android:background="@drawable/bg_meshcore_button_yellow" />
 
+            <Button
+                android:id="@+id/btn_mesh_contacts"
+                style="@style/MeshcorePillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Contacts"
+                android:background="@drawable/bg_meshcore_button_yellow" />
+
             <!-- Channel buttons strip — one button per subscribed channel -->
             <LinearLayout
                 android:id="@+id/strip_mesh_channels"

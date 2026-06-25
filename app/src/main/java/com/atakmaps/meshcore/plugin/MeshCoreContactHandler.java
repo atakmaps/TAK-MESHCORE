@@ -20,6 +20,7 @@ import com.atakmaps.meshcore.plugin.contacts.MeshRequestPositionConnector;
 import com.atakmaps.meshcore.plugin.contacts.MeshSendMessageConnector;
 import com.atakmaps.meshcore.plugin.contacts.PositionOnlyConnector;
 import com.atakmaps.meshcore.plugin.protocol.PositionRequester;
+import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.util.CallsignUtil;
 
 import android.widget.Toast;
@@ -517,6 +518,31 @@ public class MeshCoreContactHandler extends
 
     public static String formatMeshFavoriteName(String currentName, String uid) {
         return formatMeshFavoriteName(currentName, uid, null);
+    }
+
+    public static String uidForDeviceContact(BtConnectionManager.MeshDeviceContact contact) {
+        if (contact == null || contact.pubKeyHex == null || contact.pubKeyHex.length() < 12) {
+            return "";
+        }
+        String prefix = contact.pubKeyHex.substring(0, 12).toUpperCase(Locale.US);
+        if (contact.type == 0x02) {
+            return MESH_RPTR_UID_PREFIX + prefix;
+        }
+        return MESH_NODE_UID_PREFIX + prefix;
+    }
+
+    public static boolean favoriteDeviceContact(BtConnectionManager bt,
+                                                BtConnectionManager.MeshDeviceContact contact) {
+        if (contact == null) {
+            return false;
+        }
+        String uid = uidForDeviceContact(contact);
+        if (uid.isEmpty()) {
+            return false;
+        }
+        boolean atakOk = promoteMeshFavoriteContactByUid(uid, contact.name);
+        boolean deviceOk = bt != null && bt.addOrUpdateDeviceContactFavorite(contact);
+        return atakOk || deviceOk;
     }
 
     private static String formatMeshFavoriteName(String currentName, String uid, MapItem item) {
