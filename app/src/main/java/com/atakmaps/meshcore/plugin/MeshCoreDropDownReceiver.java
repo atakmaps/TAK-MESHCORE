@@ -58,6 +58,8 @@ import com.atakmaps.meshcore.plugin.bluetooth.BluetoothDeviceRegistry.BtDeviceRe
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.bluetooth.MeshBleDeviceMatcher;
 import com.atakmaps.meshcore.plugin.bluetooth.MeshBluetoothForgetAll;
+import com.atakmaps.meshcore.plugin.bluetooth.MeshDeviceContactCache;
+import com.atakmaps.meshcore.plugin.bluetooth.MeshDeviceContactPolicy;
 import com.atakmaps.meshcore.plugin.chat.ChatBridge;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
 import com.atakmaps.meshcore.plugin.contacts.RadioContact;
@@ -430,6 +432,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private int meshChannelChatActiveIndex = -1;
     private static final int ADV_TYPE_REPEATER = 0x02;
     private static final int MAX_MESH_CONTACT_CHAT_LINES = 120;
+    private static final long DEVICE_CONTACTS_CACHE_STALE_MS = 15L * 60L * 1000L;
+    private static final long DEVICE_CONTACTS_CONNECT_SYNC_DELAY_MS = 5000L;
+    private volatile boolean deviceContactsFetchInFlight = false;
     private boolean meshContactChatActive = false;
     private String meshContactChatPubKeyHex = null;
     private String meshContactChatDisplayName = null;
@@ -1628,15 +1633,67 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             return;
         }
         Context ctx = getMapView().getContext();
+        String deviceAddr = btManager.getConnectedDeviceAddress();
+        java.util.List<BtConnectionManager.MeshDeviceContact> cached =
+                MeshDeviceContactCache.load(ctx, deviceAddr);
+        if (!cached.isEmpty()) {
+            showDeviceContactsPicker(cached);
+            if (MeshDeviceContactCache.isStale(ctx, deviceAddr, DEVICE_CONTACTS_CACHE_STALE_MS)) {
+                fetchDeviceContactsFromRadio(false, false);
+            }
+            return;
+        }
         Toast.makeText(ctx, "Loading contacts from device…", Toast.LENGTH_SHORT).show();
+        fetchDeviceContactsFromRadio(true, true);
+    }
+
+    private void fetchDeviceContactsFromRadio(boolean showPickerOnSuccess,
+                                              boolean showErrors) {
+        if (!isMeshConnected()) {
+            if (showErrors) {
+                Toast.makeText(getMapView().getContext(),
+                        "Not connected.", Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
+        if (deviceContactsFetchInFlight) {
+            if (showErrors) {
+                Toast.makeText(getMapView().getContext(),
+                        "Contact sync already in progress.", Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        final String deviceAddr = btManager.getConnectedDeviceAddress();
+        deviceContactsFetchInFlight = true;
         btManager.requestDeviceContacts(new BtConnectionManager.DeviceContactsListener() {
             @Override
-            public void onDeviceContactsReady(java.util.List<BtConnectionManager.MeshDeviceContact> contacts) {
-                getMapView().post(() -> showDeviceContactsPicker(contacts));
+            public void onDeviceContactsReady(
+                    java.util.List<BtConnectionManager.MeshDeviceContact> contacts) {
+                deviceContactsFetchInFlight = false;
+                btManager.trimDeviceContactsToRollingCap(contacts);
+                java.util.List<BtConnectionManager.MeshDeviceContact> kept =
+                        MeshDeviceContactPolicy.filterRemoved(contacts,
+                                MeshDeviceContactPolicy.contactsToEvictFromDevice(contacts));
+                MeshDeviceContactCache.save(ctx, deviceAddr, kept);
+                final int savedCount = kept.size();
+                getMapView().post(() -> {
+                    if (showPickerOnSuccess) {
+                        showDeviceContactsPicker(kept);
+                    } else {
+                        Toast.makeText(ctx,
+                                "Contacts updated (" + savedCount + ")",
+                                Toast.LENGTH_SHORT).show();
+                    }
+                });
             }
 
             @Override
             public void onDeviceContactsFailed(String reason) {
+                deviceContactsFetchInFlight = false;
+                if (!showErrors) {
+                    return;
+                }
                 getMapView().post(() -> Toast.makeText(ctx,
                         reason != null ? reason : "Could not load contacts",
                         Toast.LENGTH_LONG).show());
@@ -1644,7 +1701,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         });
     }
 
-    private void showDeviceContactsPicker(java.util.List<BtConnectionManager.MeshDeviceContact> contacts) {
+    private void showDeviceContactsPicker(
+            java.util.List<BtConnectionManager.MeshDeviceContact> contacts) {
         Context ctx = getMapView().getContext();
         if (contacts == null || contacts.isEmpty()) {
             Toast.makeText(ctx, "No contacts on device.", Toast.LENGTH_SHORT).show();
@@ -1657,11 +1715,16 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             labels[i] = star + c.name + "  (" + deviceContactTypeLabel(c.type) + ")";
         }
         new AlertDialog.Builder(ctx)
-                .setTitle("MeshCore Contacts")
+                .setTitle("MeshCore Contacts (" + contacts.size() + ")")
                 .setItems(labels, (dialog, which) -> {
                     if (which >= 0 && which < contacts.size()) {
                         showDeviceContactActions(contacts.get(which));
                     }
+                })
+                .setNeutralButton("Refresh", (dialog, which) -> {
+                    Toast.makeText(ctx, "Refreshing contacts from device…",
+                            Toast.LENGTH_SHORT).show();
+                    fetchDeviceContactsFromRadio(true, true);
                 })
                 .setNegativeButton("Close", null)
                 .show();
@@ -1694,6 +1757,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                         : "Could not favorite contact",
                 Toast.LENGTH_LONG).show();
         if (ok) {
+            MeshDeviceContactCache.updateFavoriteFlag(ctx,
+                    btManager.getConnectedDeviceAddress(), contact.pubKeyHex, true);
+            MeshCoreContactHandler.markMeshMapCacheFavorite(ctx, contact.pubKeyHex, true);
             appendLog("Favorited device contact " + contact.name);
         }
     }
@@ -3625,7 +3691,21 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             scheduleMeshCallsignPositionSync();
             scheduleMeshGpsAugmentTick();
             updateScanButtonText();
+            getMapView().postDelayed(this::syncDeviceContactsCacheInBackground,
+                    DEVICE_CONTACTS_CONNECT_SYNC_DELAY_MS);
         });
+    }
+
+    private void syncDeviceContactsCacheInBackground() {
+        if (!isMeshConnected()) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        String deviceAddr = btManager.getConnectedDeviceAddress();
+        if (!MeshDeviceContactCache.isStale(ctx, deviceAddr, DEVICE_CONTACTS_CACHE_STALE_MS)) {
+            return;
+        }
+        fetchDeviceContactsFromRadio(false, false);
     }
 
     @Override

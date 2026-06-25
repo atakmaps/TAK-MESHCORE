@@ -26,6 +26,7 @@ import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.chat.ChatBridge;
 import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
+import com.atakmaps.meshcore.plugin.mesh.MeshNodeCachePolicy;
 import com.atakmaps.meshcore.plugin.crypto.EncryptionManager;
 import com.atakmaps.meshcore.plugin.mesh.MeshDetailsDropDownReceiver;
 import com.atakmaps.meshcore.plugin.protocol.MeshCoreRadioServices;
@@ -74,7 +75,6 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
     private static final String PREF_MESH_NODE_CACHE = "meshcore_mesh_node_cache_v1";
     private static final long MESH_REPEATER_TTL_MS = 30L * 24L * 60L * 60L * 1000L;
     private static final long MESH_NODE_TTL_MS = 30L * 24L * 60L * 60L * 1000L;
-    private static final int MESH_NODE_CACHE_MAX = 100;
 
     private Context pluginContext;
     private MapView mapView;
@@ -864,6 +864,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             JSONArray arr = new JSONArray(raw != null ? raw : "[]");
             Map<String, JSONObject> byKey = new HashMap<>();
             long now = System.currentTimeMillis();
+            Context cacheCtx = mapView != null ? mapView.getContext() : pluginContext;
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.optJSONObject(i);
                 if (o == null) {
@@ -873,8 +874,8 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 if (key.isEmpty()) {
                     continue;
                 }
-                long firstSeenMs = o.optLong("firstSeenMs", 0L);
-                if (firstSeenMs > 0L && (now - firstSeenMs) > MESH_REPEATER_TTL_MS) {
+                if (MeshNodeCachePolicy.shouldEvictRepeaterByTtl(
+                        o, key, now, MESH_REPEATER_TTL_MS, cacheCtx)) {
                     continue;
                 }
                 byKey.put(key, o);
@@ -917,6 +918,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             JSONArray arr = new JSONArray(raw != null ? raw : "[]");
             Map<String, JSONObject> byKey = new HashMap<>();
             long now = System.currentTimeMillis();
+            Context cacheCtx = mapView != null ? mapView.getContext() : pluginContext;
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.optJSONObject(i);
                 if (o == null) {
@@ -926,8 +928,8 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 if (key.isEmpty()) {
                     continue;
                 }
-                long lastSeenMs = o.optLong("lastSeenMs", o.optLong("firstSeenMs", 0L));
-                if (lastSeenMs > 0L && (now - lastSeenMs) > MESH_NODE_TTL_MS) {
+                if (MeshNodeCachePolicy.shouldEvictByNodeTtl(
+                        o, key, now, MESH_NODE_TTL_MS, cacheCtx)) {
                     continue;
                 }
                 byKey.put(key, o);
@@ -952,25 +954,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             row.put("lastSeenMs", now);
             row.put("lastAdvertSec", advert.advertTimestampSec);
 
-            if (byKey.size() > MESH_NODE_CACHE_MAX) {
-                String oldestKey = null;
-                long oldestSeenMs = Long.MAX_VALUE;
-                for (Map.Entry<String, JSONObject> e : byKey.entrySet()) {
-                    JSONObject candidate = e.getValue();
-                    long seenMs = candidate.optLong("lastSeenMs",
-                            candidate.optLong("firstSeenMs", 0L));
-                    if (seenMs <= 0L) {
-                        seenMs = Long.MIN_VALUE;
-                    }
-                    if (seenMs < oldestSeenMs) {
-                        oldestSeenMs = seenMs;
-                        oldestKey = e.getKey();
-                    }
-                }
-                if (oldestKey != null && byKey.size() > MESH_NODE_CACHE_MAX) {
-                    byKey.remove(oldestKey);
-                }
-            }
+            MeshNodeCachePolicy.trimToRollingMax(byKey, cacheCtx);
 
             JSONArray out = new JSONArray();
             for (JSONObject o : byKey.values()) {
@@ -990,6 +974,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             JSONArray arr = new JSONArray(raw != null ? raw : "[]");
             JSONArray kept = new JSONArray();
             long now = System.currentTimeMillis();
+            Context cacheCtx = mapView != null ? mapView.getContext() : pluginContext;
 
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.optJSONObject(i);
@@ -1000,10 +985,10 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 String display = o.optString("display", "Mesh Repeater").trim();
                 double lat = o.optDouble("lat", Double.NaN);
                 double lon = o.optDouble("lon", Double.NaN);
-                long firstSeenMs = o.optLong("firstSeenMs", 0L);
                 long lastAdvertSec = o.optLong("lastAdvertSec", 0L);
                 if (pubKey.isEmpty() || Double.isNaN(lat) || Double.isNaN(lon)
-                        || firstSeenMs <= 0L || (now - firstSeenMs) > MESH_REPEATER_TTL_MS) {
+                        || MeshNodeCachePolicy.shouldEvictRepeaterByTtl(
+                        o, pubKey, now, MESH_REPEATER_TTL_MS, cacheCtx)) {
                     continue;
                 }
                 kept.put(o);
@@ -1025,6 +1010,8 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             JSONArray arr = new JSONArray(raw != null ? raw : "[]");
             JSONArray kept = new JSONArray();
             long now = System.currentTimeMillis();
+            Context cacheCtx = mapView != null ? mapView.getContext() : pluginContext;
+            Map<String, JSONObject> byKey = new HashMap<>();
 
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.optJSONObject(i);
@@ -1037,46 +1024,22 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 int advertType = o.optInt("advertType", 0);
                 double lat = o.optDouble("lat", Double.NaN);
                 double lon = o.optDouble("lon", Double.NaN);
-                long firstSeenMs = o.optLong("firstSeenMs", 0L);
-                long lastSeenMs = o.optLong("lastSeenMs", firstSeenMs);
+                long lastSeenMs = o.optLong("lastSeenMs", o.optLong("firstSeenMs", 0L));
                 long lastAdvertSec = o.optLong("lastAdvertSec", 0L);
                 if (pubKey.isEmpty() || Double.isNaN(lat) || Double.isNaN(lon)
-                        || lastSeenMs <= 0L || (now - lastSeenMs) > MESH_NODE_TTL_MS) {
+                        || lastSeenMs <= 0L
+                        || MeshNodeCachePolicy.shouldEvictByNodeTtl(
+                        o, pubKey, now, MESH_NODE_TTL_MS, cacheCtx)) {
                     continue;
                 }
-                kept.put(o);
+                byKey.put(pubKey, o);
                 if (isMeshNodeDisplayEnabled()) {
                     renderMeshNodeMarker(display, pubKey, lat, lon, lastAdvertSec, advertType, rawName);
                 }
             }
-            while (kept.length() > MESH_NODE_CACHE_MAX) {
-                int oldestIdx = -1;
-                long oldestSeenMs = Long.MAX_VALUE;
-                for (int i = 0; i < kept.length(); i++) {
-                    JSONObject o = kept.optJSONObject(i);
-                    if (o == null) {
-                        continue;
-                    }
-                    long seenMs = o.optLong("lastSeenMs", o.optLong("firstSeenMs", 0L));
-                    if (seenMs < oldestSeenMs) {
-                        oldestSeenMs = seenMs;
-                        oldestIdx = i;
-                    }
-                }
-                if (oldestIdx < 0) {
-                    break;
-                }
-                JSONArray trimmed = new JSONArray();
-                for (int i = 0; i < kept.length(); i++) {
-                    if (i == oldestIdx) {
-                        continue;
-                    }
-                    JSONObject o = kept.optJSONObject(i);
-                    if (o != null) {
-                        trimmed.put(o);
-                    }
-                }
-                kept = trimmed;
+            MeshNodeCachePolicy.trimToRollingMax(byKey, cacheCtx);
+            for (JSONObject o : byKey.values()) {
+                kept.put(o);
             }
             prefs.edit().putString(PREF_MESH_NODE_CACHE, kept.toString()).apply();
         } catch (Exception e) {

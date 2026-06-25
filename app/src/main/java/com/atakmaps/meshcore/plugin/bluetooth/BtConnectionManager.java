@@ -30,6 +30,7 @@ import android.util.Log;
 import android.widget.Toast;
 
 import androidx.annotation.Nullable;
+import androidx.annotation.NonNull;
 
 import com.atakmaps.meshcore.plugin.protocol.PacketRouter;
 
@@ -84,6 +85,7 @@ public class BtConnectionManager {
     private static final byte CMD_DEVICE_QUERY_ARG = 0x03;
     private static final byte CMD_GET_CONTACTS = 0x04;
     private static final byte CMD_ADD_UPDATE_CONTACT = 0x09;
+    private static final byte CMD_REMOVE_CONTACT = 0x0F;
     private static final byte CMD_GET_CONTACT_BY_KEY = 0x1E;
     private static final byte CMD_GET_CHANNEL = 0x1F;
     private static final byte CMD_SET_CHANNEL = 0x20;
@@ -119,7 +121,7 @@ public class BtConnectionManager {
     private static final int CONTACT_PUB_KEY_BYTES = 32;
     private static final int CONTACT_PATH_BYTES = 64;
     private static final int CONTACT_NAME_BYTES = 32;
-    private static final int CONTACT_FLAG_FAVORITE = 0x01;
+    public static final int CONTACT_FLAG_FAVORITE = 0x01;
     private static final long DEVICE_CONTACTS_FETCH_TIMEOUT_MS = 30_000L;
 
     private static final int MAX_MESH_MESSAGE_LEN = 130; // leave room below 133 chars
@@ -1603,6 +1605,14 @@ public class BtConnectionManager {
         return "MeshCore";
     }
 
+    @Nullable
+    public String getConnectedDeviceAddress() {
+        if (!connected.get() || lastDevice == null) {
+            return null;
+        }
+        return lastDevice.getAddress();
+    }
+
     // --- Listener management ---
 
     public void addListener(ConnectionListener listener) {
@@ -1707,6 +1717,35 @@ public class BtConnectionManager {
         enqueueCommand(cmd);
         Log.d(TAG, "CMD_ADD_UPDATE_CONTACT favorite queued name=" + contact.name);
         return true;
+    }
+
+    /**
+     * Remove a contact from the mesh node table (oldest non-favorites are evicted by firmware
+     * when full; this command trims proactively to the plugin rolling cap).
+     */
+    public boolean removeDeviceContact(MeshDeviceContact contact) {
+        if (!connected.get() || contact == null) {
+            return false;
+        }
+        byte[] pubKey = pubKeyPrefixBytes(contact.pubKeyHex, CONTACT_PUB_KEY_BYTES);
+        if (pubKey == null) {
+            return false;
+        }
+        byte[] out = new byte[1 + CONTACT_PUB_KEY_BYTES];
+        out[0] = CMD_REMOVE_CONTACT;
+        System.arraycopy(pubKey, 0, out, 1, CONTACT_PUB_KEY_BYTES);
+        enqueueCommand(out);
+        Log.d(TAG, "CMD_REMOVE_CONTACT queued name=" + contact.name);
+        return true;
+    }
+
+    public void trimDeviceContactsToRollingCap(
+            @NonNull java.util.List<MeshDeviceContact> contacts) {
+        java.util.List<MeshDeviceContact> toRemove =
+                MeshDeviceContactPolicy.contactsToEvictFromDevice(contacts);
+        for (MeshDeviceContact contact : toRemove) {
+            removeDeviceContact(contact);
+        }
     }
 
     public Map<Integer, String> getKnownChannelNamesSnapshot() {

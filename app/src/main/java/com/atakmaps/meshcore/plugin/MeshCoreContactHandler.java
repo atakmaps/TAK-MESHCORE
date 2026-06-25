@@ -19,11 +19,15 @@ import com.atakmaps.meshcore.plugin.contacts.MeshFavoriteConnector;
 import com.atakmaps.meshcore.plugin.contacts.MeshRequestPositionConnector;
 import com.atakmaps.meshcore.plugin.contacts.MeshSendMessageConnector;
 import com.atakmaps.meshcore.plugin.contacts.PositionOnlyConnector;
+import com.atakmaps.meshcore.plugin.mesh.MeshNodeCachePolicy;
 import com.atakmaps.meshcore.plugin.protocol.PositionRequester;
 import com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager;
 import com.atakmaps.meshcore.plugin.util.CallsignUtil;
 
+import android.content.Context;
 import android.widget.Toast;
+
+import androidx.annotation.Nullable;
 
 import java.util.Locale;
 import java.util.Map;
@@ -384,6 +388,17 @@ public class MeshCoreContactHandler extends
             applyMeshContactConnectors(favored);
             contacts.addContact(favored);
             contacts.updateTotalUnreadCount();
+            String pubKeyPrefix = pubKeyPrefixFromMeshUid(uid);
+            if (pubKeyPrefix != null) {
+                try {
+                    com.atakmap.android.maps.MapView mv =
+                            com.atakmap.android.maps.MapView.getMapView();
+                    if (mv != null) {
+                        markMeshMapCacheFavorite(mv.getContext(), pubKeyPrefix, true);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
             return true;
         } catch (Exception e) {
             Log.w("MeshCore.Handler", "promoteMeshFavoriteContact failed", e);
@@ -529,6 +544,60 @@ public class MeshCoreContactHandler extends
             return MESH_RPTR_UID_PREFIX + prefix;
         }
         return MESH_NODE_UID_PREFIX + prefix;
+    }
+
+    public static boolean isMeshFavoriteByPubKey(@Nullable String pubKeyHex) {
+        if (pubKeyHex == null || pubKeyHex.length() < 12) {
+            return false;
+        }
+        String prefix = pubKeyHex.substring(0, 12).toUpperCase(Locale.US);
+        try {
+            Contacts contacts = Contacts.getInstance();
+            String[] uids = {
+                    MESH_NODE_UID_PREFIX + prefix,
+                    MESH_RPTR_UID_PREFIX + prefix
+            };
+            for (String uid : uids) {
+                Contact existing = contacts.getContactByUuid(uid);
+                if (existing instanceof IndividualContact) {
+                    IndividualContact ic = (IndividualContact) existing;
+                    if (ic.getConnector(MeshFavoriteConnector.CONNECTOR_TYPE) != null) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    public static void markMeshMapCacheFavorite(Context context, String pubKeyHex,
+                                                boolean favorite) {
+        if (context == null || pubKeyHex == null || pubKeyHex.trim().isEmpty()) {
+            return;
+        }
+        MeshNodeCachePolicy.markFavorite(context, "meshcore_mesh_node_cache_v1",
+                pubKeyHex, favorite);
+        MeshNodeCachePolicy.markFavorite(context, "meshcore_mesh_repeater_cache_v1",
+                pubKeyHex, favorite);
+    }
+
+    @Nullable
+    private static String pubKeyPrefixFromMeshUid(@Nullable String uid) {
+        if (uid == null) {
+            return null;
+        }
+        String trimmed = uid.trim().toUpperCase(Locale.US);
+        String suffix = null;
+        if (trimmed.startsWith(MESH_NODE_UID_PREFIX)) {
+            suffix = trimmed.substring(MESH_NODE_UID_PREFIX.length());
+        } else if (trimmed.startsWith(MESH_RPTR_UID_PREFIX)) {
+            suffix = trimmed.substring(MESH_RPTR_UID_PREFIX.length());
+        }
+        if (suffix == null || suffix.length() < 12) {
+            return null;
+        }
+        return suffix.substring(0, 12);
     }
 
     public static boolean favoriteDeviceContact(BtConnectionManager bt,
