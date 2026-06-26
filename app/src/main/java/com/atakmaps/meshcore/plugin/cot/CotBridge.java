@@ -160,6 +160,9 @@ public class CotBridge {
      */
     private static final long BROADCAST_MAP_RF_MIN_INTERVAL_MS = 120_000L;
     private final Map<String, Long> lastBroadcastMapRfRelayByUid = new ConcurrentHashMap<>();
+    /** Avoid duplicate Wi‑Fi map CoT ACKs when logReceive fires more than once. */
+    private final Map<String, Long> wifiCotAckSentUntil = new ConcurrentHashMap<>();
+    private static final long WIFI_COT_ACK_DEDUPE_MS = 120_000L;
     private static final long INBOUND_CHAT_NOTIFY_DEDUPE_MS = 7000L;
     /** Avoid duplicate user alerts when redundant RF GeoChat CoT arrives. */
     private final Map<String, Long> inboundChatNotifyUntil = new ConcurrentHashMap<>();
@@ -1983,6 +1986,265 @@ public class CotBridge {
         }
     }
 
+    private void maybeHandleInboundWifiCotAck(CotEvent event) {
+        if (!CotBuilder.isWifiCotAck(event)) {
+            return;
+        }
+        String refUid = CotBuilder.extractWifiCotAckRefUid(event);
+        if (refUid == null || refUid.isEmpty()) {
+            return;
+        }
+        if (refUid.startsWith(ANDROID_UID_PREFIX)) {
+            Log.d(TAG, "CoT WiFi ACK ignored — refUid is device uid, not map uid: " + refUid);
+            return;
+        }
+        handleCotAck(refUid);
+        Log.d(TAG, "CoT WiFi ACK received refUid=" + refUid);
+    }
+
+    /** Map item types eligible for WiFi delivery ACK — excludes SA/PLI ({@code a-f-*}). */
+    private boolean shouldAckMapCotOverWifi(CotEvent event) {
+        if (event == null || CotBuilder.isWifiNetworkOnlyCot(event)) {
+            return false;
+        }
+        String type = event.getType();
+        if (type == null) {
+            return false;
+        }
+        if (!type.startsWith("b-m-p")
+                && !type.startsWith("b-m-r")
+                && !type.startsWith("u-")
+                && !type.startsWith("b-r-f-h")
+                && !type.startsWith("t-x-d-d")) {
+            return false;
+        }
+        String cotUid = event.getUID();
+        if (cotUid == null || cotUid.trim().isEmpty()
+                || cotUid.trim().startsWith(ANDROID_UID_PREFIX)) {
+            return false;
+        }
+        String creatorUid = CotBuilder.extractMapCotSenderUid(event);
+        if (creatorUid == null || creatorUid.trim().isEmpty()) {
+            return false;
+        }
+        String self = null;
+        try {
+            self = MapView.getDeviceUid();
+        } catch (Exception ignored) {
+        }
+        return self == null || !self.equalsIgnoreCase(creatorUid.trim());
+    }
+
+    private void maybeSendWifiCotAck(CotEvent event, String senderEndpointId) {
+        if (event == null) {
+            return;
+        }
+        if (!shouldAckMapCotOverWifi(event)) {
+            return;
+        }
+        String cotUid = event.getUID();
+        if (cotUid == null || cotUid.trim().isEmpty()) {
+            return;
+        }
+        String trimUid = cotUid.trim();
+        long now = System.currentTimeMillis();
+        Long dedupeUntil = wifiCotAckSentUntil.get(trimUid);
+        if (dedupeUntil != null && now < dedupeUntil) {
+            return;
+        }
+        IndividualContact sender = resolveWifiCotAckRecipientContact(event, senderEndpointId);
+        if (sender == null) {
+            Log.d(TAG, "CoT WiFi ACK skipped — no contact for sender endpoint="
+                    + senderEndpointId
+                    + " cotSenderUid=" + CotBuilder.extractMapCotSenderUid(event)
+                    + " cotSenderCallsign=" + CotBuilder.extractMapCotSenderCallsign(event)
+                    + " mapUid=" + trimUid);
+            return;
+        }
+        MapView mv = MapView.getMapView();
+        if (mv == null) {
+            return;
+        }
+        CotEvent ack = CotBuilder.buildWifiCotAck(mv, trimUid);
+        if (ack == null || !ack.isValid()) {
+            return;
+        }
+        try {
+            com.atakmap.comms.CotDispatcher dispatcher =
+                    CotMapComponent.getExternalDispatcher();
+            if (dispatcher == null) {
+                return;
+            }
+            dispatcher.dispatchToContact(ack, sender, CoTSendMethod.POINT_TO_POINT);
+            wifiCotAckSentUntil.put(trimUid, now + WIFI_COT_ACK_DEDUPE_MS);
+            Log.d(TAG, "CoT WiFi ACK sent refUid=" + trimUid
+                    + " toContact=" + sender.getUID());
+        } catch (Exception e) {
+            Log.w(TAG, "CoT WiFi ACK send failed refUid=" + trimUid, e);
+        }
+    }
+
+    private void maybeSendWifiCotAckFromPlacedIntent(Intent intent) {
+        if (intent == null
+                || !"com.atakmap.android.maps.COT_PLACED".equals(intent.getAction())) {
+            return;
+        }
+        CotEvent event = parseCotEventFromMapIntent(intent);
+        if (event == null) {
+            return;
+        }
+        String senderHint = CotBuilder.extractMapCotSenderUid(event);
+        maybeSendWifiCotAck(event, senderHint != null ? senderHint : "");
+    }
+
+    private CotEvent parseCotEventFromMapIntent(Intent intent) {
+        if (intent == null) {
+            return null;
+        }
+        String cotXml = intent.getStringExtra("xml");
+        if (cotXml == null || cotXml.isEmpty()) {
+            cotXml = intent.getStringExtra("cotXml");
+        }
+        if (cotXml == null || cotXml.isEmpty()) {
+            cotXml = intent.getStringExtra("cot");
+        }
+        CotEvent event = null;
+        if (cotXml != null && !cotXml.isEmpty()) {
+            try {
+                event = CotEvent.parse(cotXml);
+            } catch (Exception ignored) {
+            }
+        }
+        if (event == null) {
+            String uid = intent.getStringExtra("uid");
+            if (uid != null && !uid.isEmpty() && mapView != null) {
+                MapItem item = mapView.getRootGroup().deepFindUID(uid);
+                if (item != null) {
+                    try {
+                        event = CotEventFactory.createCotEvent(item);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        }
+        return event;
+    }
+
+    private IndividualContact findNetworkContactByUid(String uid) {
+        if (uid == null || uid.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            Contact c = Contacts.getInstance().getContactByUuid(uid.trim());
+            if (c instanceof IndividualContact) {
+                return (IndividualContact) c;
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private IndividualContact resolveWifiCotAckRecipientContact(CotEvent event, String rxEndpointId) {
+        String senderUid = CotBuilder.extractMapCotSenderUid(event);
+        if (senderUid != null) {
+            IndividualContact byUid = findNetworkContactByUid(senderUid);
+            if (byUid != null) {
+                return byUid;
+            }
+            String resolved = resolveBtechUidForId(senderUid);
+            if (resolved != null) {
+                byUid = findNetworkContactByUid(resolved);
+                if (byUid != null) {
+                    return byUid;
+                }
+            }
+        }
+        if (rxEndpointId != null && rxEndpointId.trim().startsWith(ANDROID_UID_PREFIX)) {
+            IndividualContact byRx = findNetworkContactByUid(rxEndpointId.trim());
+            if (byRx != null) {
+                return byRx;
+            }
+        }
+        String callsign = CotBuilder.extractMapCotSenderCallsign(event);
+        if (callsign != null && !callsign.isEmpty()) {
+            try {
+                Contact c = com.atakmaps.meshcore.plugin.contacts.ContactMergeUtil
+                        .findContactByCallsignVariants(Contacts.getInstance(), callsign);
+                if (c instanceof IndividualContact) {
+                    return (IndividualContact) c;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        IndividualContact byHost = findNetworkContactByConnectHint(extractCotContactEndpoint(event));
+        if (byHost != null) {
+            return byHost;
+        }
+        return findNetworkContactByConnectHint(rxEndpointId);
+    }
+
+    private IndividualContact findNetworkContactByConnectHint(String connectHint) {
+        String host = parseConnectHintHost(connectHint);
+        if (host == null || host.isEmpty()) {
+            return null;
+        }
+        try {
+            java.util.List<Contact> all = Contacts.getInstance().getAllContacts();
+            if (all == null) {
+                return null;
+            }
+            for (Contact c : all) {
+                if (!(c instanceof IndividualContact)) {
+                    continue;
+                }
+                IndividualContact ic = (IndividualContact) c;
+                NetConnectString ncs = resolveRoutableNetworkEndpoint(ic);
+                if (ncs != null && host.equalsIgnoreCase(ncs.getHost())) {
+                    return ic;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private static String parseConnectHintHost(String connectHint) {
+        if (connectHint == null || connectHint.trim().isEmpty()) {
+            return null;
+        }
+        String trimmed = connectHint.trim();
+        try {
+            NetConnectString ncs = NetConnectString.fromString(trimmed);
+            if (ncs != null) {
+                String host = ncs.getHost();
+                if (host != null && !host.trim().isEmpty() && !"*".equals(host.trim())) {
+                    return host.trim();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        if (trimmed.matches("\\d{1,3}(?:\\.\\d{1,3}){3}")) {
+            return trimmed;
+        }
+        return null;
+    }
+
+    private static String extractCotContactEndpoint(CotEvent event) {
+        if (event == null || event.getDetail() == null) {
+            return null;
+        }
+        try {
+            CotDetail contact = event.getDetail().getFirstChildByName(0, "contact");
+            if (contact == null) {
+                return null;
+            }
+            String endpoint = contact.getAttribute("endpoint");
+            return endpoint != null ? endpoint.trim() : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     /**
      * Team string from ATAK Settings (sender side) for outbound GPS TLV extension.
      */
@@ -2274,7 +2536,9 @@ public class CotBridge {
 
             @Override
             public void logReceive(CotEvent event, String src, String dest) {
+                maybeHandleInboundWifiCotAck(event);
                 maybeHandleInboundNetworkWifiPing(event);
+                maybeSendWifiCotAck(event, src);
                 MapView pingMv = MapView.getMapView();
                 if (pingMv != null) {
                     PingReplyNotifier.maybeNotifyPingReplyFromCot(
@@ -2295,6 +2559,7 @@ public class CotBridge {
         localCotBroadcastReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
+                maybeSendWifiCotAckFromPlacedIntent(intent);
                 maybeRelayLocalCotBroadcast(intent);
             }
         };
@@ -2783,33 +3048,7 @@ public class CotBridge {
         final String action = intent.getAction();
         if (action == null) return;
 
-        String cotXml = intent.getStringExtra("xml");
-        if (cotXml == null || cotXml.isEmpty()) {
-            cotXml = intent.getStringExtra("cotXml");
-        }
-        if (cotXml == null || cotXml.isEmpty()) {
-            cotXml = intent.getStringExtra("cot");
-        }
-
-        CotEvent event = null;
-        if (cotXml != null && !cotXml.isEmpty()) {
-            try {
-                event = CotEvent.parse(cotXml);
-            } catch (Exception ignored) {
-            }
-        }
-        if (event == null) {
-            String uid = intent.getStringExtra("uid");
-            if (uid != null && !uid.isEmpty() && mapView != null) {
-                MapItem item = mapView.getRootGroup().deepFindUID(uid);
-                if (item != null) {
-                    try {
-                        event = CotEventFactory.createCotEvent(item);
-                    } catch (Exception ignored) {
-                    }
-                }
-            }
-        }
+        CotEvent event = parseCotEventFromMapIntent(intent);
         if (event == null) return;
 
         final CotEvent relayEvent = event;

@@ -45,6 +45,10 @@ public class CotBuilder {
     public static final String WIFI_PING_REMARKS_SOURCE = "MeshCore WiFi ping";
     /** Slotted ping reply sent over TAK/Wi‑Fi (not RF OPENRL). */
     public static final String WIFI_PING_REPLY_REMARKS_SOURCE = "MeshCore WiFi ping reply";
+    /** Delivery ACK for contact-targeted map CoT over TAK/local Wi‑Fi (cancels RF retry). */
+    public static final String WIFI_COT_ACK_REMARKS_SOURCE = "MeshCore CoT WiFi ACK";
+    /** UV-PRO plugin uses this source — accept for cross-plugin WiFi map ACK. */
+    private static final String UVPRO_WIFI_COT_ACK_REMARKS_SOURCE = "UV-PRO CoT WiFi ACK";
     /** UV-PRO plugin uses this source — accept for cross-plugin WiFi ping. */
     private static final String UVPRO_WIFI_PING_REMARKS_SOURCE = "UV-PRO WiFi ping";
     private static final String UVPRO_WIFI_PING_REPLY_REMARKS_SOURCE = "UV-PRO WiFi ping reply";
@@ -797,7 +801,131 @@ public class CotBuilder {
     }
 
     public static boolean isWifiNetworkOnlyCot(CotEvent event) {
-        return isWifiPingCot(event) || isWifiPingReplyCot(event);
+        return isWifiPingCot(event) || isWifiPingReplyCot(event) || isWifiCotAck(event);
+    }
+
+    /** True for Wi‑Fi/TAK map CoT delivery ACK (remarks {@code refUid}). */
+    public static boolean isWifiCotAck(CotEvent event) {
+        return remarksSourceEquals(event, WIFI_COT_ACK_REMARKS_SOURCE)
+                || remarksSourceEquals(event, UVPRO_WIFI_COT_ACK_REMARKS_SOURCE);
+    }
+
+    /** Referenced map CoT uid from a Wi‑Fi delivery ACK, or null. */
+    public static String extractWifiCotAckRefUid(CotEvent event) {
+        if (event == null || event.getDetail() == null) {
+            return null;
+        }
+        try {
+            CotDetail remarks = event.getDetail().getFirstChildByName(0, "remarks");
+            if (remarks == null) {
+                return null;
+            }
+            String refUid = remarks.getAttribute("refUid");
+            if (refUid != null && !refUid.trim().isEmpty()) {
+                return refUid.trim();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /** Sender device uid from map CoT {@code <creator uid="…"/>}, when present. */
+    public static String extractMapCotSenderUid(CotEvent event) {
+        if (event == null || event.getDetail() == null) {
+            return null;
+        }
+        try {
+            CotDetail creator = event.getDetail().getChild("creator");
+            if (creator == null) {
+                creator = event.getDetail().getFirstChildByName(0, "creator");
+            }
+            if (creator != null) {
+                String uid = creator.getAttribute("uid");
+                if (uid != null && !uid.trim().isEmpty()) {
+                    return uid.trim();
+                }
+            }
+            CotDetail link = event.getDetail().getFirstChildByName(0, "link");
+            if (link != null) {
+                String uid = link.getAttribute("uid");
+                if (uid != null && uid.trim().startsWith("ANDROID-")) {
+                    return uid.trim();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /** Sender callsign from map CoT creator/contact detail, when present. */
+    public static String extractMapCotSenderCallsign(CotEvent event) {
+        if (event == null || event.getDetail() == null) {
+            return null;
+        }
+        try {
+            CotDetail creator = event.getDetail().getChild("creator");
+            if (creator == null) {
+                creator = event.getDetail().getFirstChildByName(0, "creator");
+            }
+            if (creator != null) {
+                String callsign = creator.getAttribute("callsign");
+                if (callsign != null && !callsign.trim().isEmpty()) {
+                    return callsign.trim();
+                }
+            }
+            CotDetail contact = event.getDetail().getFirstChildByName(0, "contact");
+            if (contact != null) {
+                String callsign = contact.getAttribute("callsign");
+                if (callsign != null && !callsign.trim().isEmpty()) {
+                    return callsign.trim();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Minimal CoT ACK for contact-targeted map items delivered over TAK/local Wi‑Fi.
+     * Sender cancels RF retry watchdog when this arrives via CommsLogger logReceive.
+     */
+    public static CotEvent buildWifiCotAck(MapView mapView, String ackedCotUid) {
+        if (mapView == null || ackedCotUid == null || ackedCotUid.trim().isEmpty()) {
+            return null;
+        }
+        CotEvent event = new CotEvent();
+        event.setUID(java.util.UUID.randomUUID().toString());
+        event.setType("t-x-cot-a");
+        event.setHow("m-g");
+        long now = System.currentTimeMillis();
+        event.setTime(new com.atakmap.coremap.maps.time.CoordinatedTime(now));
+        event.setStart(new com.atakmap.coremap.maps.time.CoordinatedTime(now));
+        event.setStale(new com.atakmap.coremap.maps.time.CoordinatedTime(now + 60_000L));
+        event.setPoint(new CotPoint(0, 0, CotPoint.UNKNOWN,
+                CotPoint.UNKNOWN, CotPoint.UNKNOWN));
+
+        CotDetail detail = new CotDetail("detail");
+        CotDetail contact = new CotDetail("contact");
+        String callsign = mapView.getDeviceCallsign();
+        if (callsign != null && !callsign.trim().isEmpty()) {
+            contact.setAttribute("callsign", callsign.trim().toUpperCase(Locale.US));
+        }
+        try {
+            String endpoint = CotMapComponent.getEndpoint();
+            if (endpoint != null && !endpoint.trim().isEmpty()) {
+                contact.setAttribute("endpoint", endpoint.trim());
+            }
+        } catch (Exception ignored) {
+        }
+        detail.addChild(contact);
+
+        CotDetail remarks = new CotDetail("remarks");
+        remarks.setAttribute("source", WIFI_COT_ACK_REMARKS_SOURCE);
+        remarks.setAttribute("refUid", ackedCotUid.trim());
+        remarks.setInnerText("");
+        detail.addChild(remarks);
+        event.setDetail(detail);
+        return event;
     }
 
     public static String extractWifiPingTarget(CotEvent event) {
