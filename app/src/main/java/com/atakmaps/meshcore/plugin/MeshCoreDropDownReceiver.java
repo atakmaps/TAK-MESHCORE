@@ -6763,8 +6763,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         MapView mv = getMapView();
         Context ctx = mv != null ? mv.getContext() : pluginContext;
         new AlertDialog.Builder(ctx)
-                .setTitle("Clear All Mesh Contacts")
-                .setMessage("This will delete all repeaters and nodes from your map. Are you sure?")
+                .setTitle("Clear Mesh Contacts From Map")
+                .setMessage("This will delete all repeaters and nodes only from your map. "
+                        + "This will not delete contacts from your node. Are you sure?")
                 .setPositiveButton("Yes", (d, w) -> clearAllMeshContacts())
                 .setNegativeButton("Cancel", null)
                 .show();
