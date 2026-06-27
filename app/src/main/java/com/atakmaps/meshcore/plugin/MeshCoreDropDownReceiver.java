@@ -22,6 +22,7 @@ import android.text.method.ScrollingMovementMethod;
 import android.util.Base64;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.HapticFeedbackConstants;
 import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -120,6 +121,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private static final int MAX_LOG_LINES = 50;
     private static final int COLOR_PILL_BUTTON_PRIMARY = 0xFF455A64;
     private static final int COLOR_CONNECTION_STROKE_RED = 0xFFF44336;
+    private static final int COLOR_BEACON_SECTION_STROKE = 0xFF00BCD4;
+    private static final int COLOR_MESH_YELLOW_STROKE = 0xFFFFEB3B;
     private static final int PILL_CORNER_RADIUS_DP = 20;
     private static final int EDIT_SELECTION_STROKE_DP = 3;
     private static final String PREF_MESH_CHANNEL_HISTORY = "meshcore_mesh_channel_history_v1";
@@ -289,6 +292,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
     private ValueAnimator connectPulseAnimator;
     private GradientDrawable connectPulseDrawable;
+    private ValueAnimator sendButtonPulseAnimator;
+    private GradientDrawable sendButtonPulseDrawable;
+    private Button sendButtonPulseTarget;
+    private int sendButtonPulseRestoreStroke = COLOR_BEACON_SECTION_STROKE;
     private volatile boolean scanDiscoveryPulseActive = false;
     private boolean scanPulseBright = false;
     private final Runnable scanDiscoveryPulseRunnable = new Runnable() {
@@ -948,6 +955,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (btnMeshSendAdvert != null) {
             btnMeshSendAdvert.setOnClickListener(v -> {
+                pulseSendButtonFeedback(btnMeshSendAdvert, COLOR_MESH_YELLOW_STROKE);
                 if (!isMeshConnected()) {
                     appendLog("Self advert not sent — MeshCore not connected");
                     return;
@@ -5036,6 +5044,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private void sendManualBeacon() {
+        pulseSendButtonFeedback(btnSendBeacon, COLOR_BEACON_SECTION_STROKE);
         if (cotBridge == null || !isMeshConnected()) {
             appendLog("Manual beacon not sent — MeshCore not connected");
             return;
@@ -5055,9 +5064,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 0f,
                 -1);
         appendLog("Manual beacon sent (MeshCore OPENRL)");
+        showActionToast("Beacon Sent");
     }
 
     private void sendPing() {
+        pulseSendButtonFeedback(btnSendPing, COLOR_BEACON_SECTION_STROKE);
         if (isMeshConnected()) {
             try {
                 String callsign = getMapView().getSelfMarker().getMetaString("callsign", "UNKNOWN");
@@ -5492,6 +5503,84 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             drawable.setStroke(dip(getMapView().getContext(), 1), strokeColor);
         }
         return drawable;
+    }
+
+    private GradientDrawable buildBeaconButtonBackground(int strokeColor, int strokeDp) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setShape(GradientDrawable.RECTANGLE);
+        drawable.setColor(COLOR_PILL_BUTTON_PRIMARY);
+        drawable.setCornerRadius(dip(getMapView().getContext(), PILL_CORNER_RADIUS_DP));
+        if (strokeColor != 0) {
+            drawable.setStroke(dip(getMapView().getContext(), strokeDp), strokeColor);
+        }
+        return drawable;
+    }
+
+    private void pulseSendButtonFeedback(Button targetButton, int idleStrokeColor) {
+        if (targetButton == null) {
+            return;
+        }
+        try {
+            targetButton.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        } catch (Exception ignored) {
+        }
+        stopSendButtonPulse(false);
+        sendButtonPulseTarget = targetButton;
+        sendButtonPulseRestoreStroke = idleStrokeColor;
+        targetButton.setBackgroundTintList(null);
+        sendButtonPulseDrawable = buildBeaconButtonBackground(0x00FFEB3B, EDIT_SELECTION_STROKE_DP);
+        targetButton.setBackground(sendButtonPulseDrawable);
+        sendButtonPulseAnimator = ValueAnimator.ofObject(
+                new ArgbEvaluator(),
+                0x11FFEB3B,
+                0xFFFFEB3B);
+        sendButtonPulseAnimator.setDuration(220L);
+        sendButtonPulseAnimator.setRepeatMode(ValueAnimator.REVERSE);
+        sendButtonPulseAnimator.setRepeatCount(4);
+        sendButtonPulseAnimator.addUpdateListener(animation -> {
+            if (sendButtonPulseDrawable == null || sendButtonPulseTarget == null) {
+                return;
+            }
+            int color = (Integer) animation.getAnimatedValue();
+            sendButtonPulseDrawable.setStroke(
+                    dip(getMapView().getContext(), EDIT_SELECTION_STROKE_DP), color);
+            sendButtonPulseTarget.invalidate();
+        });
+        sendButtonPulseAnimator.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(android.animation.Animator animation) {
+                stopSendButtonPulse(true);
+            }
+
+            @Override
+            public void onAnimationCancel(android.animation.Animator animation) {
+                stopSendButtonPulse(true);
+            }
+        });
+        sendButtonPulseAnimator.start();
+    }
+
+    private void stopSendButtonPulse(boolean restoreBackground) {
+        ValueAnimator animator = sendButtonPulseAnimator;
+        sendButtonPulseAnimator = null;
+        if (animator != null) {
+            animator.cancel();
+        }
+        sendButtonPulseDrawable = null;
+        Button target = sendButtonPulseTarget;
+        sendButtonPulseTarget = null;
+        if (restoreBackground && target != null) {
+            target.setBackgroundTintList(null);
+            target.setBackground(buildBeaconButtonBackground(sendButtonPulseRestoreStroke, 2));
+        }
+    }
+
+    private void showActionToast(String message) {
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        if (ctx == null || message == null || message.isEmpty()) {
+            return;
+        }
+        Toast.makeText(ctx, message, Toast.LENGTH_SHORT).show();
     }
 
     private void applyPillButtonBackground(Button button, int fillColor) {
@@ -6663,6 +6752,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         meshChannelChatActiveIndex = -1;
         activeMeshContactPubKey = null;
         updateExpandMeshChannelChatButtonState();
+        stopSendButtonPulse(true);
     }
 
     @Override
@@ -6695,6 +6785,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btManager.removeMeshAdvertListener(meshRoomAdvertListener);
         contactTracker.setListener(null);
         stopConnectButtonPulse(true);
+        stopSendButtonPulse(true);
         pendingManualMeshGpsUpdate = false;
         pendingManualMeshGpsSinceMs = 0L;
         getMapView().removeCallbacks(manualMeshGpsTimeoutRunnable);
