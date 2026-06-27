@@ -181,7 +181,8 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             if (isRepeater) {
                 String display = sanitizeRepeaterDisplayName(advert.name);
                 persistRepeaterAdvert(advert, display);
-                if (cotBridge != null && isMeshShowRepeatersPreferenceEnabled()) {
+                if (cotBridge != null && (isMeshShowRepeatersPreferenceEnabled()
+                        || btConnectionManager.isNodeDiscoverSessionActive())) {
                     renderMeshRepeaterMarker(display, pub, advert.latitude, advert.longitude,
                             advert.advertTimestampSec);
                 }

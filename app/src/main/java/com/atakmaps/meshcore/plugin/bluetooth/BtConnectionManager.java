@@ -69,6 +69,9 @@ public class BtConnectionManager {
     private static final UUID UUID_CCC =
             UUID.fromString("00002902-0000-1000-8000-00805F9B34FB");
 
+    private static final byte RESP_CODE_ERR = 0x01;
+    private static final int ERR_CODE_NOT_FOUND = 2;
+
     // MeshCore companion commands
     private static final byte CMD_APP_START = 0x01;
     private static final byte CMD_SEND_SELF_ADVERT = 0x07;
@@ -78,7 +81,10 @@ public class BtConnectionManager {
     private static final byte CMD_SET_RADIO_TX_POWER = 0x0C;
     private static final byte CMD_SET_OTHER_PARAMS = 0x26;
     private static final byte CMD_SEND_TXT_MSG = 0x02;
+    private static final byte CMD_SEND_LOGIN = 0x1A;
     private static final byte TXT_TYPE_PLAIN = 0x00;
+    public static final byte TXT_TYPE_CLI_DATA = 0x01;
+    public static final byte TXT_TYPE_SIGNED_PLAIN = 0x02;
     private static final byte CMD_SEND_CHANNEL_MSG = 0x03;
     private static final byte CMD_GET_NEXT_MSG = 0x0A;
     private static final byte CMD_DEVICE_QUERY = 0x16;
@@ -92,6 +98,7 @@ public class BtConnectionManager {
     private static final byte CMD_GET_GPS_STATE = 0x28;
     private static final byte CMD_SET_SETTING_TEXT = 0x29;
     private static final byte CMD_SEND_CHANNEL_DATA = 0x3E;
+    private static final byte CMD_SEND_CONTROL_DATA = 0x37;
     private static final byte CMD_GET_BATTERY = 0x14;
     private static final byte CMD_GET_STATS = 0x38;
     private static final byte STATS_TYPE_CORE = 0x00;
@@ -113,11 +120,17 @@ public class BtConnectionManager {
     private static final byte PUSH_CODE_SEND_CONFIRMED = (byte) 0x82;
     private static final byte PUSH_CODE_LOG_RX_DATA = (byte) 0x88;
     private static final byte PUSH_CODE_ADVERT = (byte) 0x80;
+    private static final byte PUSH_CODE_CONTROL_DATA = (byte) 0x8E;
     private static final byte PUSH_CODE_NEW_ADVERT = (byte) 0x8A;
+    private static final byte CTL_TYPE_NODE_DISCOVER_REQ = (byte) 0x80;
+    private static final byte CTL_TYPE_NODE_DISCOVER_RESP = (byte) 0x90;
+    private static final byte PUSH_CODE_LOGIN_SUCCESS = (byte) 0x85;
+    private static final byte PUSH_CODE_LOGIN_FAIL = (byte) 0x86;
     private static final byte RESP_CODE_CONTACTS_START = 0x02;
     private static final byte RESP_CODE_CONTACT = 0x03;
     private static final byte RESP_CODE_END_OF_CONTACTS = 0x04;
     private static final int ADV_TYPE_REPEATER = 0x02;
+    public static final int ADV_TYPE_ROOM = 0x03;
     private static final int CONTACT_PUB_KEY_BYTES = 32;
     private static final int CONTACT_PATH_BYTES = 64;
     private static final int CONTACT_NAME_BYTES = 32;
@@ -140,6 +153,8 @@ public class BtConnectionManager {
     };
     private static final int ATAK_DATA_TYPE_AX25 = 0xFF01;
     private static final int ATAK_DATA_TYPE_RAW = 0xFF02;
+    /** Companion contact has no known route yet (firmware {@code OUT_PATH_UNKNOWN}). */
+    public static final int OUT_PATH_UNKNOWN = 0xFF;
     private static final int OUT_PATH_FLOOD = 0xFF;
 
     private final Context context;
@@ -195,6 +210,8 @@ public class BtConnectionManager {
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<MeshNativeDmListener> meshNativeDmListeners =
             new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<MeshRoomLoginListener> meshRoomLoginListeners =
+            new CopyOnWriteArrayList<>();
     private volatile DeviceContactsListener pendingDeviceContactsListener;
     private final java.util.ArrayList<MeshDeviceContact> pendingDeviceContactsList =
             new java.util.ArrayList<>();
@@ -203,6 +220,15 @@ public class BtConnectionManager {
     private final Map<String, Long> repeaterToastDedupByPubKeyTs = new ConcurrentHashMap<>();
     private final Map<String, Long> nodeToastDedupByPubKeyTs = new ConcurrentHashMap<>();
     private final Map<String, Long> contactQueryThrottleMsByPubKey = new ConcurrentHashMap<>();
+    private volatile int pendingNodeDiscoverTag = 0;
+    private volatile long pendingNodeDiscoverUntilMs = 0L;
+    private volatile long roomPostSyncUntilMs = 0L;
+    private static final long ROOM_CONTACT_REMOVE_SETTLE_MS = 1500L;
+    private static final long ROOM_CONTACT_ADD_SETTLE_MS = 1200L;
+    private static final long ROOM_POST_SYNC_BASE_MS = 300_000L;
+    private static final long ROOM_POST_SYNC_EXTEND_MS = 60_000L;
+    @Nullable
+    private Runnable pendingRoomContactPrepareStep;
     private final Map<Integer, String> meshChannelNamesByIndex = new ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<Integer, byte[]> channelSecretsByIndex =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -302,8 +328,33 @@ public class BtConnectionManager {
         void onDeviceContactsFailed(String reason);
     }
 
+    public static final class MeshContactInboundMessage {
+        /** First 6 bytes of the contact pubkey (12 hex chars). */
+        public final String senderPubKeyPrefixHex;
+        public final String text;
+        public final int txtType;
+        /** Present for {@link #TXT_TYPE_SIGNED_PLAIN} room posts (8 hex chars). */
+        @Nullable
+        public final String authorPubKeyPrefixHex;
+
+        public MeshContactInboundMessage(String senderPubKeyPrefixHex, String text,
+                                         int txtType, @Nullable String authorPubKeyPrefixHex) {
+            this.senderPubKeyPrefixHex = senderPubKeyPrefixHex;
+            this.text = text;
+            this.txtType = txtType;
+            this.authorPubKeyPrefixHex = authorPubKeyPrefixHex;
+        }
+    }
+
     public interface MeshNativeDmListener {
-        void onNativeDirectMessage(String senderPubKeyPrefixHex, String text);
+        void onNativeContactMessage(MeshContactInboundMessage message);
+    }
+
+    public interface MeshRoomLoginListener {
+        void onRoomLoginSuccess(String pubKeyPrefixHex12, int permissions);
+        void onRoomLoginFail(String pubKeyPrefixHex12);
+        default void onCompanionCommandError(int errCode) {
+        }
     }
 
     public static final class MeshDeviceContact {
@@ -1681,6 +1732,16 @@ public class BtConnectionManager {
         meshNativeDmListeners.remove(listener);
     }
 
+    public void addMeshRoomLoginListener(MeshRoomLoginListener listener) {
+        if (listener != null) {
+            meshRoomLoginListeners.addIfAbsent(listener);
+        }
+    }
+
+    public void removeMeshRoomLoginListener(MeshRoomLoginListener listener) {
+        meshRoomLoginListeners.remove(listener);
+    }
+
     public void requestDeviceContacts(DeviceContactsListener listener) {
         if (!connected.get()) {
             if (listener != null) {
@@ -1717,6 +1778,131 @@ public class BtConnectionManager {
         enqueueCommand(cmd);
         Log.d(TAG, "CMD_ADD_UPDATE_CONTACT favorite queued name=" + contact.name);
         return true;
+    }
+
+    public boolean addOrUpdateDeviceContact(MeshDeviceContact contact) {
+        if (!connected.get() || contact == null) {
+            return false;
+        }
+        byte[] cmd = buildAddUpdateContactCommand(contact, contact.flags);
+        if (cmd == null) {
+            return false;
+        }
+        enqueueCommand(cmd);
+        Log.d(TAG, "CMD_ADD_UPDATE_CONTACT queued name=" + contact.name + " type=" + contact.type);
+        return true;
+    }
+
+    /**
+     * Login to a repeater or room server ({@code CMD_SEND_LOGIN}). Posts are pushed after success.
+     */
+    public boolean sendRoomLogin(String pubKeyHex, @Nullable String password) {
+        if (!connected.get()) {
+            return false;
+        }
+        byte[] pubKey = pubKeyPrefixBytes(pubKeyHex, CONTACT_PUB_KEY_BYTES);
+        if (pubKey == null) {
+            Log.w(TAG, "Room login aborted: invalid pubkey");
+            return false;
+        }
+        byte[] cmd = buildSendLoginCommand(pubKey, password != null ? password : "");
+        enqueueCommand(cmd);
+        Log.d(TAG, "CMD_SEND_LOGIN queued prefix="
+                + bytesToHex(pubKey, 0, Math.min(6, pubKey.length)));
+        return true;
+    }
+
+    public boolean sendContactCliMessage(String pubKeyHex, String cliCommand) {
+        if (!connected.get() || cliCommand == null || cliCommand.trim().isEmpty()) {
+            return false;
+        }
+        byte[] prefix = pubKeyPrefixBytes(pubKeyHex, 6);
+        if (prefix == null) {
+            return false;
+        }
+        byte[] cmd = buildSendTxtMsgCommand(prefix, cliCommand.trim(), TXT_TYPE_CLI_DATA);
+        if (cmd == null) {
+            return false;
+        }
+        enqueueCommand(cmd);
+        Log.d(TAG, "CLI to contact prefix=" + bytesToHex(prefix, 0, prefix.length)
+                + " cmd=" + cliCommand.trim());
+        return true;
+    }
+
+    /** Burst-drain the companion message queue (room sync after login). */
+    public void requestMessageDrain(int count) {
+        if (!connected.get() || count <= 0) {
+            return;
+        }
+        int n = Math.min(count, 64);
+        for (int i = 0; i < n; i++) {
+            enqueueCommand(buildGetNextMessageCommand());
+        }
+    }
+
+    /** After room login, keep draining aggressively while the BBS pushes stored posts. */
+    public void beginRoomPostSyncSession() {
+        roomPostSyncUntilMs = System.currentTimeMillis() + ROOM_POST_SYNC_BASE_MS;
+    }
+
+    public void extendRoomPostSyncSession() {
+        long extendTo = System.currentTimeMillis() + ROOM_POST_SYNC_EXTEND_MS;
+        roomPostSyncUntilMs = Math.max(roomPostSyncUntilMs, extendTo);
+    }
+
+    public boolean isRoomPostSyncSessionActive() {
+        return roomPostSyncUntilMs > 0
+                && System.currentTimeMillis() <= roomPostSyncUntilMs;
+    }
+
+    public void endRoomPostSyncSession() {
+        roomPostSyncUntilMs = 0L;
+    }
+
+    public void cancelRoomContactPrepare() {
+        if (ioHandler != null && pendingRoomContactPrepareStep != null) {
+            ioHandler.removeCallbacks(pendingRoomContactPrepareStep);
+            pendingRoomContactPrepareStep = null;
+        }
+    }
+
+    /**
+     * Staged remove/re-add so the companion treats the room as a new contact ({@code sync_since=0})
+     * before {@link #sendRoomLogin} runs.
+     */
+    public void prepareRoomContactForFullHistorySync(
+            MeshDeviceContact contact, @Nullable Runnable whenReady) {
+        cancelRoomContactPrepare();
+        if (contact == null || !connected.get()) {
+            if (whenReady != null) {
+                mainHandler.post(whenReady);
+            }
+            return;
+        }
+        removeDeviceContact(contact);
+        pendingRoomContactPrepareStep = () -> {
+            pendingRoomContactPrepareStep = null;
+            if (!connected.get()) {
+                return;
+            }
+            addOrUpdateDeviceContactFavorite(contact);
+            if (whenReady != null && ioHandler != null) {
+                ioHandler.postDelayed(() -> mainHandler.post(whenReady),
+                        ROOM_CONTACT_ADD_SETTLE_MS);
+            }
+        };
+        if (ioHandler != null) {
+            ioHandler.postDelayed(pendingRoomContactPrepareStep, ROOM_CONTACT_REMOVE_SETTLE_MS);
+        }
+    }
+
+    /**
+     * Remove and re-add a room contact so the companion radio resets {@code sync_since}
+     * and the next login requests a full post history sync.
+     */
+    public void resetRoomContactForFreshSync(MeshDeviceContact contact) {
+        prepareRoomContactForFullHistorySync(contact, null);
     }
 
     /**
@@ -1839,7 +2025,7 @@ public class BtConnectionManager {
             Log.w(TAG, "Native DM aborted: invalid pubkey hex");
             return false;
         }
-        byte[] cmd = buildSendTxtMsgCommand(prefix, text.trim());
+        byte[] cmd = buildSendTxtMsgCommand(prefix, text.trim(), TXT_TYPE_PLAIN);
         if (cmd == null) {
             return false;
         }
@@ -2044,6 +2230,39 @@ public class BtConnectionManager {
         }
         enqueueCommand(new byte[]{CMD_SEND_SELF_ADVERT});
         return true;
+    }
+
+    /**
+     * Flood a MeshCore node-discover request for nearby repeaters (companion
+     * {@code CMD_SEND_CONTROL_DATA} / {@code CTL_TYPE_NODE_DISCOVER_REQ}).
+     */
+    public boolean sendNodeDiscoverRequest() {
+        if (!connected.get()) {
+            return false;
+        }
+        byte[] tagBytes = new byte[4];
+        new java.security.SecureRandom().nextBytes(tagBytes);
+        int tag = ((tagBytes[0] & 0xFF))
+                | ((tagBytes[1] & 0xFF) << 8)
+                | ((tagBytes[2] & 0xFF) << 16)
+                | ((tagBytes[3] & 0xFF) << 24);
+        pendingNodeDiscoverTag = tag;
+        pendingNodeDiscoverUntilMs = System.currentTimeMillis() + 60_000L;
+        byte[] cmd = new byte[11];
+        cmd[0] = CMD_SEND_CONTROL_DATA;
+        cmd[1] = CTL_TYPE_NODE_DISCOVER_REQ;
+        cmd[2] = (byte) (1 << ADV_TYPE_REPEATER);
+        System.arraycopy(tagBytes, 0, cmd, 3, 4);
+        // since = 0 (discover all repeaters regardless of last-mod time)
+        cmd[7] = cmd[8] = cmd[9] = cmd[10] = 0;
+        enqueueCommand(cmd);
+        Log.d(TAG, "Node discover request queued tag=" + Integer.toHexString(tag));
+        return true;
+    }
+
+    public boolean isNodeDiscoverSessionActive() {
+        return pendingNodeDiscoverTag != 0
+                && System.currentTimeMillis() <= pendingNodeDiscoverUntilMs;
     }
 
     public void addBeforeDisconnectHook(Runnable hook) {
@@ -2339,7 +2558,19 @@ public class BtConnectionManager {
         return buf.array();
     }
 
-    private byte[] buildSendTxtMsgCommand(byte[] pubKeyPrefix6, String text) {
+    private byte[] buildSendLoginCommand(byte[] pubKey32, String password) {
+        if (pubKey32 == null || pubKey32.length != CONTACT_PUB_KEY_BYTES) {
+            return null;
+        }
+        byte[] pwd = (password != null ? password : "").getBytes(StandardCharsets.UTF_8);
+        ByteBuffer buf = ByteBuffer.allocate(1 + CONTACT_PUB_KEY_BYTES + pwd.length);
+        buf.put(CMD_SEND_LOGIN);
+        buf.put(pubKey32);
+        buf.put(pwd);
+        return buf.array();
+    }
+
+    private byte[] buildSendTxtMsgCommand(byte[] pubKeyPrefix6, String text, byte txtType) {
         if (pubKeyPrefix6 == null || pubKeyPrefix6.length != 6) {
             return null;
         }
@@ -2347,7 +2578,7 @@ public class BtConnectionManager {
         ByteBuffer buf = ByteBuffer.allocate(13 + msg.length);
         buf.order(ByteOrder.LITTLE_ENDIAN);
         buf.put(CMD_SEND_TXT_MSG);
-        buf.put(TXT_TYPE_PLAIN);
+        buf.put(txtType);
         buf.put((byte) 0x00); // attempt
         buf.putInt((int) (System.currentTimeMillis() / 1000L));
         buf.put(pubKeyPrefix6);
@@ -2397,8 +2628,29 @@ public class BtConnectionManager {
                 return;
             }
         }
+        if (t == RESP_CODE_ERR) {
+            if (pkt.length >= 2) {
+                int err = pkt[1] & 0xFF;
+                Log.w(TAG, "Companion ERR code=" + err);
+                for (MeshRoomLoginListener l : meshRoomLoginListeners) {
+                    try {
+                        l.onCompanionCommandError(err);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            return;
+        }
         if (t == PUSH_MESSAGES_WAITING) {
-            enqueueCommand(buildGetNextMessageCommand());
+            requestMessageDrain(isRoomPostSyncSessionActive() ? 32 : 4);
+            return;
+        }
+        if (t == PUSH_CODE_LOGIN_SUCCESS) {
+            handleRoomLoginPush(pkt, true);
+            return;
+        }
+        if (t == PUSH_CODE_LOGIN_FAIL) {
+            handleRoomLoginPush(pkt, false);
             return;
         }
         if (t == PUSH_CODE_LOG_RX_DATA) {
@@ -2444,6 +2696,11 @@ public class BtConnectionManager {
             enqueueCommand(buildGetNextMessageCommand());
             return;
         }
+        if (t == PUSH_CODE_CONTROL_DATA) {
+            handleNodeDiscoverControlData(pkt);
+            enqueueCommand(buildGetNextMessageCommand());
+            return;
+        }
         if (t == PUSH_CODE_NEW_ADVERT || t == PUSH_CODE_ADVERT || t == RESP_CODE_CONTACT) {
             if (t == PUSH_CODE_ADVERT) {
                 requestFullContactForAdvertRefresh(pkt);
@@ -2471,9 +2728,19 @@ public class BtConnectionManager {
         } else if (t == RESP_CHANNEL_MSG_V3) {
             message = extractChannelText(pkt, true);
         } else if (t == RESP_CONTACT_MSG) {
-            message = extractContactText(pkt, false);
+            MeshContactInboundMessage inbound = parseContactInboundMessage(pkt, false);
+            if (inbound != null && inbound.text != null && !inbound.text.trim().isEmpty()) {
+                deliverContactInboundMessage(inbound);
+            }
+            enqueueCommand(buildGetNextMessageCommand());
+            return;
         } else if (t == RESP_CONTACT_MSG_V3) {
-            message = extractContactText(pkt, true);
+            MeshContactInboundMessage inbound = parseContactInboundMessage(pkt, true);
+            if (inbound != null && inbound.text != null && !inbound.text.trim().isEmpty()) {
+                deliverContactInboundMessage(inbound);
+            }
+            enqueueCommand(buildGetNextMessageCommand());
+            return;
         }
         if (message != null) {
             int envPathLen = 0;
@@ -2495,20 +2762,94 @@ public class BtConnectionManager {
             if (routed != null) {
                 Log.d(TAG, "RX mesh env len=" + routed.length());
                 handleMeshMessage(routed, envPathLen);
-            } else if (t == RESP_CONTACT_MSG || t == RESP_CONTACT_MSG_V3) {
-                // Native pubkey-to-pubkey DM (plain text, no UVAX1|/__UVGW__ envelope).
-                // Route it into ATAK GeoChat keyed by the sender's pubkey prefix.
-                String senderPrefixHex = extractContactSenderPubKeyPrefix(pkt, t == RESP_CONTACT_MSG_V3);
-                if (senderPrefixHex != null && !senderPrefixHex.isEmpty()
-                        && !message.trim().isEmpty()) {
-                    notifyNativeDirectMessage(senderPrefixHex, message.trim());
-                    packetRouter.routeNativeMeshDm(senderPrefixHex, message.trim());
-                }
             } else {
                 Log.d(TAG, "RX non-env text len=" + message.length());
             }
             // Drain firmware queue quickly while messages are available.
             enqueueCommand(buildGetNextMessageCommand());
+        }
+    }
+
+    private void deliverContactInboundMessage(MeshContactInboundMessage inbound) {
+        notifyNativeContactMessage(inbound);
+        if (inbound.txtType == TXT_TYPE_SIGNED_PLAIN) {
+            // Room posts arrive one at a time (~1.2s apart); keep draining while syncing.
+            if (isRoomPostSyncSessionActive()) {
+                extendRoomPostSyncSession();
+                scheduleRoomPostFollowUpDrains();
+            }
+            return;
+        }
+        if (inbound.txtType != TXT_TYPE_CLI_DATA) {
+            packetRouter.routeNativeMeshDm(inbound.senderPubKeyPrefixHex, inbound.text.trim());
+        }
+    }
+
+    @Nullable
+    private MeshContactInboundMessage parseContactInboundMessage(byte[] pkt, boolean v3) {
+        if (pkt == null) {
+            return null;
+        }
+        int prefixOff = v3 ? 4 : 1;
+        int txtTypeIndex = v3 ? 11 : 8;
+        int textOff = v3 ? 16 : 13;
+        if (pkt.length < prefixOff + 6 || pkt.length < txtTypeIndex + 1) {
+            return null;
+        }
+        String senderPrefix = bytesToHex(pkt, prefixOff, 6);
+        byte txtType = pkt[txtTypeIndex];
+        String authorPrefix = null;
+        if (txtType == TXT_TYPE_SIGNED_PLAIN && pkt.length >= textOff + 4) {
+            authorPrefix = bytesToHex(pkt, textOff, 4);
+            textOff += 4;
+        }
+        if (pkt.length <= textOff) {
+            return null;
+        }
+        String text = new String(pkt, textOff, pkt.length - textOff, StandardCharsets.UTF_8);
+        return new MeshContactInboundMessage(senderPrefix, text, txtType & 0xFF, authorPrefix);
+    }
+
+    private void handleRoomLoginPush(byte[] pkt, boolean success) {
+        String prefix = null;
+        int permissions = 0;
+        if (pkt != null && pkt.length >= 8) {
+            permissions = pkt[1] & 0xFF;
+            prefix = bytesToHex(pkt, 2, 6);
+        }
+        Log.d(TAG, "Room login " + (success ? "OK" : "FAIL") + " prefix=" + prefix
+                + " perm=" + permissions);
+        if (prefix == null) {
+            return;
+        }
+        for (MeshRoomLoginListener l : meshRoomLoginListeners) {
+            try {
+                if (success) {
+                    l.onRoomLoginSuccess(prefix, permissions);
+                } else {
+                    l.onRoomLoginFail(prefix);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        if (success) {
+            beginRoomPostSyncSession();
+            requestMessageDrain(16);
+            scheduleRoomPostFollowUpDrains();
+        }
+    }
+
+    private void scheduleRoomPostFollowUpDrains() {
+        if (ioHandler == null) {
+            return;
+        }
+        long[] delays = {1200L, 2500L, 5000L, 8000L, 12000L};
+        for (long delay : delays) {
+            ioHandler.postDelayed(() -> {
+                if (connected.get() && isRoomPostSyncSessionActive()) {
+                    requestMessageDrain(8);
+                }
+            }, delay);
         }
     }
 
@@ -2864,6 +3205,50 @@ public class BtConnectionManager {
         }
     }
 
+    private void handleNodeDiscoverControlData(byte[] pkt) {
+        if (pkt == null || pkt.length < 4 + 6 + 32) {
+            return;
+        }
+        if (!isNodeDiscoverSessionActive()) {
+            return;
+        }
+        int payloadOff = 4;
+        int typeByte = pkt[payloadOff] & 0xFF;
+        if ((typeByte & 0xF0) != (CTL_TYPE_NODE_DISCOVER_RESP & 0xFF)) {
+            return;
+        }
+        if ((typeByte & 0x0F) != ADV_TYPE_REPEATER) {
+            return;
+        }
+        int tagOff = payloadOff + 2;
+        int tag = (pkt[tagOff] & 0xFF)
+                | ((pkt[tagOff + 1] & 0xFF) << 8)
+                | ((pkt[tagOff + 2] & 0xFF) << 16)
+                | ((pkt[tagOff + 3] & 0xFF) << 24);
+        if (tag != pendingNodeDiscoverTag) {
+            return;
+        }
+        int pubOff = tagOff + 4;
+        if (pkt.length < pubOff + 32) {
+            return;
+        }
+        byte[] contactFrame = new byte[33];
+        contactFrame[0] = PUSH_CODE_ADVERT;
+        System.arraycopy(pkt, pubOff, contactFrame, 1, 32);
+        String pubKeyHex = bytesToHex(contactFrame, 1, 32);
+        long now = System.currentTimeMillis();
+        Long last = contactQueryThrottleMsByPubKey.get(pubKeyHex);
+        if (last != null && (now - last) < 1500L) {
+            return;
+        }
+        contactQueryThrottleMsByPubKey.put(pubKeyHex, now);
+        byte[] cmd = buildGetContactByKeyCommand(contactFrame);
+        if (cmd != null) {
+            enqueueCommand(cmd);
+            Log.d(TAG, "Node discover resp → requesting contact pubkey=" + pubKeyHex);
+        }
+    }
+
     private void maybeToastRepeaterDiscovery(RepeaterAdvert advert) {
         if (advert == null || context == null) {
             return;
@@ -3138,10 +3523,10 @@ public class BtConnectionManager {
         return new String(pkt, off, pkt.length - off, StandardCharsets.UTF_8);
     }
 
-    private void notifyNativeDirectMessage(String senderPubKeyPrefixHex, String text) {
+    private void notifyNativeContactMessage(MeshContactInboundMessage message) {
         for (MeshNativeDmListener l : meshNativeDmListeners) {
             try {
-                l.onNativeDirectMessage(senderPubKeyPrefixHex, text);
+                l.onNativeContactMessage(message);
             } catch (Exception ignored) {
             }
         }
@@ -3223,7 +3608,11 @@ public class BtConnectionManager {
         i += CONTACT_PUB_KEY_BYTES;
         out[i++] = (byte) (contact.type & 0xFF);
         out[i++] = (byte) (flags & 0xFF);
-        out[i++] = (byte) (contact.outPathLen & 0xFF);
+        int pathLen = contact.outPathLen;
+        if (pathLen <= 0 || pathLen > 63) {
+            pathLen = OUT_PATH_UNKNOWN;
+        }
+        out[i++] = (byte) (pathLen & 0xFF);
         i += CONTACT_PATH_BYTES;
         byte[] nameBytes = (contact.name != null ? contact.name : "")
                 .getBytes(StandardCharsets.UTF_8);

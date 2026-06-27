@@ -100,6 +100,30 @@ public final class MeshDeviceContactCache {
                 .apply();
     }
 
+    public static void upsertFromDeviceContact(Context context, @Nullable String deviceAddress,
+                                               @NonNull BtConnectionManager.MeshDeviceContact contact) {
+        String addr = normalizeDeviceAddress(deviceAddress);
+        if (addr == null || contact.pubKeyHex == null) {
+            return;
+        }
+        String key = contact.pubKeyHex.trim().toUpperCase(Locale.US);
+        List<BtConnectionManager.MeshDeviceContact> contacts = load(context, addr);
+        boolean replaced = false;
+        for (int i = 0; i < contacts.size(); i++) {
+            BtConnectionManager.MeshDeviceContact existing = contacts.get(i);
+            if (existing.pubKeyHex != null
+                    && existing.pubKeyHex.toUpperCase(Locale.US).equals(key)) {
+                contacts.set(i, contact);
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            contacts.add(contact);
+        }
+        save(context, addr, contacts);
+    }
+
     public static void updateFavoriteFlag(Context context, @Nullable String deviceAddress,
                                           @Nullable String pubKeyHex, boolean favorite) {
         String addr = normalizeDeviceAddress(deviceAddress);

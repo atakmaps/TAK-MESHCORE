@@ -678,6 +678,15 @@
                 android:background="@drawable/bg_meshcore_button_yellow" />
 
             <Button
+                android:id="@+id/btn_discover_repeaters"
+                style="@style/MeshcorePillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Discover Repeaters"
+                android:background="@drawable/bg_meshcore_button_yellow" />
+
+            <Button
                 android:id="@+id/btn_clear_mesh_contacts"
                 style="@style/MeshcorePillButton.Beacon"
                 android:layout_width="match_parent"
@@ -686,14 +695,14 @@
                 android:text="Clear All Mesh Contacts"
                 android:background="@drawable/bg_meshcore_button_yellow" />
 
-            <!-- Add Channel button — tap to subscribe to a new channel -->
+            <!-- Channel Management — view joined channels or add new ones -->
             <Button
                 android:id="@+id/btn_add_mesh_channel"
                 style="@style/MeshcorePillButton.Beacon"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="+ Add Channel"
+                android:text="Channel Management"
                 android:background="@drawable/bg_meshcore_button_yellow" />
 
             <Button
