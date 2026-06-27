@@ -101,6 +101,8 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
     private Runnable beaconRunnable;
     private Runnable beaconWaitForPositionRunnable;
     private boolean forceFirstPostConnectBeacon = false;
+    private static final long STARTUP_BEACON_DELAY_MS = 30_000L;
+    private static final long STARTUP_POSITION_POLL_MS = 2_000L;
     private final SmartBeacon smartBeacon = new SmartBeacon();
     private android.location.LocationManager gpsLocationManager;
     private android.location.LocationListener gpsLocationListener;
@@ -379,35 +381,46 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         beaconRunnable = new Runnable() {
             @Override
             public void run() {
-                sendBeaconIfConnected(forceFirstPostConnectBeacon);
-                forceFirstPostConnectBeacon = false;
+                if (forceFirstPostConnectBeacon) {
+                    if (!hasValidSelfPosition()) {
+                        Log.d(TAG, "Startup beacon delayed — waiting for valid self marker position");
+                        beaconHandler.postDelayed(this, STARTUP_POSITION_POLL_MS);
+                        return;
+                    }
+                    if (!sendBeaconIfConnected(true)) {
+                        beaconHandler.postDelayed(this, STARTUP_POSITION_POLL_MS);
+                        return;
+                    }
+                    forceFirstPostConnectBeacon = false;
+                } else {
+                    sendBeaconIfConnected(false);
+                }
                 long nextCheckMs = getBeaconTimerDelayMs();
                 beaconHandler.postDelayed(this, nextCheckMs);
             }
         };
         if (hasValidSelfPosition()) {
-            Log.d(TAG, "Beacon timer armed: valid self position already present");
-            beaconHandler.postDelayed(beaconRunnable, 30_000L);
+            Log.d(TAG, "Beacon timer armed: valid self marker position already present");
+            beaconHandler.postDelayed(beaconRunnable, STARTUP_BEACON_DELAY_MS);
             return;
         }
         beaconWaitForPositionRunnable = new Runnable() {
             @Override
             public void run() {
-                if (beaconHandler == null
-                        || btConnectionManager == null || !btConnectionManager.isConnected()) {
+                if (beaconHandler == null) {
                     return;
                 }
                 if (hasValidSelfPosition()) {
-                    Log.d(TAG, "Valid self position acquired; startup beacon in 30s");
-                    beaconHandler.postDelayed(beaconRunnable, 30_000L);
+                    Log.d(TAG, "Valid self marker position acquired; startup beacon in 30s");
+                    beaconHandler.postDelayed(beaconRunnable, STARTUP_BEACON_DELAY_MS);
                     beaconWaitForPositionRunnable = null;
                     return;
                 }
-                beaconHandler.postDelayed(this, 2_000L);
+                beaconHandler.postDelayed(this, STARTUP_POSITION_POLL_MS);
             }
         };
-        Log.d(TAG, "Beacon timer waiting for valid self position before startup countdown");
-        beaconHandler.postDelayed(beaconWaitForPositionRunnable, 2_000L);
+        Log.d(TAG, "Beacon timer waiting for valid self marker position before startup countdown");
+        beaconHandler.postDelayed(beaconWaitForPositionRunnable, STARTUP_POSITION_POLL_MS);
     }
 
     private void stopBeaconTimer() {
@@ -449,10 +462,12 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
             return false;
         }
         GeoPoint gp = self.getPoint();
-        return gp != null && gp.isValid();
+        return gp != null && gp.isValid()
+                && !(Math.abs(gp.getLatitude()) < 0.000001
+                && Math.abs(gp.getLongitude()) < 0.000001);
     }
 
-    private void sendBeaconIfConnected(boolean forceImmediate) {
+    private boolean sendBeaconIfConnected(boolean forceImmediate) {
         if (btConnectionManager == null || !btConnectionManager.isConnected()) {
             Log.d(TAG, (forceImmediate ? "Startup" : "Periodic")
                     + " beacon skipped: MeshCore not connected");
@@ -460,10 +475,19 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 dropDownReceiver.appendPluginLog(
                         "Startup beacon not sent — MeshCore not connected");
             }
-            return;
+            return false;
+        }
+        if (btConnectionManager.isRadioSilenceEnabled()) {
+            Log.d(TAG, (forceImmediate ? "Startup" : "Periodic")
+                    + " beacon skipped: mesh radio silence");
+            if (forceImmediate && dropDownReceiver != null) {
+                dropDownReceiver.appendPluginLog(
+                        "Startup beacon not sent — mesh radio silence");
+            }
+            return false;
         }
         if (cotBridge == null || mapView == null) {
-            return;
+            return false;
         }
 
         try {
@@ -473,9 +497,17 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                     dropDownReceiver.appendPluginLog(
                             "Startup beacon not sent — no self-location available");
                 }
-                return;
+                return false;
             }
             GeoPoint gp = self.getPoint();
+            if (gp == null || !gp.isValid()
+                    || (Math.abs(gp.getLatitude()) < 0.000001
+                    && Math.abs(gp.getLongitude()) < 0.000001)) {
+                if (forceImmediate) {
+                    Log.d(TAG, "Startup beacon skipped: no valid self marker position yet");
+                }
+                return false;
+            }
 
             double speedMs = 0.0;
             double course = 0.0;
@@ -541,7 +573,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                         + " smartFire=" + smartFire + " floorFire=" + floorFire
                         + " floorSec=" + fixedIntervalSec);
                 if (!smartFire && !floorFire) {
-                    return;
+                    return false;
                 }
                 if (meshLimitedBeacon) {
                     if (smartFire) {
@@ -566,7 +598,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                     intervalSec = MeshBeaconLimits.capIntervalSec(beaconCtx, intervalSec);
                 }
                 if (smartBeacon.elapsedSinceLastBeaconSec() < intervalSec) {
-                    return;
+                    return false;
                 }
                 if (meshLimitedBeacon) {
                     meshLimitSec = intervalSec;
@@ -574,20 +606,30 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 smartBeacon.recordBeacon(course);
             }
 
-            cotBridge.sendPositionOverRadio(
+            boolean txOk = cotBridge.sendPositionOverRadio(
                     gp.getLatitude(), gp.getLongitude(),
                     gp.getAltitude(), (float) speedMs, (float) course, -1);
+            if (!txOk) {
+                String beaconKind = forceImmediate ? "Startup" : "Periodic";
+                Log.w(TAG, beaconKind + " OPENRL beacon TX failed");
+                if (dropDownReceiver != null) {
+                    dropDownReceiver.appendPluginLog(beaconKind + " beacon not sent — transmit blocked");
+                }
+                return false;
+            }
             String beaconKind = forceImmediate ? "Startup" : "Periodic";
             Log.d(TAG, beaconKind + " MeshCore GPS beacon sent"
                     + (meshLimitedBeacon ? " [mesh limits]" : ""));
             logBeaconSentToPluginUi(formatBeaconSentLog(
                     beaconKind, meshLimitedBeacon, meshLimitSec));
+            return true;
         } catch (Exception e) {
             Log.e(TAG, "Error sending periodic beacon", e);
             if (dropDownReceiver != null) {
                 dropDownReceiver.appendPluginLog((forceImmediate ? "Startup" : "Periodic")
                         + " beacon not sent — " + e.getMessage());
             }
+            return false;
         }
     }
 

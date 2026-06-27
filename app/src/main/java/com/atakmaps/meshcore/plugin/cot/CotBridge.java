@@ -2265,10 +2265,13 @@ public class CotBridge {
 
     /**
      * Send local GPS position over radio as compact GPS packet.
+     * @return true when the frame was queued for transmit
      */
-    public void sendPositionOverRadio(double lat, double lon, double alt,
+    public boolean sendPositionOverRadio(double lat, double lon, double alt,
                                       float speed, float course, int battery) {
-        if (btManager == null || !btManager.isConnected()) return;
+        if (btManager == null || !btManager.isConnected()) {
+            return false;
+        }
 
         com.atakmaps.meshcore.plugin.protocol.RfTxArbitrator.get().markOpenRlTxStart();
         try {
@@ -2285,7 +2288,7 @@ public class CotBridge {
                 packetBytes = encryptionManager.encrypt(packetBytes);
                 if (packetBytes == null) {
                     Log.e(TAG, "Encryption failed — aborting GPS send");
-                    return;
+                    return false;
                 }
             }
 
@@ -2294,9 +2297,10 @@ public class CotBridge {
             byte[] ax25 = frame.encode();
 
             Log.d(TAG, "Sending GPS beacon: " + ax25.length + " bytes");
-            btManager.sendKissFrame(ax25);
+            return btManager.sendKissFrame(ax25);
         } catch (Exception e) {
             Log.e(TAG, "Error sending position over radio", e);
+            return false;
         } finally {
             com.atakmaps.meshcore.plugin.protocol.RfTxArbitrator.get().markOpenRlTxEnd();
         }

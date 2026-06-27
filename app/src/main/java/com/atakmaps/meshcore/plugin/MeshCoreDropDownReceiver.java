@@ -5049,6 +5049,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             appendLog("Manual beacon not sent — MeshCore not connected");
             return;
         }
+        if (btManager.isRadioSilenceEnabled()) {
+            appendLog("Manual beacon not sent — mesh radio silence");
+            return;
+        }
         com.atakmap.android.maps.MapItem self = getMapView().getSelfMarker();
         if (!(self instanceof com.atakmap.android.maps.PointMapItem)) {
             appendLog("Manual beacon not sent — no self-location available");
@@ -5056,15 +5060,24 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         com.atakmap.coremap.maps.coords.GeoPoint gp =
                 ((com.atakmap.android.maps.PointMapItem) self).getPoint();
-        cotBridge.sendPositionOverRadio(
+        if (gp == null || !gp.isValid()
+                || (Math.abs(gp.getLatitude()) < 0.000001
+                && Math.abs(gp.getLongitude()) < 0.000001)) {
+            appendLog("Manual beacon not sent — no valid self-location available");
+            return;
+        }
+        if (cotBridge.sendPositionOverRadio(
                 gp.getLatitude(),
                 gp.getLongitude(),
                 gp.getAltitude(),
                 0f,
                 0f,
-                -1);
-        appendLog("Manual beacon sent (MeshCore OPENRL)");
-        showActionToast("Beacon Sent");
+                -1)) {
+            appendLog("Manual beacon sent (MeshCore OPENRL)");
+            showActionToast("Beacon Sent");
+        } else {
+            appendLog("Manual beacon not sent — transmit blocked");
+        }
     }
 
     private void sendPing() {

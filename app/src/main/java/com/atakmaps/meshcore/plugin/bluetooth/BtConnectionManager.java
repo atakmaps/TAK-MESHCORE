@@ -1551,25 +1551,76 @@ public class BtConnectionManager {
 
         int channel = getMeshChannelIndex();
         int msgId = outboundMsgId.getAndIncrement() & 0x7fffffff;
-        int total = (ax25Frame.length + MAX_RAW_AX25_CHUNK - 1) / MAX_RAW_AX25_CHUNK;
-        Log.d(TAG, "sendKissFrame over mesh bytes=" + ax25Frame.length + " chunks=" + total);
-        for (int i = 0; i < total; i++) {
-            int off = i * MAX_RAW_AX25_CHUNK;
-            int len = Math.min(MAX_RAW_AX25_CHUNK, ax25Frame.length - off);
-            byte[] chunk = new byte[len];
-            System.arraycopy(ax25Frame, off, chunk, 0, len);
-            String b64 = Base64.encodeToString(chunk, Base64.NO_WRAP);
-            String payload = ENV_PREFIX + msgId + "|" + (i + 1) + "|" + total + "|" + b64;
-            if (payload.length() > MAX_MESH_MESSAGE_LEN) {
-                Log.w(TAG, "Mesh payload too long, dropping frame");
-                return false;
-            }
-            byte[] payloadBytes = payload.getBytes(StandardCharsets.UTF_8);
-            Log.d(TAG, "chunk " + (i + 1) + "/" + total + " datagramBytes=" + payloadBytes.length);
-            enqueueCommand(buildSendChannelDataCommand(channel, ATAK_DATA_TYPE_AX25, payloadBytes));
+        String msgIdStr = String.valueOf(msgId);
+        int total = sendAx25EnvelopeChunks(channel, msgIdStr, ax25Frame);
+        if (total <= 0) {
+            Log.w(TAG, "sendKissFrame failed: envelope too large for mesh channel");
+            return false;
         }
+        Log.d(TAG, "TX ATAK_DATA ch=" + channel + " ax25=" + ax25Frame.length + " bytes"
+                + " chunks=" + total);
         packetRouter.notifyPacketTransmitted();
         return true;
+    }
+
+    /**
+     * Send UVAX1 envelope chunk(s). Prefer a single companion frame when the full AX.25
+     * frame fits the 130-char mesh envelope limit (typical OPENRL GPS beacons).
+     */
+    private int sendAx25EnvelopeChunks(int channel, String msgIdStr, byte[] ax25Frame) {
+        String singlePayload = buildAx25EnvelopePayload(msgIdStr, 1, 1, ax25Frame);
+        if (singlePayload != null && singlePayload.length() <= MAX_MESH_MESSAGE_LEN) {
+            enqueueCommand(buildSendChannelDataCommand(
+                    channel,
+                    ATAK_DATA_TYPE_AX25,
+                    singlePayload.getBytes(StandardCharsets.UTF_8)));
+            return 1;
+        }
+
+        int chunkSize = maxRawAx25ChunkBytes(msgIdStr, MAX_RAW_AX25_CHUNK);
+        if (chunkSize < 1) {
+            return 0;
+        }
+        int total = (ax25Frame.length + chunkSize - 1) / chunkSize;
+        for (int i = 0; i < total; i++) {
+            int off = i * chunkSize;
+            int len = Math.min(chunkSize, ax25Frame.length - off);
+            byte[] chunk = new byte[len];
+            System.arraycopy(ax25Frame, off, chunk, 0, len);
+            String payload = buildAx25EnvelopePayload(msgIdStr, i + 1, total, chunk);
+            if (payload == null || payload.length() > MAX_MESH_MESSAGE_LEN) {
+                Log.w(TAG, "Mesh payload too long, dropping frame");
+                return 0;
+            }
+            enqueueCommand(buildSendChannelDataCommand(
+                    channel,
+                    ATAK_DATA_TYPE_AX25,
+                    payload.getBytes(StandardCharsets.UTF_8)));
+        }
+        return total;
+    }
+
+    private static String buildAx25EnvelopePayload(String msgIdStr, int seq, int total, byte[] raw) {
+        if (raw == null || raw.length == 0) {
+            return null;
+        }
+        String b64 = Base64.encodeToString(raw, Base64.NO_WRAP);
+        return ENV_PREFIX + msgIdStr + "|" + seq + "|" + total + "|" + b64;
+    }
+
+    /** Max raw bytes per chunk so the UVAX1 envelope stays within {@link #MAX_MESH_MESSAGE_LEN}. */
+    private static int maxRawAx25ChunkBytes(String msgIdStr, int fallback) {
+        int maxRaw = 0;
+        for (int n = 1; n <= fallback; n++) {
+            // Worst-case seq/total digit width for envelope header sizing.
+            String probe = buildAx25EnvelopePayload(msgIdStr, 9, 9, new byte[n]);
+            if (probe != null && probe.length() <= MAX_MESH_MESSAGE_LEN) {
+                maxRaw = n;
+            } else {
+                break;
+            }
+        }
+        return maxRaw > 0 ? maxRaw : fallback;
     }
 
     /**
@@ -2292,7 +2343,9 @@ public class BtConnectionManager {
         if (!connected.get()) {
             return false;
         }
-        enqueueCommand(new byte[]{CMD_SEND_SELF_ADVERT});
+        // Firmware: 1 byte = zero-hop only; 2nd byte 0x01 = flood (mesh-wide discovery).
+        enqueueCommand(new byte[]{CMD_SEND_SELF_ADVERT, 0x01});
+        Log.i(TAG, "sendSelfAdvert queued (flood)");
         return true;
     }
 
@@ -2697,6 +2750,8 @@ public class BtConnectionManager {
                     pendingDeviceContactsList.add(parsed);
                 } else {
                     notifyDeviceContactUpdated(parsed);
+                    // Full contact from advert refresh (0x80) — same payload as NEW_ADVERT.
+                    dispatchMeshAdvertDiscovery(pkt);
                 }
             }
             return;
@@ -2783,32 +2838,12 @@ public class BtConnectionManager {
             enqueueCommand(buildGetNextMessageCommand());
             return;
         }
-        if (t == PUSH_CODE_NEW_ADVERT || t == PUSH_CODE_ADVERT || t == RESP_CODE_CONTACT) {
+        if (t == PUSH_CODE_NEW_ADVERT || t == PUSH_CODE_ADVERT) {
             if (t == PUSH_CODE_ADVERT) {
                 requestFullContactForAdvertRefresh(pkt);
             }
-            MeshAdvert meshAdvert = parseMeshAdvert(pkt);
-            if (meshAdvert != null) {
-                if (!meshAdvert.isRepeater()) {
-                    maybeToastNodeDiscovery(meshAdvert);
-                }
-                notifyMeshAdvert(meshAdvert);
-                if (meshAdvert.advertType == ADV_TYPE_ROOM
-                        && meshAdvert.name != null && !meshAdvert.name.trim().isEmpty()) {
-                    notifyDeviceContactUpdated(new MeshDeviceContact(
-                            meshAdvert.pubKeyHex, ADV_TYPE_ROOM, 0, 0, meshAdvert.name.trim(),
-                            (int) meshAdvert.advertTimestampSec,
-                            meshAdvert.latitude, meshAdvert.longitude, 0));
-                }
-                if (meshAdvert.isRepeater()) {
-                    RepeaterAdvert advert = repeaterAdvertFromMesh(meshAdvert);
-                    maybeToastRepeaterDiscovery(advert);
-                    notifyRepeaterAdvert(advert);
-                }
-            }
-            if (t == PUSH_CODE_NEW_ADVERT || t == PUSH_CODE_ADVERT) {
-                return;
-            }
+            dispatchMeshAdvertDiscovery(pkt);
+            return;
         }
 
         String message = null;
@@ -3276,6 +3311,29 @@ public class BtConnectionManager {
                 advert.latitude,
                 advert.longitude,
                 advert.hasPosition);
+    }
+
+    private void dispatchMeshAdvertDiscovery(byte[] pkt) {
+        MeshAdvert meshAdvert = parseMeshAdvert(pkt);
+        if (meshAdvert == null) {
+            return;
+        }
+        if (!meshAdvert.isRepeater()) {
+            maybeToastNodeDiscovery(meshAdvert);
+        }
+        notifyMeshAdvert(meshAdvert);
+        if (meshAdvert.advertType == ADV_TYPE_ROOM
+                && meshAdvert.name != null && !meshAdvert.name.trim().isEmpty()) {
+            notifyDeviceContactUpdated(new MeshDeviceContact(
+                    meshAdvert.pubKeyHex, ADV_TYPE_ROOM, 0, 0, meshAdvert.name.trim(),
+                    (int) meshAdvert.advertTimestampSec,
+                    meshAdvert.latitude, meshAdvert.longitude, 0));
+        }
+        if (meshAdvert.isRepeater()) {
+            RepeaterAdvert advert = repeaterAdvertFromMesh(meshAdvert);
+            maybeToastRepeaterDiscovery(advert);
+            notifyRepeaterAdvert(advert);
+        }
     }
 
     private void requestFullContactForAdvertRefresh(byte[] pkt) {
