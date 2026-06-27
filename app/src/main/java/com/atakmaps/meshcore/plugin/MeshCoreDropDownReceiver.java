@@ -4974,30 +4974,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private boolean injectMeshGpsIntoAtak(BtConnectionManager.MeshLocationFix fix) {
-        if (fix == null || !fix.isValid()) {
-            return false;
-        }
         MapView mv = getMapView();
-        if (mv == null) {
-            return false;
-        }
-        MetaDataHolder2 data = mv.getMapData();
-        if (data == null) {
-            return false;
-        }
-        com.atakmap.coremap.maps.coords.GeoPoint gp =
-                new com.atakmap.coremap.maps.coords.GeoPoint(fix.latitude, fix.longitude);
-        data.setMetaString("locationSourcePrefix", "mock");
-        data.setMetaBoolean("mockLocationAvailable", true);
-        data.setMetaString("mockLocationSource", "MeshCore GPS");
-        data.setMetaString("mockLocationSourceColor", "#FF00BCD4");
-        data.setMetaBoolean("mockLocationCallsignValid", true);
-        data.setMetaString("mockLocation", gp.toString());
-        data.setMetaLong("mockLocationTime", SystemClock.elapsedRealtime());
-        data.setMetaLong("mockGPSTime", new com.atakmap.coremap.maps.time.CoordinatedTime().getMilliseconds());
-        Intent gpsReceived = new Intent("com.atakmap.android.map.WR_GPS_RECEIVED");
-        AtakBroadcast.getInstance().sendBroadcast(gpsReceived);
-        return true;
+        return com.atakmaps.meshcore.plugin.location.MeshGpsBridge.injectIntoAtak(mv, fix);
     }
 
     private void updateGpsFromMeshcoreNow() {
@@ -5037,24 +5015,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
 
     /** True when the phone's internal GPS chip is reporting a valid fix to ATAK. */
     private boolean isPhoneGpsAvailable() {
-        try {
-            com.atakmap.android.location.framework.LocationProvider internal =
-                    com.atakmap.android.location.framework.LocationManager.getInstance()
-                            .getLocationProvider("internal-gps-chip");
-            if (internal == null || !internal.getEnabled()) {
-                return false;
-            }
-            com.atakmap.android.location.framework.Location loc =
-                    internal.getLastReportedLocation();
-            if (loc == null || !loc.isValid()) {
-                return false;
-            }
-            com.atakmap.coremap.maps.coords.GeoPoint point = loc.getPoint();
-            return point != null && point.isValid();
-        } catch (Exception e) {
-            Log.w(TAG, "Could not evaluate phone GPS state", e);
-            return false;
-        }
+        return com.atakmaps.meshcore.plugin.location.MeshGpsBridge.isPhoneGpsAvailable(getMapView());
     }
 
     private boolean isAugmentMeshPreferenceEnabled(Context ctx) {

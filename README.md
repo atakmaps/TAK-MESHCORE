@@ -37,6 +37,7 @@ adb install -r app/build/outputs/apk/civ/debug/ATAK-Plugin-Meshcore-*.apk
   - `Use MeshCore GPS for Position` — selects node GPS as the advert position source (gated on hardware toggle)
   - `Update ATAK with MeshCore GPS` — one-shot fresh fix request
   - `Augment GPS from MeshCore` — auto-updates ATAK self-position every 2 min when phone GPS is unavailable
+- **ATAK 5.6 radio GPS:** `PluginMeshLocationProvider` registers MeshCore fixes as a first-class ATAK location source (5.6 GPS source toggles) alongside legacy map injection.
 - AES-256-GCM end-to-end encryption for all tunnel traffic (CoT, position, relayed chat) with shared-secret passphrase
 - CoT/waypoint reliability:
   - Minification strips non-essential detail to reduce fragment count

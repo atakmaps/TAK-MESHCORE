@@ -28,6 +28,7 @@ import com.atakmaps.meshcore.plugin.contacts.ContactTracker;
 import com.atakmaps.meshcore.plugin.cot.CotBridge;
 import com.atakmaps.meshcore.plugin.mesh.MeshNodeCachePolicy;
 import com.atakmaps.meshcore.plugin.crypto.EncryptionManager;
+import com.atakmaps.meshcore.plugin.location.MeshGpsBridge;
 import com.atakmaps.meshcore.plugin.mesh.MeshDetailsDropDownReceiver;
 import com.atakmaps.meshcore.plugin.protocol.MeshCoreRadioServices;
 import com.atakmaps.meshcore.plugin.protocol.PacketRouter;
@@ -138,6 +139,8 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         } catch (Exception e) {
             Log.w(TAG, "Could not resolve ATAK callsign", e);
         }
+
+        MeshGpsBridge.installLocationProvider();
 
         cotBridge = new CotBridge(context, view);
         cotBridge.setLocalCallsign(callsign);
@@ -2063,6 +2066,7 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
         } catch (Exception ignored) {
         }
         MeshStatusOverlay.uninstall();
+        MeshGpsBridge.uninstallLocationProvider();
         if (chatBridge != null) {
             chatBridge.dispose();
         }
