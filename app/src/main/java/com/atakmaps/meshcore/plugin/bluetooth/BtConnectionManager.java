@@ -130,6 +130,7 @@ public class BtConnectionManager {
     private static final byte RESP_CODE_CONTACT = 0x03;
     private static final byte RESP_CODE_END_OF_CONTACTS = 0x04;
     private static final int ADV_TYPE_REPEATER = 0x02;
+    public static final int ADV_TYPE_CHAT = 0x01;
     public static final int ADV_TYPE_ROOM = 0x03;
     private static final int CONTACT_PUB_KEY_BYTES = 32;
     private static final int CONTACT_PATH_BYTES = 64;
@@ -204,6 +205,8 @@ public class BtConnectionManager {
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<MeshAdvertListener> meshAdvertListeners =
             new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<MeshDeviceContactUpdateListener> deviceContactUpdateListeners =
+            new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<RepeaterAdvertListener> repeaterAdvertListeners =
             new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<MeshChannelListener> meshChannelListeners =
@@ -229,6 +232,7 @@ public class BtConnectionManager {
     private static final long ROOM_POST_SYNC_EXTEND_MS = 60_000L;
     @Nullable
     private Runnable pendingRoomContactPrepareStep;
+    private volatile boolean roomContactPrepareInProgress = false;
     private final Map<Integer, String> meshChannelNamesByIndex = new ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<Integer, byte[]> channelSecretsByIndex =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -333,15 +337,18 @@ public class BtConnectionManager {
         public final String senderPubKeyPrefixHex;
         public final String text;
         public final int txtType;
+        public final int senderTimestampSec;
         /** Present for {@link #TXT_TYPE_SIGNED_PLAIN} room posts (8 hex chars). */
         @Nullable
         public final String authorPubKeyPrefixHex;
 
         public MeshContactInboundMessage(String senderPubKeyPrefixHex, String text,
-                                         int txtType, @Nullable String authorPubKeyPrefixHex) {
+                                         int txtType, int senderTimestampSec,
+                                         @Nullable String authorPubKeyPrefixHex) {
             this.senderPubKeyPrefixHex = senderPubKeyPrefixHex;
             this.text = text;
             this.txtType = txtType;
+            this.senderTimestampSec = senderTimestampSec;
             this.authorPubKeyPrefixHex = authorPubKeyPrefixHex;
         }
     }
@@ -418,6 +425,11 @@ public class BtConnectionManager {
 
     public interface MeshAdvertListener {
         void onMeshAdvert(MeshAdvert advert);
+    }
+
+    /** Single contact record pushed after advert refresh or {@code CMD_GET_CONTACT_BY_KEY}. */
+    public interface MeshDeviceContactUpdateListener {
+        void onDeviceContactUpdated(MeshDeviceContact contact);
     }
 
     public static final class MeshAdvert {
@@ -1702,6 +1714,16 @@ public class BtConnectionManager {
         meshAdvertListeners.remove(listener);
     }
 
+    public void addMeshDeviceContactUpdateListener(MeshDeviceContactUpdateListener listener) {
+        if (listener != null) {
+            deviceContactUpdateListeners.addIfAbsent(listener);
+        }
+    }
+
+    public void removeMeshDeviceContactUpdateListener(MeshDeviceContactUpdateListener listener) {
+        deviceContactUpdateListeners.remove(listener);
+    }
+
     public void addRepeaterAdvertListener(RepeaterAdvertListener listener) {
         if (listener != null) {
             repeaterAdvertListeners.addIfAbsent(listener);
@@ -1740,6 +1762,22 @@ public class BtConnectionManager {
 
     public void removeMeshRoomLoginListener(MeshRoomLoginListener listener) {
         meshRoomLoginListeners.remove(listener);
+    }
+
+    /** Ask companion radio for the latest contact record (name, path, etc.) by full pubkey. */
+    public void requestContactByPubKeyHex(@Nullable String pubKeyHex) {
+        if (!connected.get() || pubKeyHex == null) {
+            return;
+        }
+        byte[] pubKey = pubKeyPrefixBytes(pubKeyHex, CONTACT_PUB_KEY_BYTES);
+        if (pubKey == null) {
+            return;
+        }
+        byte[] advertFrame = new byte[1 + CONTACT_PUB_KEY_BYTES];
+        advertFrame[0] = PUSH_CODE_ADVERT;
+        System.arraycopy(pubKey, 0, advertFrame, 1, CONTACT_PUB_KEY_BYTES);
+        enqueueCommand(buildGetContactByKeyCommand(advertFrame));
+        Log.d(TAG, "CMD_GET_CONTACT_BY_KEY queued for name/path refresh");
     }
 
     public void requestDeviceContacts(DeviceContactsListener listener) {
@@ -1794,6 +1832,12 @@ public class BtConnectionManager {
     }
 
     /**
+     * Room server skips sync_since refresh on blank-password ACL re-login (MyMesh.cpp).
+     * Send a non-empty sentinel so the server runs the password path and applies sync_since.
+     */
+    private static final String BLANK_ROOM_LOGIN_SENTINEL = ".";
+
+    /**
      * Login to a repeater or room server ({@code CMD_SEND_LOGIN}). Posts are pushed after success.
      */
     public boolean sendRoomLogin(String pubKeyHex, @Nullable String password) {
@@ -1805,10 +1849,16 @@ public class BtConnectionManager {
             Log.w(TAG, "Room login aborted: invalid pubkey");
             return false;
         }
-        byte[] cmd = buildSendLoginCommand(pubKey, password != null ? password : "");
+        String loginPassword = password != null ? password : "";
+        boolean blankPassword = loginPassword.isEmpty();
+        if (blankPassword) {
+            loginPassword = BLANK_ROOM_LOGIN_SENTINEL;
+        }
+        byte[] cmd = buildSendLoginCommand(pubKey, loginPassword);
         enqueueCommand(cmd);
         Log.d(TAG, "CMD_SEND_LOGIN queued prefix="
-                + bytesToHex(pubKey, 0, Math.min(6, pubKey.length)));
+                + bytesToHex(pubKey, 0, Math.min(6, pubKey.length))
+                + " blankSentinel=" + blankPassword);
         return true;
     }
 
@@ -1861,10 +1911,15 @@ public class BtConnectionManager {
     }
 
     public void cancelRoomContactPrepare() {
+        roomContactPrepareInProgress = false;
         if (ioHandler != null && pendingRoomContactPrepareStep != null) {
             ioHandler.removeCallbacks(pendingRoomContactPrepareStep);
             pendingRoomContactPrepareStep = null;
         }
+    }
+
+    public boolean isRoomContactPrepareInProgress() {
+        return roomContactPrepareInProgress;
     }
 
     /**
@@ -1881,15 +1936,24 @@ public class BtConnectionManager {
             return;
         }
         removeDeviceContact(contact);
+        roomContactPrepareInProgress = true;
         pendingRoomContactPrepareStep = () -> {
             pendingRoomContactPrepareStep = null;
             if (!connected.get()) {
+                roomContactPrepareInProgress = false;
                 return;
             }
             addOrUpdateDeviceContactFavorite(contact);
             if (whenReady != null && ioHandler != null) {
-                ioHandler.postDelayed(() -> mainHandler.post(whenReady),
-                        ROOM_CONTACT_ADD_SETTLE_MS);
+                ioHandler.postDelayed(() -> mainHandler.post(() -> {
+                    try {
+                        whenReady.run();
+                    } finally {
+                        roomContactPrepareInProgress = false;
+                    }
+                }), ROOM_CONTACT_ADD_SETTLE_MS);
+            } else {
+                roomContactPrepareInProgress = false;
             }
         };
         if (ioHandler != null) {
@@ -2371,6 +2435,15 @@ public class BtConnectionManager {
         }
     }
 
+    private void notifyDeviceContactUpdated(MeshDeviceContact contact) {
+        for (MeshDeviceContactUpdateListener l : deviceContactUpdateListeners) {
+            try {
+                l.onDeviceContactUpdated(contact);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
     private void notifyRepeaterAdvert(RepeaterAdvert advert) {
         for (RepeaterAdvertListener l : repeaterAdvertListeners) {
             try {
@@ -2611,27 +2684,36 @@ public class BtConnectionManager {
         pruneStaleChunks();
         byte t = pkt[0];
         Log.d(TAG, "RX pkt type=0x" + Integer.toHexString(t & 0xFF) + " len=" + pkt.length);
-        if (deviceContactsFetchActive) {
-            if (t == RESP_CODE_CONTACTS_START) {
+        if (t == RESP_CODE_CONTACTS_START) {
+            if (deviceContactsFetchActive) {
                 handleDeviceContactsStart(pkt);
-                return;
             }
-            if (t == RESP_CODE_CONTACT) {
-                MeshDeviceContact parsed = parseDeviceContactPacket(pkt);
-                if (parsed != null) {
+            return;
+        }
+        if (t == RESP_CODE_CONTACT) {
+            MeshDeviceContact parsed = parseDeviceContactPacket(pkt);
+            if (parsed != null) {
+                if (deviceContactsFetchActive) {
                     pendingDeviceContactsList.add(parsed);
+                } else {
+                    notifyDeviceContactUpdated(parsed);
                 }
-                return;
             }
-            if (t == RESP_CODE_END_OF_CONTACTS) {
+            return;
+        }
+        if (t == RESP_CODE_END_OF_CONTACTS) {
+            if (deviceContactsFetchActive) {
                 finishDeviceContactsFetch(true, null);
-                return;
             }
+            return;
         }
         if (t == RESP_CODE_ERR) {
             if (pkt.length >= 2) {
                 int err = pkt[1] & 0xFF;
                 Log.w(TAG, "Companion ERR code=" + err);
+                if (err == ERR_CODE_NOT_FOUND && roomContactPrepareInProgress) {
+                    return;
+                }
                 for (MeshRoomLoginListener l : meshRoomLoginListeners) {
                     try {
                         l.onCompanionCommandError(err);
@@ -2711,6 +2793,13 @@ public class BtConnectionManager {
                     maybeToastNodeDiscovery(meshAdvert);
                 }
                 notifyMeshAdvert(meshAdvert);
+                if (meshAdvert.advertType == ADV_TYPE_ROOM
+                        && meshAdvert.name != null && !meshAdvert.name.trim().isEmpty()) {
+                    notifyDeviceContactUpdated(new MeshDeviceContact(
+                            meshAdvert.pubKeyHex, ADV_TYPE_ROOM, 0, 0, meshAdvert.name.trim(),
+                            (int) meshAdvert.advertTimestampSec,
+                            meshAdvert.latitude, meshAdvert.longitude, 0));
+                }
                 if (meshAdvert.isRepeater()) {
                     RepeaterAdvert advert = repeaterAdvertFromMesh(meshAdvert);
                     maybeToastRepeaterDiscovery(advert);
@@ -2792,12 +2881,20 @@ public class BtConnectionManager {
         }
         int prefixOff = v3 ? 4 : 1;
         int txtTypeIndex = v3 ? 11 : 8;
+        int timestampOff = v3 ? 12 : 9;
         int textOff = v3 ? 16 : 13;
         if (pkt.length < prefixOff + 6 || pkt.length < txtTypeIndex + 1) {
             return null;
         }
         String senderPrefix = bytesToHex(pkt, prefixOff, 6);
         byte txtType = pkt[txtTypeIndex];
+        int senderTimestampSec = 0;
+        if (pkt.length >= timestampOff + 4) {
+            senderTimestampSec = (pkt[timestampOff] & 0xFF)
+                    | ((pkt[timestampOff + 1] & 0xFF) << 8)
+                    | ((pkt[timestampOff + 2] & 0xFF) << 16)
+                    | ((pkt[timestampOff + 3] & 0xFF) << 24);
+        }
         String authorPrefix = null;
         if (txtType == TXT_TYPE_SIGNED_PLAIN && pkt.length >= textOff + 4) {
             authorPrefix = bytesToHex(pkt, textOff, 4);
@@ -2807,7 +2904,8 @@ public class BtConnectionManager {
             return null;
         }
         String text = new String(pkt, textOff, pkt.length - textOff, StandardCharsets.UTF_8);
-        return new MeshContactInboundMessage(senderPrefix, text, txtType & 0xFF, authorPrefix);
+        return new MeshContactInboundMessage(senderPrefix, text, txtType & 0xFF,
+                senderTimestampSec, authorPrefix);
     }
 
     private void handleRoomLoginPush(byte[] pkt, boolean success) {

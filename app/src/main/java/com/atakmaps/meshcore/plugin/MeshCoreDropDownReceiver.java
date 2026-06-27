@@ -27,6 +27,10 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
+import android.widget.CheckBox;
+import com.atakmaps.meshcore.plugin.bluetooth.MeshContactChatHistoryStore;
+import com.atakmaps.meshcore.plugin.bluetooth.MeshLastChatStore;
+import java.util.LinkedHashMap;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.EditText;
@@ -445,29 +449,51 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private static final int MAX_MESH_CONTACT_CHAT_LINES = 120;
     private static final long DEVICE_CONTACTS_CACHE_STALE_MS = 15L * 60L * 1000L;
     private static final long DEVICE_CONTACTS_CONNECT_SYNC_DELAY_MS = 5000L;
+    private static final String PREF_SUPPRESS_MESH_DM_CONTACT_ALERT =
+            "uvpro_suppress_mesh_dm_contact_alert";
     private volatile boolean deviceContactsFetchInFlight = false;
-    private boolean meshContactChatActive = false;
-    private boolean meshContactChatIsRoom = false;
-    private String meshContactChatPubKeyHex = null;
-    private String meshContactChatDisplayName = null;
-    private String meshContactChatPrefixHex = null;
-    private final LinkedList<String> meshContactChatLines = new LinkedList<>();
+    @Nullable
+    private AlertDialog deviceContactsDialog;
+    private static final class MeshContactChatSession {
+        final String pubKeyHex;
+        String displayName;
+        boolean isRoom;
+        boolean roomLoginSucceededThisConnection;
+        boolean roomLoginFullResetRetryUsed;
+        boolean roomLoginNotFoundRetryUsed;
+        boolean roomEmptyPostSyncRetryUsed;
+        long roomLastOpenedMs;
+        int roomPostsReceivedThisSession;
+        final LinkedList<String> lines = new LinkedList<>();
+
+        MeshContactChatSession(String pubKeyHex, String displayName) {
+            this.pubKeyHex = pubKeyHex;
+            this.displayName = displayName != null && !displayName.trim().isEmpty()
+                    ? displayName.trim() : "Contact";
+        }
+    }
+
+    /** Open contact DM tabs keyed by full device pubkey hex. */
+    private final LinkedHashMap<String, MeshContactChatSession> meshContactChatSessions =
+            new LinkedHashMap<>();
+    /** Non-null when the inline chat panel is showing a contact DM (not a channel). */
+    private String activeMeshContactPubKey = null;
+    @Nullable
+    private String pendingRoomPubKeyHex = null;
     private PendingRoomLoginAction pendingRoomLoginAction = PendingRoomLoginAction.NONE;
     private Runnable pendingRoomLoginTimeoutRunnable = null;
     private Runnable roomPostSyncFinishRunnable = null;
-    private static final long ROOM_LOGIN_TIMEOUT_MS = 90_000L;
-    private static final long ROOM_LOGIN_FULL_RESET_TIMEOUT_MS = 120_000L;
-    private static final long ROOM_EMPTY_POST_SYNC_RETRY_MS = 20_000L;
-    private int roomLoginAttemptId = 0;
-    private boolean meshRoomLoggedInThisConnection = false;
-    private boolean meshRoomFullResetRetryUsed = false;
-    private boolean meshRoomEmptyPostSyncRetryUsed = false;
     private Runnable roomEmptyPostSyncRetryRunnable = null;
+    private int roomLoginAttemptId = 0;
     @Nullable
-    private String pendingRoomLoginPassword = null;
+    private String roomLoginPendingPubKey = null;
+    private static final long ROOM_LOGIN_TIMEOUT_MS = 35_000L;
+    private static final long ROOM_LOGIN_FULL_RESET_TIMEOUT_MS = 55_000L;
+    private static final long ROOM_EMPTY_POST_SYNC_RETRY_MS = 12_000L;
     private static final long ROOM_CONTACT_ADD_DELAY_MS = 800L;
     private static final long ROOM_POST_SYNC_FINISH_MS = 300_000L;
     private boolean joinedRoomRestoredThisSession = false;
+    private boolean meshChatUiRestorePending = true;
 
     private enum PendingRoomLoginAction {
         NONE,
@@ -544,30 +570,50 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                     if (message.txtType == BtConnectionManager.TXT_TYPE_CLI_DATA) {
                         return;
                     }
-                    String sender = message.senderPubKeyPrefixHex;
-                    if (sender == null) {
-                        return;
-                    }
-                    String prefixUpper = sender.toUpperCase(Locale.US);
                     getMapView().post(() -> {
-                        boolean roomOpen = meshContactChatIsRoom && meshContactChatPubKeyHex != null
-                                && meshContactChatPubKeyHex.toUpperCase(Locale.US).startsWith(prefixUpper);
-                        boolean dmOpen = meshContactChatActive && !meshContactChatIsRoom
-                                && meshContactChatPubKeyHex != null
-                                && meshContactChatPubKeyHex.toUpperCase(Locale.US).startsWith(prefixUpper);
-                        if (!roomOpen && !dmOpen) {
+                        String sender = message.senderPubKeyPrefixHex;
+                        if (sender == null) {
                             return;
                         }
-                        if (roomOpen
+                        String prefixUpper = sender.toUpperCase(Locale.US);
+                        MeshContactChatSession session = findRoomSessionForPrefix(prefixUpper);
+                        if (session == null && activeMeshContactPubKey != null) {
+                            String active = activeMeshContactPubKey.toUpperCase(Locale.US);
+                            if (active.startsWith(prefixUpper) || prefixUpper.startsWith(
+                                    active.substring(0, Math.min(12, active.length())))) {
+                                session = findSessionByPubKey(activeMeshContactPubKey);
+                            }
+                        }
+                        if (session == null) {
+                            appendLog("Room post for unknown sender " + prefixUpper
+                                    + " type=0x" + Integer.toHexString(message.txtType)
+                                    + " — ensure room tab is open");
+                            return;
+                        }
+                        if (session.isRoom
                                 && message.txtType != BtConnectionManager.TXT_TYPE_SIGNED_PLAIN) {
+                            appendLog("Room post ignored (wrong type) for " + session.displayName
+                                    + " type=0x" + Integer.toHexString(message.txtType));
+                            return;
+                        }
+                        if (!session.isRoom
+                                && message.txtType == BtConnectionManager.TXT_TYPE_SIGNED_PLAIN) {
                             return;
                         }
                         cancelRoomLoginTimeout();
                         cancelRoomEmptyPostSyncRetry();
-                        removeRoomLoginPlaceholder();
+                        removeRoomLoginPlaceholder(session);
                         String author = resolveRoomAuthorLabel(message.authorPubKeyPrefixHex);
-                        appendMeshContactChatLine(false, message.text, author);
-                        renderMeshContactChatLog();
+                        appendMeshContactChatLine(session, false, message.text, author,
+                                message.senderTimestampSec);
+                        session.roomPostsReceivedThisSession++;
+                        appendLog("Room post added for " + session.displayName
+                                + " ts=" + message.senderTimestampSec
+                                + " total=" + session.roomPostsReceivedThisSession);
+                        if (btManager != null) {
+                            btManager.requestMessageDrain(4);
+                        }
+                        renderRoomChatIfVisible(session);
                     });
                 }
             };
@@ -590,6 +636,25 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 }
             };
 
+    private final BtConnectionManager.MeshDeviceContactUpdateListener meshDeviceContactUpdateListener =
+            contact -> getMapView().post(() -> applyContactNameFromRadio(contact));
+
+    private final BtConnectionManager.MeshAdvertListener meshRoomAdvertListener =
+            advert -> {
+                if (advert == null || advert.advertType != BtConnectionManager.ADV_TYPE_ROOM) {
+                    return;
+                }
+                if (advert.name == null || advert.name.trim().isEmpty()) {
+                    return;
+                }
+                getMapView().post(() -> applyContactNameFromRadio(
+                        new BtConnectionManager.MeshDeviceContact(
+                                advert.pubKeyHex, BtConnectionManager.ADV_TYPE_ROOM,
+                                0, 0, advert.name.trim(),
+                                (int) advert.advertTimestampSec,
+                                advert.latitude, advert.longitude, 0)));
+            };
+
     public MeshCoreDropDownReceiver(MapView mapView,
                                  Context pluginContext,
                                  BtConnectionManager btManager,
@@ -605,6 +670,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btManager.addMeshChannelListener(meshChannelListener);
         btManager.addMeshNativeDmListener(meshNativeDmListener);
         btManager.addMeshRoomLoginListener(meshRoomLoginListener);
+        btManager.addMeshDeviceContactUpdateListener(meshDeviceContactUpdateListener);
+        btManager.addMeshAdvertListener(meshRoomAdvertListener);
         contactTracker.setListener(this);
     }
 
@@ -686,7 +753,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             if (meshSendPositionWithAdvertRequested) {
                 btManager.setSendPositionWithAdvertEnabled(true);
             }
-            restoreJoinedRoomState();
+            restoreJoinedRoomSessions();
+            scheduleRestoreMeshChatUi();
         } else {
             updateConnectionUI(false, null);
             MeshStatusOverlay.setConnected(false);
@@ -1180,10 +1248,11 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (text.isEmpty()) {
             return;
         }
-        if (meshContactChatActive && meshContactChatPubKeyHex != null) {
-            if (btManager.sendContactTextMessage(meshContactChatPubKeyHex, text)) {
+        if (activeMeshContactPubKey != null) {
+            MeshContactChatSession session = getActiveContactSession();
+            if (session != null && btManager.sendContactTextMessage(session.pubKeyHex, text)) {
                 editMeshChannelMessage.setText("");
-                appendMeshContactChatLine(true, text);
+                appendMeshContactChatLine(session, true, text);
                 renderMeshContactChatLog();
             } else {
                 appendLog("Direct message not sent — transmit failed");
@@ -1277,11 +1346,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
      * field targets it.
      */
     private void selectMeshChannelForInlineWindow(int channelIndex) {
-        meshContactChatActive = false;
-        meshContactChatIsRoom = false;
-        meshContactChatPubKeyHex = null;
-        meshContactChatDisplayName = null;
-        meshContactChatPrefixHex = null;
+        clearMeshContactChatMode();
         meshChannelChatActiveIndex = channelIndex;
         if (editMeshChannelIndex != null) {
             editMeshChannelIndex.setText(String.valueOf(channelIndex));
@@ -1296,14 +1361,14 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private void openMeshChannelChatDialog(int channelIndex) {
-        meshContactChatActive = false;
-        meshContactChatIsRoom = false;
-        meshContactChatPubKeyHex = null;
-        meshContactChatDisplayName = null;
-        meshContactChatPrefixHex = null;
+        activeMeshContactPubKey = null;
         String channelName = meshChannelNames.get(channelIndex);
         if (channelName == null || channelName.trim().isEmpty()) channelName = "Channel";
         meshChannelChatActiveIndex = channelIndex;
+        if (btManager != null && btManager.isConnected()) {
+            MeshLastChatStore.saveChannel(getMapView().getContext(),
+                    btManager.getConnectedDeviceAddress(), channelIndex);
+        }
         // Show the inline chat window — no popup dialog.
         if (meshChannelTitleView != null) {
             meshChannelTitleView.setText("Channel #" + channelIndex + " — " + channelName);
@@ -1733,7 +1798,169 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         });
     }
 
-    // ─── Channel management dialogs ──────────────────────────────────────────
+    private void buildMeshChannelButtonStrip() {
+        if (stripMeshChannels == null) return;
+        stripMeshChannels.removeAllViews();
+        Context ctx = getMapView().getContext();
+        List<Integer> indices = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            String name = meshChannelNames.get(i);
+            if (name != null && !name.trim().isEmpty()
+                    && !"ATAK_DATA".equalsIgnoreCase(name.trim())) {
+                indices.add(i);
+            }
+        }
+        boolean hasContactTabs = !meshContactChatSessions.isEmpty();
+        if (!hasContactTabs && indices.isEmpty()) {
+            TextView placeholder = new TextView(ctx);
+            placeholder.setText("No channels found. Try connecting first.");
+            placeholder.setTextColor(0xFF888888);
+            placeholder.setTextSize(11f);
+            placeholder.setPadding(8, 4, 8, 4);
+            stripMeshChannels.addView(placeholder);
+            return;
+        }
+        int tabCount = meshContactChatSessions.size() + indices.size();
+        int tabIndex = 0;
+        for (MeshContactChatSession session : meshContactChatSessions.values()) {
+            final String pubKeyHex = session.pubKeyHex;
+            Button btn = new Button(ctx);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            if (tabIndex < tabCount - 1) {
+                lp.setMarginEnd(4);
+            }
+            btn.setLayoutParams(lp);
+            btn.setText(stripContactTabLabel(session.displayName));
+            btn.setTextSize(11f);
+            btn.setAllCaps(false);
+            btn.setPadding(8, 6, 8, 6);
+            btn.setMinHeight(0);
+            btn.setMinimumHeight(0);
+            btn.setTag(pubKeyHex);
+            applyMeshChannelButtonStyle(btn, pubKeyHex.equals(activeMeshContactPubKey));
+            btn.setOnClickListener(v -> selectMeshContactChat(pubKeyHex));
+            stripMeshChannels.addView(btn);
+            tabIndex++;
+        }
+        for (int idx : indices) {
+            final int channelIndex = idx;
+            String name = meshChannelNames.get(idx);
+            Button btn = new Button(ctx);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            if (tabIndex < tabCount - 1) {
+                lp.setMarginEnd(4);
+            }
+            btn.setLayoutParams(lp);
+            btn.setText(name);
+            btn.setTextSize(11f);
+            btn.setAllCaps(false);
+            btn.setPadding(8, 6, 8, 6);
+            btn.setMinHeight(0);
+            btn.setMinimumHeight(0);
+            btn.setTag(channelIndex);
+            applyMeshChannelButtonStyle(btn, activeMeshContactPubKey == null
+                    && channelIndex == meshChannelChatActiveIndex);
+            btn.setOnClickListener(v -> {
+                clearMeshContactChatMode();
+                meshChannelChatActiveIndex = channelIndex;
+                openMeshChannelChatDialog(channelIndex);
+                buildMeshChannelButtonStrip();
+            });
+            final String channelNameFinal = name;
+            btn.setOnLongClickListener(v -> {
+                showChannelSettingsMenu(channelIndex, channelNameFinal);
+                return true;
+            });
+            stripMeshChannels.addView(btn);
+            tabIndex++;
+        }
+    }
+
+    private static String stripContactTabLabel(String displayName) {
+        if (displayName == null) {
+            return "Contact";
+        }
+        String trimmed = displayName.trim();
+        if (trimmed.length() <= 14) {
+            return trimmed;
+        }
+        return trimmed.substring(0, 13) + "…";
+    }
+
+    private MeshContactChatSession getActiveContactSession() {
+        if (activeMeshContactPubKey == null) {
+            return null;
+        }
+        return findSessionByPubKey(activeMeshContactPubKey);
+    }
+
+    private boolean isSessionCurrentlyVisible(@Nullable MeshContactChatSession session) {
+        if (session == null || activeMeshContactPubKey == null) {
+            return false;
+        }
+        return session.pubKeyHex.equalsIgnoreCase(activeMeshContactPubKey);
+    }
+
+    private void renderRoomChatIfVisible(@Nullable MeshContactChatSession session) {
+        if (isSessionCurrentlyVisible(session)) {
+            renderMeshContactChatLog();
+        }
+    }
+
+    private MeshContactChatSession ensureContactChatSession(
+            BtConnectionManager.MeshDeviceContact contact) {
+        String pubKey = normalizePubKeyHex(contact.pubKeyHex);
+        if (pubKey == null || pubKey.length() != 64) {
+            pubKey = contact.pubKeyHex != null ? contact.pubKeyHex.trim() : "";
+        }
+        MeshContactChatSession session = meshContactChatSessions.get(pubKey);
+        if (session == null) {
+            session = new MeshContactChatSession(pubKey, contact.name);
+            if (contact.type == BtConnectionManager.ADV_TYPE_ROOM && btManager != null) {
+                Context ctx = getMapView().getContext();
+                String addr = btManager.getConnectedDeviceAddress();
+                if (ctx != null && addr != null) {
+                    java.util.LinkedList<String> saved =
+                            MeshContactChatHistoryStore.load(ctx, addr, pubKey);
+                    if (!saved.isEmpty()) {
+                        session.lines.addAll(saved);
+                        removeRoomLoginPlaceholder(session);
+                    }
+                }
+            }
+            meshContactChatSessions.put(pubKey, session);
+        } else if (contact.name != null && !contact.name.trim().isEmpty()) {
+            session.displayName = contact.name.trim();
+        }
+        session.isRoom = contact.type == BtConnectionManager.ADV_TYPE_ROOM;
+        return session;
+    }
+
+    private void selectMeshContactChat(String pubKeyHex) {
+        MeshContactChatSession session = findSessionByPubKey(pubKeyHex);
+        if (session == null) {
+            return;
+        }
+        activeMeshContactPubKey = session.pubKeyHex;
+        meshChannelChatActiveIndex = -1;
+        showInlineContactChat(session.displayName);
+        buildMeshChannelButtonStrip();
+        if (btManager != null && btManager.isConnected()) {
+            MeshJoinedRoomStore.saveActiveRoom(getMapView().getContext(),
+                    btManager.getConnectedDeviceAddress(), pubKeyHex);
+            MeshLastChatStore.saveRoom(getMapView().getContext(),
+                    btManager.getConnectedDeviceAddress(), pubKeyHex);
+        }
+        if (session.isRoom) {
+            beginRoomServerSession(session);
+        }
+    }
+
+    private void clearMeshContactChatMode() {
+        activeMeshContactPubKey = null;
+    }
 
     private void showDeviceContactsDialog() {
         if (!isMeshConnected()) {
@@ -1747,9 +1974,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 MeshDeviceContactCache.load(ctx, deviceAddr);
         if (!cached.isEmpty()) {
             showDeviceContactsPicker(cached);
-            if (MeshDeviceContactCache.isStale(ctx, deviceAddr, DEVICE_CONTACTS_CACHE_STALE_MS)) {
-                fetchDeviceContactsFromRadio(false, false);
-            }
+            fetchDeviceContactsFromRadio(true, false);
             return;
         }
         Toast.makeText(ctx, "Loading contacts from device…", Toast.LENGTH_SHORT).show();
@@ -1786,15 +2011,13 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                                 MeshDeviceContactPolicy.filterRemoved(contacts,
                                         MeshDeviceContactPolicy.contactsToEvictFromDevice(contacts)));
                 MeshDeviceContactCache.save(ctx, deviceAddr, kept);
-                final int savedCount = kept.size();
                 getMapView().post(() -> {
-                    if (showPickerOnSuccess) {
+                    applyDeviceContactMetadataUpdates(ctx, deviceAddr, kept);
+                    if (showPickerOnSuccess
+                            || (deviceContactsDialog != null && deviceContactsDialog.isShowing())) {
                         showDeviceContactsPicker(kept);
-                    } else {
-                        Toast.makeText(ctx,
-                                "Contacts updated (" + savedCount + ")",
-                                Toast.LENGTH_SHORT).show();
                     }
+                    maybeBeginActiveRoomSessionAfterContactsSync();
                 });
             }
 
@@ -1811,33 +2034,283 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         });
     }
 
+    private void syncDeviceContactsCacheInBackground() {
+        if (!isMeshConnected()) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        String deviceAddr = btManager.getConnectedDeviceAddress();
+        if (!MeshDeviceContactCache.isStale(ctx, deviceAddr, DEVICE_CONTACTS_CACHE_STALE_MS)) {
+            return;
+        }
+        fetchDeviceContactsFromRadio(false, false);
+    }
+
     private void showDeviceContactsPicker(
             java.util.List<BtConnectionManager.MeshDeviceContact> contacts) {
         Context ctx = getMapView().getContext();
         if (contacts == null || contacts.isEmpty()) {
+            if (deviceContactsDialog != null && deviceContactsDialog.isShowing()) {
+                deviceContactsDialog.dismiss();
+            }
+            deviceContactsDialog = null;
             Toast.makeText(ctx, "No contacts on device.", Toast.LENGTH_SHORT).show();
             return;
         }
-        String[] labels = new String[contacts.size()];
-        for (int i = 0; i < contacts.size(); i++) {
-            BtConnectionManager.MeshDeviceContact c = contacts.get(i);
-            String star = c.isFavorite() ? "★ " : "";
-            labels[i] = star + c.name + "  (" + deviceContactTypeLabel(c.type) + ")";
+        java.util.ArrayList<BtConnectionManager.MeshDeviceContact> mutable =
+                new java.util.ArrayList<>(contacts);
+        if (deviceContactsDialog != null && deviceContactsDialog.isShowing()) {
+            deviceContactsDialog.dismiss();
         }
-        new AlertDialog.Builder(ctx)
-                .setTitle("MeshCore Contacts (" + contacts.size() + ")")
-                .setItems(labels, (dialog, which) -> {
-                    if (which >= 0 && which < contacts.size()) {
-                        showDeviceContactActions(contacts.get(which));
-                    }
-                })
+        ScrollView scroll = new ScrollView(ctx);
+        LinearLayout list = new LinearLayout(ctx);
+        list.setOrientation(LinearLayout.VERTICAL);
+        int pad = dip(ctx, 8);
+        list.setPadding(pad, pad, pad, pad);
+        Runnable rebuildPicker = () -> showDeviceContactsPicker(mutable);
+        for (BtConnectionManager.MeshDeviceContact contact : mutable) {
+            list.addView(buildDeviceContactRow(ctx, contact, mutable, rebuildPicker));
+        }
+        scroll.addView(list);
+        deviceContactsDialog = new AlertDialog.Builder(ctx)
+                .setTitle("MeshCore Contacts (" + mutable.size() + ")")
+                .setView(scroll)
                 .setNeutralButton("Refresh", (dialog, which) -> {
                     Toast.makeText(ctx, "Refreshing contacts from device…",
                             Toast.LENGTH_SHORT).show();
                     fetchDeviceContactsFromRadio(true, true);
                 })
-                .setNegativeButton("Close", null)
+                .setNegativeButton("Close", (dialog, which) -> deviceContactsDialog = null)
+                .create();
+        deviceContactsDialog.setOnDismissListener(d -> deviceContactsDialog = null);
+        deviceContactsDialog.show();
+    }
+
+    private View buildDeviceContactRow(Context ctx,
+            BtConnectionManager.MeshDeviceContact contact,
+            java.util.ArrayList<BtConnectionManager.MeshDeviceContact> backingList,
+            Runnable onListChanged) {
+        LinearLayout row = new LinearLayout(ctx);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        int vPad = dip(ctx, 6);
+        row.setPadding(0, vPad, 0, vPad);
+
+        String star = contact.isFavorite() ? "★ " : "";
+        String typeLabel = deviceContactTypeLabel(contact.type);
+        TextView label = new TextView(ctx);
+        label.setText(star + contact.name + "  (" + typeLabel + ")");
+        label.setTextColor(0xFFFFFFFF);
+        label.setTextSize(14f);
+        label.setOnClickListener(v -> showDeviceContactActions(contact));
+        row.addView(label, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        ImageButton trash = new ImageButton(ctx);
+        trash.setImageResource(android.R.drawable.ic_menu_delete);
+        trash.setBackground(null);
+        trash.setContentDescription("Remove contact");
+        int iconPad = dip(ctx, 8);
+        trash.setPadding(iconPad, iconPad, iconPad, iconPad);
+        trash.setOnClickListener(v -> confirmRemoveDeviceContact(contact, backingList, onListChanged));
+        row.addView(trash, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        return row;
+    }
+
+    private void confirmRemoveDeviceContact(
+            BtConnectionManager.MeshDeviceContact contact,
+            java.util.ArrayList<BtConnectionManager.MeshDeviceContact> backingList,
+            @Nullable Runnable onListChanged) {
+        if (contact == null) {
+            return;
+        }
+        String name = contact.name != null && !contact.name.trim().isEmpty()
+                ? contact.name.trim() : "this contact";
+        new AlertDialog.Builder(getMapView().getContext())
+                .setTitle("Remove Contact")
+                .setMessage("Remove \"" + name + "\" from this radio?")
+                .setPositiveButton("Remove", (d, w) -> {
+                    performRemoveDeviceContact(contact);
+                    if (contact.pubKeyHex != null && backingList != null) {
+                        for (int i = backingList.size() - 1; i >= 0; i--) {
+                            BtConnectionManager.MeshDeviceContact c = backingList.get(i);
+                            if (c.pubKeyHex != null
+                                    && c.pubKeyHex.equalsIgnoreCase(contact.pubKeyHex)) {
+                                backingList.remove(i);
+                                break;
+                            }
+                        }
+                    }
+                    if (onListChanged != null) {
+                        onListChanged.run();
+                    }
+                })
+                .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    private void performRemoveDeviceContact(
+            BtConnectionManager.MeshDeviceContact contact) {
+        if (contact == null || btManager == null) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        String addr = btManager.getConnectedDeviceAddress();
+        if (contact.type == BtConnectionManager.ADV_TYPE_ROOM
+                && contact.pubKeyHex != null) {
+            performRemoveJoinedRoom(contact.pubKeyHex, contact.name);
+            appendLog("Removed room contact " + contact.name);
+            return;
+        }
+        btManager.removeDeviceContact(contact);
+        MeshDeviceContactCache.removeByPubKey(ctx, addr, contact.pubKeyHex);
+        String pubKey = normalizePubKeyHex(contact.pubKeyHex);
+        if (pubKey != null) {
+            meshContactChatSessions.remove(pubKey);
+        }
+        if (pubKey != null && pubKey.equals(activeMeshContactPubKey)) {
+            clearMeshContactChatMode();
+            if (meshChannelLogText != null) {
+                meshChannelLogText.setVisibility(View.GONE);
+            }
+            if (meshChannelTitleView != null) {
+                meshChannelTitleView.setVisibility(View.GONE);
+            }
+            if (rowMeshChannelInput != null) {
+                rowMeshChannelInput.setVisibility(View.GONE);
+            }
+        }
+        buildMeshChannelButtonStrip();
+        appendLog("Removed device contact " + contact.name);
+    }
+
+    private void applyDeviceContactMetadataUpdates(
+            Context ctx, String deviceAddr,
+            java.util.List<BtConnectionManager.MeshDeviceContact> contacts) {
+        if (contacts == null || contacts.isEmpty()) {
+            return;
+        }
+        boolean namesChanged = false;
+        for (BtConnectionManager.MeshDeviceContact contact : contacts) {
+            if (applySingleContactNameUpdate(ctx, deviceAddr, contact)) {
+                namesChanged = true;
+            }
+        }
+        if (!namesChanged) {
+            return;
+        }
+        refreshRoomContactUiAfterRename();
+    }
+
+    private void applyContactNameFromRadio(BtConnectionManager.MeshDeviceContact contact) {
+        if (contact == null || btManager == null || !btManager.isConnected()) {
+            return;
+        }
+        MapView mv = getMapView();
+        if (mv == null) {
+            return;
+        }
+        Context ctx = mv.getContext();
+        String addr = btManager.getConnectedDeviceAddress();
+        if (ctx == null || addr == null) {
+            return;
+        }
+        BtConnectionManager.MeshDeviceContact cached =
+                MeshDeviceContactCache.findByPubKeyPrefix(ctx, addr, contact.pubKeyHex);
+        BtConnectionManager.MeshDeviceContact merged = contact;
+        if (cached != null) {
+            merged = new BtConnectionManager.MeshDeviceContact(
+                    contact.pubKeyHex, contact.type,
+                    cached.flags, cached.outPathLen, contact.name,
+                    contact.lastAdvertTimestamp > 0
+                            ? contact.lastAdvertTimestamp : cached.lastAdvertTimestamp,
+                    contact.gpsLat != 0.0 ? contact.gpsLat : cached.gpsLat,
+                    contact.gpsLon != 0.0 ? contact.gpsLon : cached.gpsLon,
+                    contact.lastMod > 0 ? contact.lastMod : cached.lastMod);
+        }
+        MeshDeviceContactCache.upsertFromDeviceContact(ctx, addr, merged);
+        if (applySingleContactNameUpdate(ctx, addr, merged)) {
+            refreshRoomContactUiAfterRename();
+        }
+    }
+
+    private boolean applySingleContactNameUpdate(
+            Context ctx, String deviceAddr,
+            BtConnectionManager.MeshDeviceContact contact) {
+        if (contact == null || contact.pubKeyHex == null) {
+            return false;
+        }
+        String deviceName = contact.name != null ? contact.name.trim() : "";
+        if (deviceName.isEmpty()) {
+            return false;
+        }
+        boolean namesChanged = false;
+        if (contact.type == BtConnectionManager.ADV_TYPE_ROOM) {
+            for (MeshJoinedRoomStore.JoinedRoom room
+                    : MeshJoinedRoomStore.loadJoinedRooms(ctx, deviceAddr)) {
+                if (room.pubKeyHex.equalsIgnoreCase(contact.pubKeyHex)
+                        && !deviceName.equals(room.displayName)) {
+                    MeshJoinedRoomStore.saveJoinedRoom(ctx, deviceAddr,
+                            contact.pubKeyHex, deviceName);
+                    namesChanged = true;
+                    appendLog("Room renamed on radio: " + deviceName);
+                    break;
+                }
+            }
+        }
+        MeshContactChatSession session = findSessionByPubKey(contact.pubKeyHex);
+        if (session != null && !deviceName.equals(session.displayName)) {
+            session.displayName = deviceName;
+            namesChanged = true;
+        }
+        return namesChanged;
+    }
+
+    private MeshContactChatSession findSessionByPubKey(@Nullable String pubKeyHex) {
+        if (pubKeyHex == null) {
+            return null;
+        }
+        String normalized = normalizePubKeyHex(pubKeyHex);
+        if (normalized != null && normalized.length() == 64) {
+            MeshContactChatSession session = meshContactChatSessions.get(normalized);
+            if (session != null) {
+                return session;
+            }
+        }
+        for (MeshContactChatSession session : meshContactChatSessions.values()) {
+            if (session.pubKeyHex != null
+                    && session.pubKeyHex.equalsIgnoreCase(pubKeyHex)) {
+                return session;
+            }
+        }
+        return null;
+    }
+
+    private void refreshRoomContactUiAfterRename() {
+        buildMeshChannelButtonStrip();
+        MeshContactChatSession active = getActiveContactSession();
+        if (active != null) {
+            showInlineContactChat(active.displayName);
+            updateMeshChatInputHint();
+            if (meshChannelChatTitleView != null) {
+                meshChannelChatTitleView.setText("Chat: " + active.displayName);
+            }
+            renderMeshContactChatLog();
+        }
+    }
+
+    private void refreshJoinedRoomContactNamesFromRadio() {
+        if (btManager == null || !btManager.isConnected()) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        String addr = btManager.getConnectedDeviceAddress();
+        for (MeshJoinedRoomStore.JoinedRoom room
+                : MeshJoinedRoomStore.loadJoinedRooms(ctx, addr)) {
+            btManager.requestContactByPubKeyHex(room.pubKeyHex);
+        }
     }
 
     private void showDeviceContactActions(BtConnectionManager.MeshDeviceContact contact) {
@@ -1845,13 +2318,75 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             return;
         }
         Context ctx = getMapView().getContext();
+        boolean isRoom = contact.type == BtConnectionManager.ADV_TYPE_ROOM;
+        String messageActionLabel = isRoom ? "Join Room" : "Send Message";
         new AlertDialog.Builder(ctx)
                 .setTitle(contact.name)
-                .setItems(new String[]{"Favorite", "Send Message"}, (dialog, which) -> {
+                .setItems(new String[]{"Favorite", messageActionLabel}, (dialog, which) -> {
                     if (which == 0) {
                         favoriteDeviceContact(contact);
                     } else if (which == 1) {
-                        openDeviceContactChat(contact);
+                        openDeviceContactChatWithOptionalAlert(contact);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void openDeviceContactChatWithOptionalAlert(
+            BtConnectionManager.MeshDeviceContact contact) {
+        if (contact == null) {
+            return;
+        }
+        if (contact.type == BtConnectionManager.ADV_TYPE_ROOM) {
+            openDeviceContactChat(contact);
+            return;
+        }
+        if (contact.type != BtConnectionManager.ADV_TYPE_CHAT) {
+            openDeviceContactChat(contact);
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        if (PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean(PREF_SUPPRESS_MESH_DM_CONTACT_ALERT, false)) {
+            openDeviceContactChat(contact);
+            return;
+        }
+        showMeshCompanionContactAlert(ctx, () -> openDeviceContactChat(contact));
+    }
+
+    private void showMeshCompanionContactAlert(Context ctx, Runnable onContinue) {
+        int pad = dip(ctx, 16);
+        LinearLayout layout = new LinearLayout(ctx);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(pad, pad / 2, pad, 0);
+
+        TextView message = new TextView(ctx);
+        message.setText("This user must add you as a contact to receive your message.");
+        message.setTextColor(0xFFCCCCCC);
+        message.setTextSize(14f);
+        layout.addView(message);
+
+        CheckBox suppress = new CheckBox(ctx);
+        suppress.setText("Don't show this alert again");
+        suppress.setTextColor(0xFFCCCCCC);
+        LinearLayout.LayoutParams cbLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        cbLp.topMargin = dip(ctx, 12);
+        layout.addView(suppress, cbLp);
+
+        new AlertDialog.Builder(ctx)
+                .setTitle("Direct Message")
+                .setView(layout)
+                .setPositiveButton("Continue", (dialog, which) -> {
+                    if (suppress.isChecked()) {
+                        PreferenceManager.getDefaultSharedPreferences(ctx).edit()
+                                .putBoolean(PREF_SUPPRESS_MESH_DM_CONTACT_ALERT, true)
+                                .apply();
+                    }
+                    if (onContinue != null) {
+                        onContinue.run();
                     }
                 })
                 .setNegativeButton("Cancel", null)
@@ -1888,18 +2423,16 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             Toast.makeText(ctx, "Invalid contact pubkey.", Toast.LENGTH_SHORT).show();
             return;
         }
-        meshContactChatActive = true;
-        meshContactChatIsRoom = contact.type == BtConnectionManager.ADV_TYPE_ROOM;
-        meshContactChatPubKeyHex = contact.pubKeyHex.trim();
-        meshContactChatPrefixHex = meshContactChatPubKeyHex.substring(0, 12);
-        meshContactChatDisplayName = contact.name != null ? contact.name.trim() : "Contact";
+        MeshContactChatSession session = ensureContactChatSession(contact);
+        activeMeshContactPubKey = session.pubKeyHex;
         meshChannelChatActiveIndex = -1;
-        meshContactChatLines.clear();
-        MeshCoreContactHandler.ensureMeshInboundChatContact(meshContactChatPrefixHex);
-        showInlineContactChat(meshContactChatDisplayName);
-        appendLog("Opened chat with " + meshContactChatDisplayName);
-        if (meshContactChatIsRoom) {
-            beginRoomServerSession(meshContactChatPubKeyHex, meshContactChatDisplayName, true);
+        MeshCoreContactHandler.ensureMeshInboundChatContact(
+                session.pubKeyHex.substring(0, 12));
+        showInlineContactChat(session.displayName);
+        buildMeshChannelButtonStrip();
+        appendLog("Opened chat with " + session.displayName);
+        if (session.isRoom) {
+            beginRoomServerSession(session);
         }
     }
 
@@ -1924,71 +2457,139 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         refreshMeshChannelStripSelection();
     }
 
-    private void updateMeshChatInputHint() {
-        if (editMeshChannelMessage == null) {
-            return;
-        }
-        String hint = "Channel message";
-        if (meshContactChatActive && meshContactChatDisplayName != null
-                && !meshContactChatDisplayName.trim().isEmpty()) {
-            hint = "Message to " + meshContactChatDisplayName.trim();
-        } else if (meshChannelChatActiveIndex >= 0) {
-            String channelName = meshChannelNames.get(meshChannelChatActiveIndex);
-            if (channelName == null || channelName.trim().isEmpty()) {
-                channelName = "Channel";
-            }
-            hint = "Message to " + channelName.trim();
-        }
-        editMeshChannelMessage.setHint(hint);
+    private void appendMeshContactChatLine(MeshContactChatSession session,
+                                           boolean outbound, String text) {
+        appendMeshContactChatLine(session, outbound, text, null, 0);
     }
 
-    private void appendMeshContactChatLine(boolean outbound, String text) {
-        appendMeshContactChatLine(outbound, text, null);
-    }
-
-    private void appendMeshContactChatLine(boolean outbound, String text,
+    private void appendMeshContactChatLine(MeshContactChatSession session,
+                                           boolean outbound, String text,
                                            @Nullable String authorOverride) {
-        if (text == null || text.trim().isEmpty()) {
+        appendMeshContactChatLine(session, outbound, text, authorOverride, 0);
+    }
+
+    private void appendMeshContactChatLine(MeshContactChatSession session,
+                                           boolean outbound, String text,
+                                           @Nullable String authorOverride,
+                                           int postTimestampSec) {
+        if (session == null || text == null || text.trim().isEmpty()) {
             return;
         }
+        String trimmed = text.trim();
+        for (String existing : session.lines) {
+            String display = chatLineDisplay(existing);
+            if (display.endsWith(": " + trimmed)) {
+                return;
+            }
+        }
+        long sortKey = postTimestampSec > 0
+                ? postTimestampSec
+                : System.currentTimeMillis() / 1000L;
         String ts = new SimpleDateFormat("HH:mm:ss", Locale.US)
-                .format(new Date(System.currentTimeMillis()));
+                .format(new Date(sortKey * 1000L));
         String who;
         if (outbound) {
             who = "You";
         } else if (authorOverride != null && !authorOverride.trim().isEmpty()) {
             who = authorOverride.trim();
         } else {
-            who = meshContactChatDisplayName != null ? meshContactChatDisplayName : "Peer";
+            who = session.displayName;
         }
-        meshContactChatLines.add("[" + ts + "] " + who + ": " + text.trim());
-        while (meshContactChatLines.size() > MAX_MESH_CONTACT_CHAT_LINES) {
-            meshContactChatLines.removeFirst();
+        String display = "[" + ts + "] " + who + ": " + trimmed;
+        session.lines.add(String.format(Locale.US, "%010d|%s", sortKey, display));
+        while (session.lines.size() > MAX_MESH_CONTACT_CHAT_LINES) {
+            session.lines.removeFirst();
+        }
+        if (session.isRoom) {
+            persistRoomChatHistory(session);
         }
     }
 
-    private void renderMeshContactChatLog() {
-        if (meshChannelLogText == null) {
+    private void persistRoomChatHistory(MeshContactChatSession session) {
+        if (session == null || !session.isRoom || btManager == null) {
             return;
         }
+        MapView mv = getMapView();
+        if (mv == null) {
+            return;
+        }
+        Context ctx = mv.getContext();
+        String addr = btManager.getConnectedDeviceAddress();
+        if (ctx == null || addr == null) {
+            return;
+        }
+        MeshContactChatHistoryStore.save(ctx, addr, session.pubKeyHex, session.lines);
+    }
+
+    private static String chatLineDisplay(String storedLine) {
+        if (storedLine == null) {
+            return "";
+        }
+        int pipe = storedLine.indexOf('|');
+        return pipe >= 0 ? storedLine.substring(pipe + 1) : storedLine;
+    }
+
+    private static java.util.List<String> chatLineDisplayBody(java.util.Collection<String> lines) {
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        if (lines == null) {
+            return out;
+        }
+        for (String line : lines) {
+            out.add(chatLineDisplay(line));
+        }
+        return out;
+    }
+
+    private static java.util.List<String> sortedChatLinesForDisplay(
+            java.util.Collection<String> lines) {
+        java.util.ArrayList<String> sorted = new java.util.ArrayList<>(lines);
+        sorted.sort(java.util.Comparator.comparingLong(line -> {
+            if (line == null) {
+                return 0L;
+            }
+            int pipe = line.indexOf('|');
+            if (pipe <= 0) {
+                return 0L;
+            }
+            try {
+                return Long.parseLong(line.substring(0, pipe));
+            } catch (NumberFormatException e) {
+                return 0L;
+            }
+        }));
+        java.util.ArrayList<String> display = new java.util.ArrayList<>(sorted.size());
+        for (String line : sorted) {
+            display.add(chatLineDisplay(line));
+        }
+        return display;
+    }
+
+    private void renderMeshContactChatLog() {
+        TextView target = meshChannelChatLogView != null ? meshChannelChatLogView : meshChannelLogText;
+        if (target == null) {
+            return;
+        }
+        MeshContactChatSession session = getActiveContactSession();
         StringBuilder sb = new StringBuilder();
-        for (String line : meshContactChatLines) {
-            sb.append(line).append('\n');
+        if (session != null) {
+            for (String line : sortedChatLinesForDisplay(session.lines)) {
+                sb.append(line).append('\n');
+            }
         }
         if (sb.length() == 0) {
             sb.append("(No messages yet)\n");
         }
-        meshChannelLogText.setText(sb.toString());
-        if (meshContactChatActive) {
+        target.setText(sb.toString());
+        if (session != null && session.pubKeyHex.equals(activeMeshContactPubKey)) {
             updateMeshChatInputHint();
         }
-        meshChannelLogText.post(() -> {
-            android.text.Layout layout = meshChannelLogText.getLayout();
+        target.post(() -> {
+            android.text.Layout layout = target.getLayout();
             if (layout == null) {
                 return;
             }
-            int scrollY = layout.getHeight() - meshChannelLogText.getHeight();
-            meshChannelLogText.scrollTo(0, Math.max(0, scrollY));
+            int scrollY = layout.getHeight() - target.getHeight();
+            target.scrollTo(0, Math.max(0, scrollY));
         });
     }
 
@@ -2002,11 +2603,752 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 continue;
             }
             Object tag = child.getTag();
-            if (tag instanceof Integer) {
+            if (tag instanceof String) {
+                applyMeshChannelButtonStyle((Button) child, tag.equals(activeMeshContactPubKey));
+            } else if (tag instanceof Integer) {
                 applyMeshChannelButtonStyle((Button) child,
-                        !meshContactChatActive && meshChannelChatActiveIndex == (Integer) tag);
+                        activeMeshContactPubKey == null
+                                && meshChannelChatActiveIndex == (Integer) tag);
             }
         }
+    }
+
+    private List<ManagedChannelEntry> collectManagedChannels() {
+        List<ManagedChannelEntry> entries = new ArrayList<>();
+        Set<String> roomKeys = new HashSet<>();
+        for (int i = 0; i < 8; i++) {
+            String name = meshChannelNames.get(i);
+            if (name != null && !name.trim().isEmpty()
+                    && !"ATAK_DATA".equalsIgnoreCase(name.trim())) {
+                entries.add(ManagedChannelEntry.group(i, name.trim()));
+            }
+        }
+        for (MeshContactChatSession session : meshContactChatSessions.values()) {
+            if (session.isRoom && session.pubKeyHex != null) {
+                entries.add(ManagedChannelEntry.room(session.displayName, session.pubKeyHex));
+                roomKeys.add(session.pubKeyHex.toLowerCase(Locale.US));
+            }
+        }
+        Context ctx = getMapView() != null ? getMapView().getContext() : null;
+        String addr = btManager != null ? btManager.getConnectedDeviceAddress() : null;
+        if (ctx != null && addr != null) {
+            for (MeshJoinedRoomStore.JoinedRoom room : MeshJoinedRoomStore.loadJoinedRooms(ctx, addr)) {
+                if (!roomKeys.contains(room.pubKeyHex.toLowerCase(Locale.US))) {
+                    entries.add(ManagedChannelEntry.room(room.displayName, room.pubKeyHex));
+                }
+            }
+        }
+        return entries;
+    }
+
+    private void performRemoveJoinedRoom(String pubKeyHex, String displayName) {
+        if (pubKeyHex == null) {
+            return;
+        }
+        meshContactChatSessions.remove(pubKeyHex);
+        Context ctx = getMapView().getContext();
+        String addr = btManager != null ? btManager.getConnectedDeviceAddress() : null;
+        MeshJoinedRoomStore.removeJoinedRoom(ctx, addr, pubKeyHex);
+        MeshDeviceContactCache.removeByPubKey(ctx, addr, pubKeyHex);
+        MeshContactChatHistoryStore.clear(ctx, addr, pubKeyHex);
+        if (pubKeyHex.equals(pendingRoomPubKeyHex)) {
+            cancelRoomLoginTimeout();
+            pendingRoomPubKeyHex = null;
+            pendingRoomLoginAction = PendingRoomLoginAction.NONE;
+        }
+        if (pubKeyHex.equals(activeMeshContactPubKey)) {
+            clearMeshContactChatMode();
+            if (meshChannelLogText != null) {
+                meshChannelLogText.setVisibility(View.GONE);
+            }
+            if (meshChannelTitleView != null) {
+                meshChannelTitleView.setVisibility(View.GONE);
+            }
+            if (rowMeshChannelInput != null) {
+                rowMeshChannelInput.setVisibility(View.GONE);
+            }
+        }
+        if (btManager != null) {
+            String name = displayName != null && !displayName.trim().isEmpty()
+                    ? displayName.trim() : pubKeyHex.substring(0, 12);
+            btManager.removeDeviceContact(new BtConnectionManager.MeshDeviceContact(
+                    pubKeyHex, BtConnectionManager.ADV_TYPE_ROOM, 0, 0, name,
+                    0, 0.0, 0.0, (int) (System.currentTimeMillis() / 1000L)));
+        }
+        buildMeshChannelButtonStrip();
+        appendLog("Room '" + (displayName != null ? displayName : pubKeyHex) + "' removed.");
+    }
+
+    private void joinRoomServerContact(BtConnectionManager.MeshDeviceContact contact,
+                                       @Nullable String passwordOverride) {
+        if (contact == null || contact.pubKeyHex == null || btManager == null) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        String pubKey = normalizePubKeyHex(contact.pubKeyHex);
+        if (pubKey == null || pubKey.length() != 64) {
+            Toast.makeText(ctx, "Invalid room pubkey.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String displayName = contact.name != null && !contact.name.trim().isEmpty()
+                ? contact.name.trim()
+                : (pubKey.length() >= 12 ? pubKey.substring(0, 12) : "Room");
+        BtConnectionManager.MeshDeviceContact deviceContact =
+                new BtConnectionManager.MeshDeviceContact(
+                        pubKey, BtConnectionManager.ADV_TYPE_ROOM, 0, 0, displayName,
+                        contact.lastAdvertTimestamp, contact.gpsLat, contact.gpsLon,
+                        contact.lastMod > 0
+                                ? contact.lastMod
+                                : (int) (System.currentTimeMillis() / 1000L));
+        MeshContactChatSession session = ensureContactChatSession(deviceContact);
+        String pwd = passwordOverride;
+        if (pwd == null) {
+            if (!MeshRoomPasswordStore.hasPasswordStored(ctx,
+                    btManager.getConnectedDeviceAddress(), pubKey)) {
+                promptRoomPasswordAndLogin(session, PendingRoomLoginAction.JOIN_ONLY);
+                return;
+            }
+            pwd = MeshRoomPasswordStore.getPassword(ctx, btManager.getConnectedDeviceAddress(),
+                    pubKey);
+        }
+        MeshDeviceContactCache.upsertFromDeviceContact(ctx,
+                btManager.getConnectedDeviceAddress(), deviceContact);
+        session.isRoom = true;
+        activeMeshContactPubKey = session.pubKeyHex;
+        meshChannelChatActiveIndex = -1;
+        showInlineContactChat(session.displayName);
+        buildMeshChannelButtonStrip();
+        MeshJoinedRoomStore.saveJoinedRoom(ctx, btManager.getConnectedDeviceAddress(),
+                session.pubKeyHex, session.displayName);
+        MeshLastChatStore.saveRoom(ctx, btManager.getConnectedDeviceAddress(), session.pubKeyHex);
+        MeshRoomPasswordStore.savePassword(ctx, btManager.getConnectedDeviceAddress(),
+                pubKey, pwd != null ? pwd : "");
+        sendRoomLoginAfterContactSync(session, pwd != null ? pwd : "",
+                PendingRoomLoginAction.JOIN_ONLY);
+    }
+
+    private void sendRoomLoginAfterContactSync(MeshContactChatSession session, String password,
+                                               PendingRoomLoginAction action) {
+        sendRoomLoginAfterContactSync(session, password, action, false);
+    }
+
+    private void sendRoomLoginAfterContactSync(MeshContactChatSession session, String password,
+                                               PendingRoomLoginAction action,
+                                               boolean resetContactForFullHistory) {
+        if (session == null || btManager == null) {
+            return;
+        }
+        if (roomLoginPendingPubKey != null
+                && roomLoginPendingPubKey.equalsIgnoreCase(session.pubKeyHex)) {
+            appendLog("Room login already pending for " + session.displayName);
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        cancelRoomLoginTimeout();
+        pendingRoomPubKeyHex = session.pubKeyHex;
+        pendingRoomLoginAction = action;
+        roomLoginPendingPubKey = session.pubKeyHex;
+        final int attemptId = ++roomLoginAttemptId;
+        session.roomLoginSucceededThisConnection = false;
+        session.roomLoginNotFoundRetryUsed = false;
+        MeshRoomPasswordStore.savePassword(ctx, btManager.getConnectedDeviceAddress(),
+                session.pubKeyHex, password != null ? password : "");
+        removeRoomLoginFailurePlaceholder(session);
+        appendMeshContactChatLine(session, false, "(Logging in — retrieving posts…)", null);
+        renderRoomChatIfVisible(session);
+        final String loginPassword = password != null ? password : "";
+        Runnable sendLogin = () -> {
+            if (btManager == null || !btManager.isConnected()) {
+                roomLoginPendingPubKey = null;
+                return;
+            }
+            appendLog("Sending room login for '" + session.displayName + "' (fullReset="
+                    + resetContactForFullHistory + ")");
+            if (!btManager.sendRoomLogin(session.pubKeyHex, loginPassword)) {
+                Toast.makeText(ctx, "Failed to send room login.", Toast.LENGTH_SHORT).show();
+                pendingRoomLoginAction = PendingRoomLoginAction.NONE;
+                pendingRoomPubKeyHex = null;
+                roomLoginPendingPubKey = null;
+                return;
+            }
+            scheduleRoomLoginTimeout(session, attemptId, loginPassword, resetContactForFullHistory);
+        };
+        BtConnectionManager.MeshDeviceContact contact = resolveRoomDeviceContact(session);
+        if (session.isRoom && resetContactForFullHistory) {
+            btManager.prepareRoomContactForFullHistorySync(contact, sendLogin);
+        } else {
+            btManager.cancelRoomContactPrepare();
+            btManager.addOrUpdateDeviceContactFavorite(contact);
+            long delayMs = action == PendingRoomLoginAction.JOIN_ONLY
+                    ? ROOM_CONTACT_ADD_DELAY_MS : 300L;
+            getMapView().postDelayed(sendLogin, delayMs);
+        }
+    }
+
+    private BtConnectionManager.MeshDeviceContact resolveRoomDeviceContact(
+            MeshContactChatSession session) {
+        BtConnectionManager.MeshDeviceContact fallback =
+                new BtConnectionManager.MeshDeviceContact(
+                        session.pubKeyHex, BtConnectionManager.ADV_TYPE_ROOM, 0,
+                        BtConnectionManager.OUT_PATH_UNKNOWN,
+                        session.displayName, 0, 0.0, 0.0,
+                        (int) (System.currentTimeMillis() / 1000L));
+        if (btManager == null) {
+            return fallback;
+        }
+        Context ctx = getMapView().getContext();
+        String deviceAddr = btManager.getConnectedDeviceAddress();
+        BtConnectionManager.MeshDeviceContact cached =
+                MeshDeviceContactCache.findByPubKeyPrefix(ctx, deviceAddr, session.pubKeyHex);
+        if (cached != null && cached.type == BtConnectionManager.ADV_TYPE_ROOM) {
+            return cached;
+        }
+        return fallback;
+    }
+
+    private void beginRoomServerSession(MeshContactChatSession session) {
+        if (session == null || btManager == null) {
+            return;
+        }
+        btManager.requestContactByPubKeyHex(session.pubKeyHex);
+        if (session.roomLoginSucceededThisConnection) {
+            removeRoomLoginPlaceholder(session);
+            removeRoomLoginFailurePlaceholder(session);
+            renderRoomChatIfVisible(session);
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        String deviceAddr = btManager.getConnectedDeviceAddress();
+        if (!MeshRoomPasswordStore.hasPasswordStored(ctx, deviceAddr, session.pubKeyHex)) {
+            promptRoomPasswordAndLogin(session, PendingRoomLoginAction.OPEN_CHAT);
+            return;
+        }
+        String pwd = MeshRoomPasswordStore.getPassword(ctx, deviceAddr, session.pubKeyHex);
+        sendRoomLoginAfterContactSync(session, pwd != null ? pwd : "",
+                PendingRoomLoginAction.OPEN_CHAT);
+    }
+
+    private void promptRoomPasswordAndLogin(MeshContactChatSession session,
+                                            PendingRoomLoginAction action) {
+        if (session == null || btManager == null) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        EditText pwdField = new EditText(ctx);
+        pwdField.setHint("Guest password (blank = read-only)");
+        pwdField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        pwdField.setSingleLine(true);
+        new AlertDialog.Builder(ctx)
+                .setTitle("Room Password")
+                .setMessage("Enter the password for \"" + session.displayName + "\".\n"
+                        + "Leave blank if the room allows read-only access.")
+                .setView(pwdField)
+                .setPositiveButton("Login", (d, w) -> {
+                    String pwd = fieldText(pwdField);
+                    MeshRoomPasswordStore.savePassword(ctx, btManager.getConnectedDeviceAddress(),
+                            session.pubKeyHex, pwd);
+                    sendRoomLoginAfterContactSync(session, pwd, action);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void handleRoomLoginSuccess(String pubKeyPrefixHex12, int permissions) {
+        if (btManager == null) {
+            return;
+        }
+        pendingRoomLoginAction = PendingRoomLoginAction.NONE;
+        cancelRoomLoginTimeout();
+        roomLoginAttemptId++;
+        roomLoginPendingPubKey = null;
+        Context ctx = getMapView().getContext();
+        MeshContactChatSession session = findRoomSessionForPrefix(pubKeyPrefixHex12);
+        if (session == null) {
+            appendLog("Room login OK prefix=" + pubKeyPrefixHex12);
+            scheduleRoomPostSyncDrains(null);
+            return;
+        }
+        session.roomLoginSucceededThisConnection = true;
+        String label = session.displayName;
+        appendLog("Room login OK for " + label + " perm=" + permissions);
+        pendingRoomPubKeyHex = session.pubKeyHex;
+        removeRoomLoginPlaceholder(session);
+        removeRoomLoginFailurePlaceholder(session);
+        appendMeshContactChatLine(session, false, "(Logged in.)", null);
+        renderRoomChatIfVisible(session);
+        Toast.makeText(ctx, "Logged in to " + label,
+                Toast.LENGTH_SHORT).show();
+        scheduleRoomPostSyncDrains(session);
+        scheduleRoomEmptyPostSyncRetry(session);
+    }
+
+    private void scheduleRoomEmptyPostSyncRetry(@Nullable MeshContactChatSession session) {
+        if (session == null || !session.isRoom) {
+            return;
+        }
+        cancelRoomEmptyPostSyncRetry();
+        final MeshContactChatSession retrySession = session;
+        roomEmptyPostSyncRetryRunnable = () -> {
+            roomEmptyPostSyncRetryRunnable = null;
+            if (retrySession.roomEmptyPostSyncRetryUsed || hasRealChatLines(retrySession)) {
+                return;
+            }
+            if (!retrySession.roomLoginSucceededThisConnection
+                    || btManager == null || !btManager.isConnected()) {
+                return;
+            }
+            retrySession.roomEmptyPostSyncRetryUsed = true;
+            appendLog("No room posts after login for " + retrySession.displayName
+                    + " — resetting sync_since and retrying…");
+            removeRoomLoginPlaceholder(retrySession);
+            appendMeshContactChatLine(retrySession, false, "(Retrying full post sync…)", null);
+            renderRoomChatIfVisible(retrySession);
+            retrySession.roomLoginSucceededThisConnection = false;
+            Context ctx = getMapView().getContext();
+            String pwd = MeshRoomPasswordStore.getPassword(ctx,
+                    btManager.getConnectedDeviceAddress(), retrySession.pubKeyHex);
+            sendRoomLoginAfterContactSync(retrySession, pwd != null ? pwd : "",
+                    PendingRoomLoginAction.OPEN_CHAT, true);
+        };
+        getMapView().postDelayed(roomEmptyPostSyncRetryRunnable, ROOM_EMPTY_POST_SYNC_RETRY_MS);
+    }
+
+    private void cancelRoomEmptyPostSyncRetry() {
+        if (roomEmptyPostSyncRetryRunnable != null) {
+            getMapView().removeCallbacks(roomEmptyPostSyncRetryRunnable);
+            roomEmptyPostSyncRetryRunnable = null;
+        }
+    }
+
+    private void scheduleRoomPostSyncDrains(@Nullable MeshContactChatSession session) {
+        if (btManager == null) {
+            return;
+        }
+        btManager.beginRoomPostSyncSession();
+        drainRoomPostSyncMessages();
+        long[] delays = {750L, 2000L, 4000L, 8000L, 15000L, 30000L, 45000L,
+                60000L, 90000L, 120000L, 180000L, 240000L};
+        for (long delay : delays) {
+            getMapView().postDelayed(this::drainRoomPostSyncMessages, delay);
+        }
+        if (roomPostSyncFinishRunnable != null) {
+            getMapView().removeCallbacks(roomPostSyncFinishRunnable);
+        }
+        final MeshContactChatSession finishSession = session;
+        roomPostSyncFinishRunnable = () -> finishRoomPostSyncIfNeeded(finishSession);
+        getMapView().postDelayed(roomPostSyncFinishRunnable, ROOM_POST_SYNC_FINISH_MS);
+    }
+
+    private void drainRoomPostSyncMessages() {
+        if (btManager != null && btManager.isConnected()
+                && btManager.isRoomPostSyncSessionActive()) {
+            btManager.requestMessageDrain(16);
+        }
+    }
+
+    private void finishRoomPostSyncIfNeeded(@Nullable MeshContactChatSession session) {
+        if (btManager != null) {
+            btManager.endRoomPostSyncSession();
+        }
+        if (session != null) {
+            removeRoomLoginPlaceholder(session);
+            if (!hasRealChatLines(session)) {
+                appendMeshContactChatLine(session, false, "(No posts received yet)", null);
+            }
+            renderRoomChatIfVisible(session);
+        }
+    }
+
+    private static boolean hasRealChatLines(MeshContactChatSession session) {
+        if (session == null) {
+            return false;
+        }
+        for (String line : session.lines) {
+            String display = chatLineDisplay(line);
+            if (display == null) {
+                continue;
+            }
+            if (display.contains("Logging in") || display.contains("retrieving full history")
+                    || display.contains("retrieving posts")
+                    || display.contains("syncing posts")
+                    || display.contains("Login complete")
+                    || display.contains("Logged in.")
+                    || display.contains("No posts received yet")
+                    || display.contains("Retrying full post sync")) {
+                continue;
+            }
+            if (display.contains(": ")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void handleRoomLoginFail(String pubKeyPrefixHex12) {
+        cancelRoomLoginTimeout();
+        pendingRoomLoginAction = PendingRoomLoginAction.NONE;
+        roomLoginPendingPubKey = null;
+        appendLog("Room login failed prefix=" + pubKeyPrefixHex12);
+        Toast.makeText(getMapView().getContext(),
+                "Room login failed — check password and radio path.",
+                Toast.LENGTH_LONG).show();
+        MeshContactChatSession session = findRoomSessionForPrefix(pubKeyPrefixHex12);
+        if (session != null) {
+            removeRoomLoginPlaceholder(session);
+            appendMeshContactChatLine(session, false, "(Login failed — check password)", null);
+            renderRoomChatIfVisible(session);
+        }
+        pendingRoomPubKeyHex = null;
+    }
+
+    private void handleRoomCompanionCommandError(int errCode) {
+        if (pendingRoomLoginAction == PendingRoomLoginAction.NONE || pendingRoomPubKeyHex == null) {
+            return;
+        }
+        if (errCode != 2) {
+            appendLog("Room login companion error code=" + errCode);
+            return;
+        }
+        if (roomLoginPendingPubKey != null || (btManager != null
+                && btManager.isRoomContactPrepareInProgress())) {
+            return;
+        }
+        MeshContactChatSession session = findSessionByPubKey(pendingRoomPubKeyHex);
+        if (session == null || btManager == null) {
+            return;
+        }
+        appendLog("Room contact not on radio — re-adding and retrying login…");
+        Context ctx = getMapView().getContext();
+        String pwd = MeshRoomPasswordStore.getPassword(ctx,
+                btManager.getConnectedDeviceAddress(), session.pubKeyHex);
+        if (pwd == null) {
+            pwd = "";
+        }
+        final PendingRoomLoginAction retryAction = pendingRoomLoginAction;
+        sendRoomLoginAfterContactSync(session, pwd, retryAction, true);
+    }
+
+    private MeshContactChatSession findRoomSessionForPrefix(@Nullable String pubKeyPrefixHex12) {
+        if (pubKeyPrefixHex12 == null || pubKeyPrefixHex12.isEmpty()) {
+            return null;
+        }
+        String prefix = pubKeyPrefixHex12.trim().toUpperCase(Locale.US);
+        if (pendingRoomPubKeyHex != null) {
+            MeshContactChatSession session = findSessionByPubKey(pendingRoomPubKeyHex);
+            if (session != null
+                    && session.pubKeyHex.toUpperCase(Locale.US).startsWith(prefix)) {
+                return session;
+            }
+        }
+        if (activeMeshContactPubKey != null) {
+            MeshContactChatSession session = findSessionByPubKey(activeMeshContactPubKey);
+            if (session != null
+                    && session.pubKeyHex.toUpperCase(Locale.US).startsWith(prefix)) {
+                return session;
+            }
+        }
+        for (MeshContactChatSession session : meshContactChatSessions.values()) {
+            if (session.isRoom
+                    && session.pubKeyHex.toUpperCase(Locale.US).startsWith(prefix)) {
+                return session;
+            }
+        }
+        return null;
+    }
+
+    private void removeRoomLoginPlaceholder(MeshContactChatSession session) {
+        if (session == null) {
+            return;
+        }
+        session.lines.removeIf(line -> {
+            String display = chatLineDisplay(line);
+            return display.contains("Logging in")
+                    || display.contains("retrieving full history")
+                    || display.contains("retrieving posts")
+                    || display.contains("syncing posts")
+                    || display.contains("Login complete")
+                    || display.contains("Logged in.")
+                    || display.contains("Retrying full post sync");
+        });
+        if (session.isRoom) {
+            persistRoomChatHistory(session);
+        }
+    }
+
+    private void removeRoomLoginFailurePlaceholder(MeshContactChatSession session) {
+        if (session == null) {
+            return;
+        }
+        session.lines.removeIf(line -> {
+            String display = chatLineDisplay(line);
+            return display.contains("Login timed out") || display.contains("Login failed");
+        });
+    }
+
+    private void scheduleRoomLoginTimeout(MeshContactChatSession session, int attemptId,
+                                          String password) {
+        scheduleRoomLoginTimeout(session, attemptId, password, false);
+    }
+
+    private void scheduleRoomLoginTimeout(MeshContactChatSession session, int attemptId,
+                                          String password, boolean fullResetAttempt) {
+        cancelRoomLoginTimeout();
+        long timeoutMs = fullResetAttempt
+                ? ROOM_LOGIN_FULL_RESET_TIMEOUT_MS : ROOM_LOGIN_TIMEOUT_MS;
+        pendingRoomLoginTimeoutRunnable = () -> {
+            if (attemptId != roomLoginAttemptId) {
+                return;
+            }
+            if (pendingRoomLoginAction == PendingRoomLoginAction.NONE || session == null) {
+                return;
+            }
+            if (session.roomLoginSucceededThisConnection) {
+                return;
+            }
+            if (!session.roomLoginFullResetRetryUsed && session.isRoom) {
+                session.roomLoginFullResetRetryUsed = true;
+                appendLog("Room login timed out for " + session.displayName
+                        + " — retrying with contact reset…");
+                removeRoomLoginFailurePlaceholder(session);
+                PendingRoomLoginAction retryAction = pendingRoomLoginAction;
+                sendRoomLoginAfterContactSync(session, password, retryAction, true);
+                return;
+            }
+            removeRoomLoginPlaceholder(session);
+            appendMeshContactChatLine(session, false,
+                    "(Login timed out — check password, path, and radio connection)", null);
+            renderRoomChatIfVisible(session);
+            pendingRoomLoginAction = PendingRoomLoginAction.NONE;
+            appendLog("Room login timed out for " + session.displayName);
+            roomLoginPendingPubKey = null;
+        };
+        getMapView().postDelayed(pendingRoomLoginTimeoutRunnable, timeoutMs);
+    }
+
+    private void clearRoomLoginStateForDisconnect() {
+        roomLoginAttemptId++;
+        roomLoginPendingPubKey = null;
+        cancelRoomLoginTimeout();
+        cancelRoomEmptyPostSyncRetry();
+        cancelRoomPostSyncFinish();
+        pendingRoomLoginAction = PendingRoomLoginAction.NONE;
+        pendingRoomPubKeyHex = null;
+        for (MeshContactChatSession session : meshContactChatSessions.values()) {
+            session.roomLoginSucceededThisConnection = false;
+            session.roomLoginFullResetRetryUsed = false;
+            session.roomLoginNotFoundRetryUsed = false;
+            session.roomEmptyPostSyncRetryUsed = false;
+            session.roomLastOpenedMs = 0L;
+            session.roomPostsReceivedThisSession = 0;
+        }
+    }
+
+    private void cancelRoomLoginTimeout() {
+        if (pendingRoomLoginTimeoutRunnable != null) {
+            getMapView().removeCallbacks(pendingRoomLoginTimeoutRunnable);
+            pendingRoomLoginTimeoutRunnable = null;
+        }
+    }
+
+    private void cancelRoomPostSyncFinish() {
+        if (roomPostSyncFinishRunnable != null) {
+            getMapView().removeCallbacks(roomPostSyncFinishRunnable);
+            roomPostSyncFinishRunnable = null;
+        }
+    }
+
+    private void restoreJoinedRoomSessions() {
+        if (btManager == null || !btManager.isConnected()) {
+            return;
+        }
+        if (!joinedRoomRestoredThisSession) {
+            Context ctx = getMapView().getContext();
+            String deviceAddr = btManager.getConnectedDeviceAddress();
+            java.util.List<MeshJoinedRoomStore.JoinedRoom> joined =
+                    MeshJoinedRoomStore.loadJoinedRooms(ctx, deviceAddr);
+            for (MeshJoinedRoomStore.JoinedRoom room : joined) {
+                BtConnectionManager.MeshDeviceContact cached =
+                        MeshDeviceContactCache.findByPubKeyPrefix(ctx, deviceAddr, room.pubKeyHex);
+                BtConnectionManager.MeshDeviceContact contact;
+                if (cached != null && cached.type == BtConnectionManager.ADV_TYPE_ROOM) {
+                    contact = cached;
+                } else {
+                    contact = new BtConnectionManager.MeshDeviceContact(
+                            room.pubKeyHex, BtConnectionManager.ADV_TYPE_ROOM,
+                            BtConnectionManager.CONTACT_FLAG_FAVORITE, 0, room.displayName,
+                            0, 0.0, 0.0, (int) (System.currentTimeMillis() / 1000L));
+                }
+                ensureContactChatSession(contact);
+                MeshDeviceContactCache.upsertFromDeviceContact(ctx, deviceAddr, contact);
+            }
+            joinedRoomRestoredThisSession = true;
+        }
+        scheduleRestoreMeshChatUi();
+    }
+
+    private void scheduleRestoreMeshChatUi() {
+        if (!meshChatUiRestorePending) {
+            return;
+        }
+        getMapView().postDelayed(this::restoreMeshChatUi, 120L);
+        getMapView().postDelayed(this::restoreMeshChatUi, 450L);
+    }
+
+    private void restoreMeshChatUi() {
+        if (btManager == null || !btManager.isConnected() || rootView == null) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        String deviceAddr = btManager.getConnectedDeviceAddress();
+
+        if (activeMeshContactPubKey != null) {
+            MeshContactChatSession session = findSessionByPubKey(activeMeshContactPubKey);
+            if (session != null) {
+                applyRestoredMeshChatUi(session, -1, false);
+                meshChatUiRestorePending = false;
+                return;
+            }
+        }
+        if (meshChannelChatActiveIndex >= 0) {
+            applyRestoredMeshChatUi(null, meshChannelChatActiveIndex, false);
+            meshChatUiRestorePending = false;
+            return;
+        }
+
+        MeshLastChatStore.Snapshot snap = MeshLastChatStore.load(ctx, deviceAddr);
+        if (snap == null) {
+            String activeRoomPubKey = MeshJoinedRoomStore.getActiveRoomPubKey(ctx, deviceAddr);
+            if (activeRoomPubKey != null) {
+                snap = new MeshLastChatStore.Snapshot(
+                        MeshLastChatStore.TYPE_ROOM, activeRoomPubKey, -1);
+            }
+        }
+        if (snap == null) {
+            java.util.List<MeshJoinedRoomStore.JoinedRoom> joined =
+                    MeshJoinedRoomStore.loadJoinedRooms(ctx, deviceAddr);
+            if (!joined.isEmpty()) {
+                snap = new MeshLastChatStore.Snapshot(
+                        MeshLastChatStore.TYPE_ROOM, joined.get(0).pubKeyHex, -1);
+            }
+        }
+        if (snap == null) {
+            return;
+        }
+
+        if (snap.type == MeshLastChatStore.TYPE_ROOM && snap.roomPubKeyHex != null) {
+            MeshContactChatSession session = ensureRestoredRoomSession(ctx, deviceAddr, snap.roomPubKeyHex);
+            if (session == null) {
+                return;
+            }
+            activeMeshContactPubKey = session.pubKeyHex;
+            meshChannelChatActiveIndex = -1;
+            applyRestoredMeshChatUi(session, -1, false);
+            scheduleRoomLoginAfterContactsSync(session);
+        } else if (snap.type == MeshLastChatStore.TYPE_CHANNEL && snap.channelIndex >= 0) {
+            activeMeshContactPubKey = null;
+            applyRestoredMeshChatUi(null, snap.channelIndex, false);
+        }
+        meshChatUiRestorePending = false;
+    }
+
+    private MeshContactChatSession ensureRestoredRoomSession(
+            Context ctx, String deviceAddr, String pubKeyHex) {
+        MeshContactChatSession existing = meshContactChatSessions.get(pubKeyHex);
+        if (existing != null) {
+            return existing;
+        }
+        java.util.List<MeshJoinedRoomStore.JoinedRoom> joined =
+                MeshJoinedRoomStore.loadJoinedRooms(ctx, deviceAddr);
+        for (MeshJoinedRoomStore.JoinedRoom room : joined) {
+            if (room.pubKeyHex.equalsIgnoreCase(pubKeyHex)) {
+                BtConnectionManager.MeshDeviceContact cached =
+                        MeshDeviceContactCache.findByPubKeyPrefix(ctx, deviceAddr, pubKeyHex);
+                if (cached != null && cached.type == BtConnectionManager.ADV_TYPE_ROOM) {
+                    return ensureContactChatSession(cached);
+                }
+                BtConnectionManager.MeshDeviceContact contact =
+                        new BtConnectionManager.MeshDeviceContact(
+                                room.pubKeyHex, BtConnectionManager.ADV_TYPE_ROOM,
+                                BtConnectionManager.CONTACT_FLAG_FAVORITE, 0, room.displayName,
+                                0, 0.0, 0.0, (int) (System.currentTimeMillis() / 1000L));
+                return ensureContactChatSession(contact);
+            }
+        }
+        return null;
+    }
+
+    private void applyRestoredMeshChatUi(@Nullable MeshContactChatSession session,
+                                         int channelIndex,
+                                         boolean beginRoomSession) {
+        if (session != null) {
+            showInlineContactChat(session.displayName);
+            buildMeshChannelButtonStrip();
+            if (beginRoomSession && session.isRoom) {
+                beginRoomServerSession(session);
+            }
+        } else if (channelIndex >= 0) {
+            openMeshChannelChatDialog(channelIndex);
+        } else {
+            return;
+        }
+        scheduleScrollToMeshChatSection();
+    }
+
+    private void scheduleRoomLoginAfterContactsSync(@Nullable MeshContactChatSession session) {
+        if (session == null || !session.isRoom) {
+            return;
+        }
+        getMapView().postDelayed(() -> {
+            if (!isSessionCurrentlyVisible(session)) {
+                return;
+            }
+            beginRoomServerSession(session);
+        }, DEVICE_CONTACTS_CONNECT_SYNC_DELAY_MS + 600L);
+    }
+
+    private void maybeBeginActiveRoomSessionAfterContactsSync() {
+        if (activeMeshContactPubKey == null || btManager == null) {
+            return;
+        }
+        MeshContactChatSession session = findSessionByPubKey(activeMeshContactPubKey);
+        if (session == null || !session.isRoom || session.roomLoginSucceededThisConnection) {
+            return;
+        }
+        beginRoomServerSession(session);
+    }
+
+    private void scheduleScrollToMeshChatSection() {
+        getMapView().postDelayed(this::scrollToMeshChatSection, 120L);
+        getMapView().postDelayed(this::scrollToMeshChatSection, 400L);
+        getMapView().postDelayed(this::scrollToMeshChatSection, 900L);
+    }
+
+    private void scrollToMeshChatSection() {
+        if (!(rootView instanceof ScrollView)) {
+            return;
+        }
+        View target = meshChannelLogText != null ? meshChannelLogText : stripMeshChannels;
+        if (target == null || target.getVisibility() != View.VISIBLE) {
+            target = stripMeshChannels;
+        }
+        if (target == null) {
+            return;
+        }
+        ScrollView scroll = (ScrollView) rootView;
+        final View scrollTarget = target;
+        scroll.post(() -> {
+            int y = 0;
+            View cursor = scrollTarget;
+            while (cursor != null && cursor != scroll) {
+                y += cursor.getTop();
+                android.view.ViewParent p = cursor.getParent();
+                cursor = (p instanceof View) ? (View) p : null;
+            }
+            y = Math.max(0, y - dip(getMapView().getContext(), 48));
+            final int scrollY = y;
+            scroll.scrollTo(0, scrollY);
+            scroll.post(() -> scroll.smoothScrollTo(0, scrollY));
+        });
     }
 
     private static String deviceContactTypeLabel(int type) {
@@ -2025,7 +3367,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private void showChannelManagementDialog() {
-        if (!btManager.isConnected()) {
+        boolean connected = isMeshConnected()
+                || (btManager != null && btManager.isConnected());
+        if (!connected) {
             Toast.makeText(getMapView().getContext(),
                     "Connect to a MeshCore node first.", Toast.LENGTH_SHORT).show();
             return;
@@ -2078,25 +3422,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 .setNegativeButton("Close", null)
                 .create();
         channelManagementDialog.show();
-    }
-
-    private List<ManagedChannelEntry> collectManagedChannels() {
-        List<ManagedChannelEntry> entries = new ArrayList<>();
-        for (int i = 0; i < 8; i++) {
-            String name = meshChannelNames.get(i);
-            if (name != null && !name.trim().isEmpty()
-                    && !"ATAK_DATA".equalsIgnoreCase(name.trim())) {
-                entries.add(ManagedChannelEntry.group(i, name.trim()));
-            }
-        }
-        Context ctx = getMapView() != null ? getMapView().getContext() : null;
-        String addr = btManager.getConnectedDeviceAddress();
-        if (ctx != null && addr != null) {
-            for (MeshJoinedRoomStore.JoinedRoom room : MeshJoinedRoomStore.loadJoinedRooms(ctx, addr)) {
-                entries.add(ManagedChannelEntry.room(room.displayName, room.pubKeyHex));
-            }
-        }
-        return entries;
     }
 
     private View buildManagedChannelRow(Context ctx, ManagedChannelEntry entry, Runnable onRemoved) {
@@ -2153,16 +3478,16 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     }
 
     private void performRemoveGroupChannel(int slot, String channelName) {
+        if (btManager == null) {
+            return;
+        }
         btManager.clearChannelSlot(slot);
         meshChannelNames.remove(slot);
         if (meshChannelChatActiveIndex == slot) {
-            meshChannelChatActiveIndex = -1;
             if (meshChannelChatDialog != null && meshChannelChatDialog.isShowing()) {
                 meshChannelChatDialog.dismiss();
             }
-            meshChannelChatDialog = null;
-            meshChannelChatLogView = null;
-            meshChannelChatTitleView = null;
+            meshChannelChatActiveIndex = -1;
             if (meshChannelLogText != null) {
                 meshChannelLogText.setVisibility(View.GONE);
             }
@@ -2175,67 +3500,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         updateMeshChannelButtonLabel();
         appendLog("Channel '" + channelName + "' removed.");
-    }
-
-    private void performRemoveJoinedRoom(String pubKeyHex, String displayName) {
-        if (pubKeyHex == null) {
-            return;
-        }
-        Context ctx = getMapView().getContext();
-        String addr = btManager.getConnectedDeviceAddress();
-        MeshJoinedRoomStore.removeJoinedRoom(ctx, addr, pubKeyHex);
-        if (meshContactChatIsRoom && pubKeyHex.equalsIgnoreCase(meshContactChatPubKeyHex)) {
-            cancelRoomLoginTimeout();
-            pendingRoomLoginAction = PendingRoomLoginAction.NONE;
-            meshContactChatActive = false;
-            meshContactChatIsRoom = false;
-            meshContactChatPubKeyHex = null;
-            meshContactChatDisplayName = null;
-            meshContactChatPrefixHex = null;
-            meshContactChatLines.clear();
-            if (meshChannelLogText != null) {
-                meshChannelLogText.setVisibility(View.GONE);
-            }
-            if (meshChannelTitleView != null) {
-                meshChannelTitleView.setVisibility(View.GONE);
-            }
-            if (rowMeshChannelInput != null) {
-                rowMeshChannelInput.setVisibility(View.GONE);
-            }
-        }
-        String name = displayName != null && !displayName.trim().isEmpty()
-                ? displayName.trim() : pubKeyHex.substring(0, 12);
-        btManager.removeDeviceContact(new BtConnectionManager.MeshDeviceContact(
-                pubKeyHex, BtConnectionManager.ADV_TYPE_ROOM, 0, 0, name,
-                0, 0.0, 0.0, (int) (System.currentTimeMillis() / 1000L)));
-        updateMeshChannelButtonLabel();
-        appendLog("Room '" + name + "' removed.");
-    }
-
-    private void showAddChannelOptionsDialog() {
-        Context ctx = getMapView().getContext();
-        String[] options = {
-                "Join the Public Channel",
-                "Join a Hashtag Channel  (e.g. #test)",
-                "Create a Private Channel",
-                "Join a Private Channel",
-                "Join a Room Server",
-                "Scan QR Code"
-        };
-        new AlertDialog.Builder(ctx)
-                .setTitle("Add Channel")
-                .setItems(options, (d, which) -> {
-                    switch (which) {
-                        case 0: joinPublicChannel();            break;
-                        case 1: showHashtagChannelDialog();     break;
-                        case 2: showCreatePrivateDialog();      break;
-                        case 3: showJoinPrivateDialog();        break;
-                        case 4: showJoinRoomServerDialog();     break;
-                        case 5: showQrScanDialog();             break;
-                    }
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
     }
 
     private void joinPublicChannel() {
@@ -2420,8 +3684,34 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         joinPrivateDialog.show();
     }
 
+    private void showAddChannelOptionsDialog() {
+        Context ctx = getMapView().getContext();
+        String[] options = {
+                "Join the Public Channel",
+                "Join a Hashtag Channel  (e.g. #test)",
+                "Create a Private Channel",
+                "Join a Private Channel",
+                "Join a Room Server",
+                "Scan QR Code"
+        };
+        new AlertDialog.Builder(ctx)
+                .setTitle("Add Channel")
+                .setItems(options, (d, which) -> {
+                    switch (which) {
+                        case 0: joinPublicChannel();            break;
+                        case 1: showHashtagChannelDialog();     break;
+                        case 2: showCreatePrivateDialog();      break;
+                        case 3: showJoinPrivateDialog();        break;
+                        case 4: showJoinRoomServerDialog();     break;
+                        case 5: showQrScanDialog();             break;
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
     private void showJoinRoomServerDialog() {
-        if (!btManager.isConnected()) {
+        if (btManager == null || !btManager.isConnected()) {
             Toast.makeText(getMapView().getContext(),
                     "Connect to a MeshCore node first.", Toast.LENGTH_SHORT).show();
             return;
@@ -2458,7 +3748,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 .show();
     }
 
-    private void showJoinRoomServerManualDialog(@Nullable BtConnectionManager.MeshDeviceContact preset) {
+    private void showJoinRoomServerManualDialog(
+            @Nullable BtConnectionManager.MeshDeviceContact preset) {
         Context ctx = getMapView().getContext();
         int pad = dip(ctx, 16);
         LinearLayout layout = new LinearLayout(ctx);
@@ -2470,8 +3761,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (preset != null && preset.name != null) {
             nameField.setText(preset.name);
         }
-        EditText pubKeyField = addLabeledField(layout, ctx, "Public Key (64 hex, optional if known)",
-                "Leave blank if selecting from contacts", false);
+        EditText pubKeyField = addLabeledField(layout, ctx, "Public Key (64 hex)",
+                "Full 32-byte pubkey", false);
         if (preset != null && preset.pubKeyHex != null) {
             pubKeyField.setText(preset.pubKeyHex);
         }
@@ -2491,6 +3782,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 return;
             }
             btn.setOnClickListener(v -> {
+                if (btManager == null) {
+                    return;
+                }
                 String name = fieldText(nameField);
                 String pubKey = normalizePubKeyHex(fieldText(pubKeyField));
                 String password = fieldText(pwdField);
@@ -2501,9 +3795,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
                 if (name.isEmpty()) {
                     name = pubKey.length() >= 12 ? pubKey.substring(0, 12) : "Room";
                 }
-                BtConnectionManager.MeshDeviceContact contact = new BtConnectionManager.MeshDeviceContact(
-                        pubKey, BtConnectionManager.ADV_TYPE_ROOM, 0, 0, name,
-                        0, 0.0, 0.0, (int) (System.currentTimeMillis() / 1000L));
+                BtConnectionManager.MeshDeviceContact contact =
+                        new BtConnectionManager.MeshDeviceContact(
+                                pubKey, BtConnectionManager.ADV_TYPE_ROOM, 0, 0, name,
+                                0, 0.0, 0.0, (int) (System.currentTimeMillis() / 1000L));
                 MeshRoomPasswordStore.savePassword(ctx, btManager.getConnectedDeviceAddress(),
                         pubKey, password);
                 MeshDeviceContactCache.upsertFromDeviceContact(ctx,
@@ -2515,421 +3810,24 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         dialog.show();
     }
 
-    private void joinRoomServerContact(BtConnectionManager.MeshDeviceContact contact,
-                                       @Nullable String passwordOverride) {
-        if (contact == null || contact.pubKeyHex == null) {
-            return;
-        }
-        Context ctx = getMapView().getContext();
-        String pubKey = normalizePubKeyHex(contact.pubKeyHex);
-        if (pubKey == null || pubKey.length() != 64) {
-            Toast.makeText(ctx, "Invalid room pubkey.", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        String displayName = contact.name != null && !contact.name.trim().isEmpty()
-                ? contact.name.trim()
-                : (pubKey.length() >= 12 ? pubKey.substring(0, 12) : "Room");
-        String pwd = passwordOverride;
-        if (pwd == null) {
-            if (!MeshRoomPasswordStore.hasPasswordStored(ctx,
-                    btManager.getConnectedDeviceAddress(), pubKey)) {
-                promptRoomPasswordAndLogin(pubKey, displayName, PendingRoomLoginAction.JOIN_ONLY);
-                return;
+    private void updateMeshChatInputHint() {
+        String hint = "Channel message";
+        if (activeMeshContactPubKey != null) {
+            MeshContactChatSession session = getActiveContactSession();
+            if (session != null && session.displayName != null
+                    && !session.displayName.trim().isEmpty()) {
+                hint = "Message to " + session.displayName.trim();
             }
-            pwd = MeshRoomPasswordStore.getPassword(ctx, btManager.getConnectedDeviceAddress(), pubKey);
-        }
-        BtConnectionManager.MeshDeviceContact deviceContact =
-                new BtConnectionManager.MeshDeviceContact(
-                        pubKey, BtConnectionManager.ADV_TYPE_ROOM, 0, 0, displayName,
-                        contact.lastAdvertTimestamp, contact.gpsLat, contact.gpsLon,
-                        contact.lastMod > 0
-                                ? contact.lastMod
-                                : (int) (System.currentTimeMillis() / 1000L));
-        MeshDeviceContactCache.upsertFromDeviceContact(ctx,
-                btManager.getConnectedDeviceAddress(), deviceContact);
-        meshContactChatActive = true;
-        meshContactChatIsRoom = true;
-        meshContactChatPubKeyHex = pubKey;
-        meshContactChatPrefixHex = pubKey.substring(0, 12);
-        meshContactChatDisplayName = displayName;
-        meshChannelChatActiveIndex = -1;
-        meshContactChatLines.clear();
-        showInlineContactChat(meshContactChatDisplayName);
-        MeshJoinedRoomStore.saveJoinedRoom(ctx, btManager.getConnectedDeviceAddress(),
-                pubKey, displayName);
-        MeshRoomPasswordStore.savePassword(ctx, btManager.getConnectedDeviceAddress(),
-                pubKey, pwd != null ? pwd : "");
-        sendRoomLoginAfterContactSync(pubKey, pwd != null ? pwd : "",
-                PendingRoomLoginAction.JOIN_ONLY, false);
-    }
-
-    private void sendRoomLoginAfterContactSync(String pubKeyHex, String password,
-                                               PendingRoomLoginAction action) {
-        sendRoomLoginAfterContactSync(pubKeyHex, password, action, false);
-    }
-
-    private void sendRoomLoginAfterContactSync(String pubKeyHex, String password,
-                                               PendingRoomLoginAction action,
-                                               boolean resetContactForFullHistory) {
-        Context ctx = getMapView().getContext();
-        cancelRoomLoginTimeout();
-        meshContactChatPubKeyHex = pubKeyHex;
-        meshContactChatPrefixHex = pubKeyHex.substring(0, 12);
-        pendingRoomLoginAction = action;
-        pendingRoomLoginPassword = password != null ? password : "";
-        final int attemptId = ++roomLoginAttemptId;
-        meshRoomLoggedInThisConnection = false;
-        MeshRoomPasswordStore.savePassword(ctx, btManager.getConnectedDeviceAddress(),
-                pubKeyHex, pendingRoomLoginPassword);
-        removeRoomLoginFailurePlaceholder();
-        appendMeshContactChatLine(false, "(Logging in — retrieving posts…)", null);
-        renderMeshContactChatLog();
-        Runnable sendLogin = () -> {
-            if (!btManager.isConnected()) {
-                return;
+        } else if (meshChannelChatActiveIndex >= 0) {
+            String channelName = meshChannelNames.get(meshChannelChatActiveIndex);
+            if (channelName == null || channelName.trim().isEmpty()) {
+                channelName = "Channel";
             }
-            appendLog("Sending room login for '" + meshContactChatDisplayName + "' (fullReset="
-                    + resetContactForFullHistory + ")…");
-            if (!btManager.sendRoomLogin(pubKeyHex, pendingRoomLoginPassword)) {
-                Toast.makeText(ctx, "Failed to send room login.", Toast.LENGTH_SHORT).show();
-                pendingRoomLoginAction = PendingRoomLoginAction.NONE;
-                return;
-            }
-            scheduleRoomLoginTimeout(attemptId, resetContactForFullHistory);
-        };
-        BtConnectionManager.MeshDeviceContact contact = resolveRoomDeviceContact(pubKeyHex);
-        if (meshContactChatIsRoom && resetContactForFullHistory) {
-            btManager.prepareRoomContactForFullHistorySync(contact, sendLogin);
-        } else {
-            btManager.cancelRoomContactPrepare();
-            if (action == PendingRoomLoginAction.JOIN_ONLY) {
-                btManager.addOrUpdateDeviceContactFavorite(contact);
-                getMapView().postDelayed(sendLogin, ROOM_CONTACT_ADD_DELAY_MS);
-            } else {
-                getMapView().postDelayed(sendLogin, 300L);
-            }
+            hint = "Message to " + channelName.trim();
         }
-    }
-
-    private BtConnectionManager.MeshDeviceContact resolveRoomDeviceContact(String pubKeyHex) {
-        String name = meshContactChatDisplayName != null ? meshContactChatDisplayName : "Room";
-        BtConnectionManager.MeshDeviceContact fallback =
-                new BtConnectionManager.MeshDeviceContact(
-                        pubKeyHex, BtConnectionManager.ADV_TYPE_ROOM, 0,
-                        BtConnectionManager.OUT_PATH_UNKNOWN,
-                        name, 0, 0.0, 0.0, (int) (System.currentTimeMillis() / 1000L));
-        if (btManager == null) {
-            return fallback;
+        if (editMeshChannelMessage != null) {
+            editMeshChannelMessage.setHint(hint);
         }
-        BtConnectionManager.MeshDeviceContact cached =
-                MeshDeviceContactCache.findByPubKeyPrefix(
-                        getMapView().getContext(), btManager.getConnectedDeviceAddress(), pubKeyHex);
-        if (cached != null && cached.type == BtConnectionManager.ADV_TYPE_ROOM) {
-            return cached;
-        }
-        return fallback;
-    }
-
-    private void beginRoomServerSession(String pubKeyHex, String displayName, boolean openChatUi) {
-        Context ctx = getMapView().getContext();
-        String deviceAddr = btManager.getConnectedDeviceAddress();
-        if (!MeshRoomPasswordStore.hasPasswordStored(ctx, deviceAddr, pubKeyHex)) {
-            promptRoomPasswordAndLogin(pubKeyHex, displayName, PendingRoomLoginAction.OPEN_CHAT);
-            return;
-        }
-        if (meshRoomLoggedInThisConnection
-                && meshContactChatPubKeyHex != null
-                && meshContactChatPubKeyHex.equalsIgnoreCase(pubKeyHex)) {
-            return;
-        }
-        String pwd = MeshRoomPasswordStore.getPassword(ctx, deviceAddr, pubKeyHex);
-        sendRoomLoginAfterContactSync(pubKeyHex, pwd != null ? pwd : "",
-                PendingRoomLoginAction.OPEN_CHAT);
-    }
-
-    private void promptRoomPasswordAndLogin(String pubKeyHex, String displayName,
-                                            PendingRoomLoginAction action) {
-        Context ctx = getMapView().getContext();
-        EditText pwdField = new EditText(ctx);
-        pwdField.setHint("Guest password (blank = read-only)");
-        pwdField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        pwdField.setSingleLine(true);
-        new AlertDialog.Builder(ctx)
-                .setTitle("Room Password")
-                .setMessage("Enter the password for \"" + displayName + "\".\n"
-                        + "Leave blank if the room allows read-only access.")
-                .setView(pwdField)
-                .setPositiveButton("Login", (d, w) -> {
-                    String pwd = fieldText(pwdField);
-                    MeshRoomPasswordStore.savePassword(ctx, btManager.getConnectedDeviceAddress(),
-                            pubKeyHex, pwd);
-                    btManager.addOrUpdateDeviceContactFavorite(
-                            new BtConnectionManager.MeshDeviceContact(
-                                    pubKeyHex, BtConnectionManager.ADV_TYPE_ROOM,
-                                    0, 0, displayName, 0, 0.0, 0.0,
-                                    (int) (System.currentTimeMillis() / 1000L)));
-                    sendRoomLoginAfterContactSync(pubKeyHex, pwd, action);
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void handleRoomLoginSuccess(String pubKeyPrefixHex12, int permissions) {
-        Context ctx = getMapView().getContext();
-        cancelRoomLoginTimeout();
-        roomLoginAttemptId++;
-        if (meshContactChatPubKeyHex == null
-                || !meshContactChatPubKeyHex.toUpperCase(Locale.US)
-                .startsWith(pubKeyPrefixHex12.toUpperCase(Locale.US))) {
-            appendLog("Room login OK prefix=" + pubKeyPrefixHex12);
-            scheduleRoomPostSyncDrains();
-            return;
-        }
-        meshRoomLoggedInThisConnection = true;
-        appendLog("Room login OK for " + meshContactChatDisplayName + " perm=" + permissions);
-        pendingRoomLoginAction = PendingRoomLoginAction.NONE;
-        removeRoomLoginPlaceholder();
-        removeRoomLoginFailurePlaceholder();
-        if (meshContactChatLines.isEmpty()) {
-            appendMeshContactChatLine(false, "(Login complete — syncing posts…)", null);
-        }
-        renderMeshContactChatLog();
-        Toast.makeText(ctx, "Room login successful — syncing messages…",
-                Toast.LENGTH_SHORT).show();
-        scheduleRoomPostSyncDrains();
-        scheduleRoomEmptyPostSyncRetry();
-    }
-
-    private void scheduleRoomEmptyPostSyncRetry() {
-        if (!meshContactChatIsRoom) {
-            return;
-        }
-        cancelRoomEmptyPostSyncRetry();
-        roomEmptyPostSyncRetryRunnable = () -> {
-            roomEmptyPostSyncRetryRunnable = null;
-            if (meshRoomEmptyPostSyncRetryUsed || hasRealMeshContactChatLines()) {
-                return;
-            }
-            if (!meshRoomLoggedInThisConnection || !btManager.isConnected()
-                    || meshContactChatPubKeyHex == null) {
-                return;
-            }
-            meshRoomEmptyPostSyncRetryUsed = true;
-            appendLog("No room posts after login for " + meshContactChatDisplayName
-                    + " — resetting sync_since and retrying…");
-            removeRoomLoginPlaceholder();
-            appendMeshContactChatLine(false, "(Retrying full post sync…)", null);
-            renderMeshContactChatLog();
-            meshRoomLoggedInThisConnection = false;
-            Context ctx = getMapView().getContext();
-            String pwd = MeshRoomPasswordStore.getPassword(ctx,
-                    btManager.getConnectedDeviceAddress(), meshContactChatPubKeyHex);
-            sendRoomLoginAfterContactSync(meshContactChatPubKeyHex, pwd != null ? pwd : "",
-                    PendingRoomLoginAction.OPEN_CHAT, true);
-        };
-        getMapView().postDelayed(roomEmptyPostSyncRetryRunnable, ROOM_EMPTY_POST_SYNC_RETRY_MS);
-    }
-
-    private void cancelRoomEmptyPostSyncRetry() {
-        if (roomEmptyPostSyncRetryRunnable != null) {
-            getMapView().removeCallbacks(roomEmptyPostSyncRetryRunnable);
-            roomEmptyPostSyncRetryRunnable = null;
-        }
-    }
-
-    private void scheduleRoomPostSyncDrains() {
-        if (btManager == null) {
-            return;
-        }
-        btManager.beginRoomPostSyncSession();
-        drainRoomPostSyncMessages();
-        long[] delays = {750L, 2000L, 4000L, 8000L, 15000L, 30000L, 45000L,
-                60000L, 90000L, 120000L, 180000L, 240000L};
-        for (long delay : delays) {
-            getMapView().postDelayed(this::drainRoomPostSyncMessages, delay);
-        }
-        if (roomPostSyncFinishRunnable != null) {
-            getMapView().removeCallbacks(roomPostSyncFinishRunnable);
-        }
-        roomPostSyncFinishRunnable = this::finishRoomPostSyncIfNeeded;
-        getMapView().postDelayed(roomPostSyncFinishRunnable, ROOM_POST_SYNC_FINISH_MS);
-    }
-
-    private void drainRoomPostSyncMessages() {
-        if (btManager != null && btManager.isConnected()
-                && btManager.isRoomPostSyncSessionActive()) {
-            btManager.requestMessageDrain(16);
-        }
-    }
-
-    private void finishRoomPostSyncIfNeeded() {
-        if (btManager != null) {
-            btManager.endRoomPostSyncSession();
-        }
-        removeRoomLoginPlaceholder();
-        if (!hasRealMeshContactChatLines()) {
-            appendMeshContactChatLine(false, "(No posts received yet)", null);
-        }
-        renderMeshContactChatLog();
-    }
-
-    private boolean hasRealMeshContactChatLines() {
-        for (String line : meshContactChatLines) {
-            if (line == null) {
-                continue;
-            }
-            if (line.contains("Logging in") || line.contains("syncing posts")
-                    || line.contains("Retrying full post sync")) {
-                continue;
-            }
-            if (line.contains(": ")) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void handleRoomLoginFail(String pubKeyPrefixHex12) {
-        cancelRoomLoginTimeout();
-        pendingRoomLoginAction = PendingRoomLoginAction.NONE;
-        appendLog("Room login failed prefix=" + pubKeyPrefixHex12);
-        Toast.makeText(getMapView().getContext(),
-                "Room login failed — check password and radio path.",
-                Toast.LENGTH_LONG).show();
-        removeRoomLoginPlaceholder();
-        appendMeshContactChatLine(false, "(Login failed — check password)", null);
-        renderMeshContactChatLog();
-    }
-
-    private void handleRoomCompanionCommandError(int errCode) {
-        if (pendingRoomLoginAction == PendingRoomLoginAction.NONE
-                || meshContactChatPubKeyHex == null) {
-            return;
-        }
-        if (errCode != 2) {
-            appendLog("Room login companion error code=" + errCode);
-            return;
-        }
-        appendLog("Room contact not on radio — re-adding and retrying login…");
-        Context ctx = getMapView().getContext();
-        String pwd = MeshRoomPasswordStore.getPassword(ctx,
-                btManager.getConnectedDeviceAddress(), meshContactChatPubKeyHex);
-        if (pwd == null) {
-            pwd = "";
-        }
-        final String loginPwd = pwd;
-        final PendingRoomLoginAction retryAction = pendingRoomLoginAction;
-        sendRoomLoginAfterContactSync(meshContactChatPubKeyHex, loginPwd, retryAction, true);
-    }
-
-    private void removeRoomLoginPlaceholder() {
-        meshContactChatLines.removeIf(line -> line.contains("Logging in")
-                || line.contains("syncing posts")
-                || line.contains("Retrying full post sync"));
-    }
-
-    private void removeRoomLoginFailurePlaceholder() {
-        meshContactChatLines.removeIf(line -> line.contains("Login timed out")
-                || line.contains("Login failed"));
-    }
-
-    private void scheduleRoomLoginTimeout(int attemptId) {
-        scheduleRoomLoginTimeout(attemptId, false);
-    }
-
-    private void scheduleRoomLoginTimeout(int attemptId, boolean fullResetAttempt) {
-        cancelRoomLoginTimeout();
-        long timeoutMs = fullResetAttempt
-                ? ROOM_LOGIN_FULL_RESET_TIMEOUT_MS : ROOM_LOGIN_TIMEOUT_MS;
-        pendingRoomLoginTimeoutRunnable = () -> {
-            if (attemptId != roomLoginAttemptId) {
-                return;
-            }
-            if (pendingRoomLoginAction == PendingRoomLoginAction.NONE) {
-                return;
-            }
-            if (meshRoomLoggedInThisConnection) {
-                return;
-            }
-            if (!meshRoomFullResetRetryUsed && meshContactChatIsRoom
-                    && meshContactChatPubKeyHex != null && pendingRoomLoginPassword != null) {
-                meshRoomFullResetRetryUsed = true;
-                appendLog("Room login timed out for " + meshContactChatDisplayName
-                        + " — retrying with contact reset…");
-                removeRoomLoginFailurePlaceholder();
-                PendingRoomLoginAction retryAction = pendingRoomLoginAction;
-                sendRoomLoginAfterContactSync(meshContactChatPubKeyHex, pendingRoomLoginPassword,
-                        retryAction, true);
-                return;
-            }
-            removeRoomLoginPlaceholder();
-            appendMeshContactChatLine(false,
-                    "(Login timed out — check password, path, and radio connection)", null);
-            renderMeshContactChatLog();
-            pendingRoomLoginAction = PendingRoomLoginAction.NONE;
-            appendLog("Room login timed out for " + meshContactChatDisplayName);
-        };
-        getMapView().postDelayed(pendingRoomLoginTimeoutRunnable, timeoutMs);
-    }
-
-    private void cancelRoomLoginTimeout() {
-        if (pendingRoomLoginTimeoutRunnable != null) {
-            getMapView().removeCallbacks(pendingRoomLoginTimeoutRunnable);
-            pendingRoomLoginTimeoutRunnable = null;
-        }
-    }
-
-    private void cancelRoomPostSyncFinish() {
-        if (roomPostSyncFinishRunnable != null) {
-            getMapView().removeCallbacks(roomPostSyncFinishRunnable);
-            roomPostSyncFinishRunnable = null;
-        }
-    }
-
-    private void restoreJoinedRoomState() {
-        if (joinedRoomRestoredThisSession || !btManager.isConnected()) {
-            return;
-        }
-        Context ctx = getMapView().getContext();
-        String deviceAddr = btManager.getConnectedDeviceAddress();
-        java.util.List<MeshJoinedRoomStore.JoinedRoom> joined =
-                MeshJoinedRoomStore.loadJoinedRooms(ctx, deviceAddr);
-        if (joined.isEmpty()) {
-            return;
-        }
-        String activePubKey = MeshJoinedRoomStore.getActiveRoomPubKey(ctx, deviceAddr);
-        MeshJoinedRoomStore.JoinedRoom activeRoom = null;
-        for (MeshJoinedRoomStore.JoinedRoom room : joined) {
-            if (activePubKey != null && room.pubKeyHex.equalsIgnoreCase(activePubKey)) {
-                activeRoom = room;
-                break;
-            }
-        }
-        if (activeRoom == null) {
-            activeRoom = joined.get(0);
-        }
-        final MeshJoinedRoomStore.JoinedRoom roomToRestore = activeRoom;
-        BtConnectionManager.MeshDeviceContact contact =
-                new BtConnectionManager.MeshDeviceContact(
-                        roomToRestore.pubKeyHex, BtConnectionManager.ADV_TYPE_ROOM,
-                        BtConnectionManager.CONTACT_FLAG_FAVORITE, 0, roomToRestore.displayName,
-                        0, 0.0, 0.0, (int) (System.currentTimeMillis() / 1000L));
-        MeshDeviceContactCache.upsertFromDeviceContact(ctx, deviceAddr, contact);
-        meshContactChatActive = true;
-        meshContactChatIsRoom = true;
-        meshContactChatPubKeyHex = roomToRestore.pubKeyHex;
-        meshContactChatPrefixHex = roomToRestore.pubKeyHex.substring(0, 12);
-        meshContactChatDisplayName = roomToRestore.displayName;
-        meshChannelChatActiveIndex = -1;
-        showInlineContactChat(meshContactChatDisplayName);
-        if (MeshRoomPasswordStore.hasPasswordStored(ctx, deviceAddr, roomToRestore.pubKeyHex)) {
-            String pwd = MeshRoomPasswordStore.getPassword(ctx, deviceAddr, roomToRestore.pubKeyHex);
-            getMapView().postDelayed(
-                    () -> sendRoomLoginAfterContactSync(roomToRestore.pubKeyHex,
-                            pwd != null ? pwd : "", PendingRoomLoginAction.OPEN_CHAT),
-                    500L);
-        }
-        joinedRoomRestoredThisSession = true;
     }
 
     private java.util.List<BtConnectionManager.MeshDeviceContact> mergeJoinedRoomsIntoDeviceContacts(
@@ -3564,56 +4462,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
     }
 
-    private void buildMeshChannelButtonStrip() {
-        if (stripMeshChannels == null) return;
-        stripMeshChannels.removeAllViews();
-        Context ctx = getMapView().getContext();
-        java.util.List<Integer> indices = new ArrayList<>();
-        for (int i = 0; i < 8; i++) {
-            String name = meshChannelNames.get(i);
-            if (name != null && !name.trim().isEmpty()
-                    && !"ATAK_DATA".equalsIgnoreCase(name.trim())) {
-                indices.add(i);
-            }
-        }
-        if (indices.isEmpty()) {
-            android.widget.TextView placeholder = new android.widget.TextView(ctx);
-            placeholder.setText("No channels found. Try connecting first.");
-            placeholder.setTextColor(0xFF888888);
-            placeholder.setTextSize(11f);
-            placeholder.setPadding(8, 4, 8, 4);
-            stripMeshChannels.addView(placeholder);
-            return;
-        }
-        for (int idx : indices) {
-            final int channelIndex = idx;
-            String name = meshChannelNames.get(idx);
-            Button btn = new Button(ctx);
-            android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
-                    0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            lp.setMarginEnd(indices.indexOf(idx) < indices.size() - 1 ? 4 : 0);
-            btn.setLayoutParams(lp);
-            btn.setText(name);
-            btn.setTextSize(11f);
-            btn.setAllCaps(false);
-            btn.setPadding(8, 6, 8, 6);
-            btn.setMinHeight(0);
-            btn.setMinimumHeight(0);
-            applyMeshChannelButtonStyle(btn, channelIndex == meshChannelChatActiveIndex);
-            btn.setOnClickListener(v -> {
-                meshChannelChatActiveIndex = channelIndex;
-                openMeshChannelChatDialog(channelIndex);
-                buildMeshChannelButtonStrip();
-            });
-            final String channelNameFinal = name;
-            btn.setOnLongClickListener(v -> {
-                showChannelSettingsMenu(channelIndex, channelNameFinal);
-                return true;
-            });
-            stripMeshChannels.addView(btn);
-        }
-    }
-
+    
     private void applyMeshChannelButtonStyle(Button btn, boolean selected) {
         if (selected) {
             btn.setBackgroundColor(0xFF00BCD4);
@@ -4698,33 +5547,17 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             updateScanButtonText();
             getMapView().postDelayed(this::syncDeviceContactsCacheInBackground,
                     DEVICE_CONTACTS_CONNECT_SYNC_DELAY_MS);
-            getMapView().postDelayed(this::restoreJoinedRoomState, ROOM_CONTACT_ADD_DELAY_MS);
+            getMapView().postDelayed(this::restoreJoinedRoomSessions, ROOM_CONTACT_ADD_DELAY_MS);
+            getMapView().postDelayed(this::scheduleRestoreMeshChatUi, ROOM_CONTACT_ADD_DELAY_MS + 200L);
         });
     }
 
-    private void syncDeviceContactsCacheInBackground() {
-        if (!isMeshConnected()) {
-            return;
-        }
-        Context ctx = getMapView().getContext();
-        String deviceAddr = btManager.getConnectedDeviceAddress();
-        if (!MeshDeviceContactCache.isStale(ctx, deviceAddr, DEVICE_CONTACTS_CACHE_STALE_MS)) {
-            return;
-        }
-        fetchDeviceContactsFromRadio(false, false);
-    }
 
     @Override
     public void onDisconnected(String reason) {
         joinedRoomRestoredThisSession = false;
-        meshRoomLoggedInThisConnection = false;
-        meshRoomFullResetRetryUsed = false;
-        meshRoomEmptyPostSyncRetryUsed = false;
-        pendingRoomLoginPassword = null;
-        roomLoginAttemptId++;
-        cancelRoomLoginTimeout();
-        cancelRoomEmptyPostSyncRetry();
-        pendingRoomLoginAction = PendingRoomLoginAction.NONE;
+        meshChatUiRestorePending = true;
+        clearRoomLoginStateForDisconnect();
         getMapView().post(() -> {
             stopScanDiscoveryPulse();
             stopConnectButtonPulse(true);
@@ -5707,11 +6540,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         meshChannelChatLogView = null;
         meshChannelChatTitleView = null;
         meshChannelChatActiveIndex = -1;
-        meshContactChatActive = false;
-        meshContactChatIsRoom = false;
-        meshContactChatPubKeyHex = null;
-        meshContactChatDisplayName = null;
-        meshContactChatPrefixHex = null;
+        activeMeshContactPubKey = null;
     }
 
     @Override
@@ -5740,6 +6569,8 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         btManager.removeMeshChannelListener(meshChannelListener);
         btManager.removeMeshNativeDmListener(meshNativeDmListener);
         btManager.removeMeshRoomLoginListener(meshRoomLoginListener);
+        btManager.removeMeshDeviceContactUpdateListener(meshDeviceContactUpdateListener);
+        btManager.removeMeshAdvertListener(meshRoomAdvertListener);
         contactTracker.setListener(null);
         stopConnectButtonPulse(true);
         pendingManualMeshGpsUpdate = false;
@@ -5760,10 +6591,6 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         meshChannelChatLogView = null;
         meshChannelChatTitleView = null;
         meshChannelChatActiveIndex = -1;
-        meshContactChatActive = false;
-        meshContactChatIsRoom = false;
-        meshContactChatPubKeyHex = null;
-        meshContactChatDisplayName = null;
-        meshContactChatPrefixHex = null;
+        activeMeshContactPubKey = null;
     }
 }

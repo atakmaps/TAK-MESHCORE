@@ -124,6 +124,31 @@ public final class MeshDeviceContactCache {
         save(context, addr, contacts);
     }
 
+    public static void removeByPubKey(Context context, @Nullable String deviceAddress,
+                                      @Nullable String pubKeyHex) {
+        String addr = normalizeDeviceAddress(deviceAddress);
+        if (addr == null || pubKeyHex == null || pubKeyHex.trim().isEmpty()) {
+            return;
+        }
+        String key = pubKeyHex.trim().toUpperCase(Locale.US);
+        List<BtConnectionManager.MeshDeviceContact> contacts = load(context, addr);
+        if (contacts.isEmpty()) {
+            return;
+        }
+        boolean removed = false;
+        for (int i = contacts.size() - 1; i >= 0; i--) {
+            BtConnectionManager.MeshDeviceContact c = contacts.get(i);
+            if (c.pubKeyHex != null && pubKeysMatch(key, c.pubKeyHex.toUpperCase(Locale.US))) {
+                contacts.remove(i);
+                removed = true;
+                break;
+            }
+        }
+        if (removed) {
+            save(context, addr, contacts);
+        }
+    }
+
     public static void updateFavoriteFlag(Context context, @Nullable String deviceAddress,
                                           @Nullable String pubKeyHex, boolean favorite) {
         String addr = normalizeDeviceAddress(deviceAddress);
