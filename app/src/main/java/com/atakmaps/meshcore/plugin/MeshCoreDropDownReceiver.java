@@ -20,12 +20,16 @@ import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.text.method.ScrollingMovementMethod;
 import android.util.Base64;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.ArrayAdapter;
 import android.widget.CheckBox;
 import com.atakmaps.meshcore.plugin.bluetooth.MeshContactChatHistoryStore;
@@ -209,6 +213,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
     private EditText editMeshChannelIndex;
     private EditText editMeshChannelMessage;
     private Button btnMeshChannelSend;
+    private Button btnExpandMeshChannelChat;
+    private TextView textMeshChannelExpandedLog;
+    private TextView textMeshChannelExpandedTitle;
+    private EditText editMeshChannelExpandedMessage;
     private Switch switchMeshSendPositionWithAdvert;
     private Switch switchMeshUseCallsignLocation;
     private Switch switchMeshUseCustomNodePosition;
@@ -865,6 +873,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         editMeshChannelIndex = rootView.findViewById(getId("edit_mesh_channel_index"));
         editMeshChannelMessage = rootView.findViewById(getId("edit_mesh_channel_message"));
         btnMeshChannelSend = rootView.findViewById(getId("btn_mesh_channel_send"));
+        btnExpandMeshChannelChat = rootView.findViewById(getId("btn_expand_mesh_channel_chat"));
         switchMeshSendPositionWithAdvert =
                 rootView.findViewById(getId("switch_mesh_send_position_with_advert"));
         switchMeshUseCallsignLocation =
@@ -1146,7 +1155,10 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             });
         }
         if (btnMeshChannelSend != null) {
-            btnMeshChannelSend.setOnClickListener(v -> sendMeshChannelText());
+            btnMeshChannelSend.setOnClickListener(v -> sendInlineMeshChannelText());
+        }
+        if (btnExpandMeshChannelChat != null) {
+            btnExpandMeshChannelChat.setOnClickListener(v -> showExpandedMeshChannelChatDialog());
         }
         if (btnAddMeshChannel != null) {
             btnAddMeshChannel.setOnClickListener(v -> showChannelManagementDialog());
@@ -1236,44 +1248,45 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
     }
 
-    private void sendMeshChannelText() {
+    private void sendInlineMeshChannelText() {
+        sendMeshChannelTextFromField(editMeshChannelMessage);
+    }
+
+    private void sendMeshChannelTextFromField(EditText field) {
         if (!isMeshConnected()) {
             appendLog("Channel message not sent — MeshCore not connected");
             return;
         }
-        if (editMeshChannelMessage == null) {
+        if (field == null) {
             return;
         }
-        String text = editMeshChannelMessage.getText().toString().trim();
+        String text = field.getText() != null ? field.getText().toString().trim() : "";
         if (text.isEmpty()) {
             return;
         }
         if (activeMeshContactPubKey != null) {
             MeshContactChatSession session = getActiveContactSession();
             if (session != null && btManager.sendContactTextMessage(session.pubKeyHex, text)) {
-                editMeshChannelMessage.setText("");
+                field.setText("");
                 appendMeshContactChatLine(session, true, text);
                 renderMeshContactChatLog();
             } else {
-                appendLog("Direct message not sent — transmit failed");
+                Toast.makeText(getMapView().getContext(),
+                        "Direct message not sent — transmit failed", Toast.LENGTH_SHORT).show();
             }
             return;
         }
-        int channelIndex = 0;
-        if (editMeshChannelIndex != null) {
-            try {
-                channelIndex = Integer.parseInt(editMeshChannelIndex.getText().toString().trim());
-            } catch (NumberFormatException ignored) {
-                channelIndex = 0;
-            }
+        if (meshChannelChatActiveIndex < 0) {
+            Toast.makeText(getMapView().getContext(),
+                    "Select a channel first.", Toast.LENGTH_SHORT).show();
+            return;
         }
-        if (btManager.sendChannelText(channelIndex, text)) {
-            editMeshChannelMessage.setText("");
-            meshChannelChatActiveIndex = channelIndex;
-            renderMeshChannelChatLog(channelIndex);
-        } else {
-            appendLog("Channel message not sent — transmit failed");
+        if (!btManager.sendChannelText(meshChannelChatActiveIndex, text)) {
+            Toast.makeText(getMapView().getContext(),
+                    "Failed to send over MeshCore channel.", Toast.LENGTH_SHORT).show();
+            return;
         }
+        field.setText("");
     }
 
     private void appendChannelLog(String line) {
@@ -1383,6 +1396,143 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         renderMeshChannelChatLog(channelIndex);
         updateMeshChatInputHint();
+        updateExpandMeshChannelChatButtonState();
+    }
+
+    private boolean isInlineMeshChatActive() {
+        if (rowMeshChannelInput == null
+                || rowMeshChannelInput.getVisibility() != View.VISIBLE) {
+            return false;
+        }
+        return meshChannelChatActiveIndex >= 0 || activeMeshContactPubKey != null;
+    }
+
+    private void renderActiveMeshChatLog() {
+        if (activeMeshContactPubKey != null) {
+            MeshContactChatSession session = getActiveContactSession();
+            if (meshChannelChatTitleView != null && session != null) {
+                meshChannelChatTitleView.setText("Chat: " + session.displayName);
+            } else if (meshChannelTitleView != null && session != null) {
+                meshChannelTitleView.setText("Chat: " + session.displayName);
+            }
+            renderMeshContactChatLog();
+            updateMeshChatInputHint();
+            return;
+        }
+        if (meshChannelChatActiveIndex >= 0) {
+            renderMeshChannelChatLog(meshChannelChatActiveIndex);
+            updateMeshChatInputHint();
+        }
+    }
+
+    private void updateExpandMeshChannelChatButtonState() {
+        if (btnExpandMeshChannelChat == null) {
+            return;
+        }
+        boolean canExpand = isInlineMeshChatActive();
+        btnExpandMeshChannelChat.setEnabled(canExpand);
+        btnExpandMeshChannelChat.setVisibility(canExpand ? View.VISIBLE : View.GONE);
+    }
+
+    private void showExpandedMeshChannelChatDialog() {
+        if (!isInlineMeshChatActive()) {
+            Toast.makeText(getMapView().getContext(),
+                    "Select a channel or contact first.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (meshChannelChatDialog != null && meshChannelChatDialog.isShowing()) {
+            return;
+        }
+        Context ctx = getMapView().getContext();
+        int layoutId = pluginContext.getResources().getIdentifier(
+                "mesh_channel_chat_expanded", "layout", pluginContext.getPackageName());
+        if (layoutId == 0) {
+            Toast.makeText(ctx, "Expanded chat layout unavailable.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        View content = LayoutInflater.from(pluginContext).inflate(layoutId, null);
+        textMeshChannelExpandedTitle = content.findViewById(getId("text_mesh_channel_expanded_title"));
+        textMeshChannelExpandedLog = content.findViewById(getId("text_mesh_channel_expanded_log"));
+        editMeshChannelExpandedMessage = content.findViewById(getId("edit_mesh_channel_expanded_message"));
+        Button sendBtn = content.findViewById(getId("btn_mesh_channel_expanded_send"));
+        Button closeBtn = content.findViewById(getId("btn_mesh_channel_expanded_close"));
+        if (textMeshChannelExpandedLog != null) {
+            textMeshChannelExpandedLog.setMovementMethod(new ScrollingMovementMethod());
+            textMeshChannelExpandedLog.setOnTouchListener((v, event) -> {
+                v.getParent().requestDisallowInterceptTouchEvent(true);
+                return false;
+            });
+        }
+        if (editMeshChannelExpandedMessage != null && editMeshChannelMessage != null) {
+            CharSequence draft = editMeshChannelMessage.getText();
+            if (draft != null) {
+                editMeshChannelExpandedMessage.setText(draft);
+                editMeshChannelExpandedMessage.setSelection(draft.length());
+            }
+        }
+        meshChannelChatLogView = textMeshChannelExpandedLog;
+        meshChannelChatTitleView = textMeshChannelExpandedTitle;
+        renderActiveMeshChatLog();
+        if (sendBtn != null) {
+            sendBtn.setOnClickListener(v -> sendMeshChannelTextFromField(editMeshChannelExpandedMessage));
+        }
+        if (closeBtn != null) {
+            closeBtn.setOnClickListener(v -> {
+                if (meshChannelChatDialog != null) {
+                    meshChannelChatDialog.dismiss();
+                }
+            });
+        }
+        if (editMeshChannelExpandedMessage != null) {
+            editMeshChannelExpandedMessage.setOnEditorActionListener((v, actionId, event) -> {
+                if (actionId == EditorInfo.IME_ACTION_SEND
+                        || actionId == EditorInfo.IME_ACTION_DONE) {
+                    sendMeshChannelTextFromField(editMeshChannelExpandedMessage);
+                    return true;
+                }
+                return false;
+            });
+        }
+        meshChannelChatDialog = new AlertDialog.Builder(ctx)
+                .setView(content)
+                .create();
+        meshChannelChatDialog.setCancelable(true);
+        meshChannelChatDialog.setOnDismissListener(d -> finishExpandedMeshChannelChatClose());
+        meshChannelChatDialog.show();
+        if (meshChannelChatDialog.getWindow() != null) {
+            DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+            int height = (int) (dm.heightPixels * 0.78f);
+            meshChannelChatDialog.getWindow().setLayout(
+                    ViewGroup.LayoutParams.MATCH_PARENT, height);
+            meshChannelChatDialog.getWindow().setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                            | WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        }
+        if (editMeshChannelExpandedMessage != null) {
+            editMeshChannelExpandedMessage.post(() -> {
+                editMeshChannelExpandedMessage.requestFocus();
+                InputMethodManager imm = (InputMethodManager) ctx.getSystemService(
+                        Context.INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    imm.showSoftInput(editMeshChannelExpandedMessage,
+                            InputMethodManager.SHOW_IMPLICIT);
+                }
+            });
+        }
+    }
+
+    private void finishExpandedMeshChannelChatClose() {
+        if (editMeshChannelExpandedMessage != null && editMeshChannelMessage != null) {
+            editMeshChannelMessage.setText(editMeshChannelExpandedMessage.getText());
+        }
+        meshChannelChatLogView = meshChannelLogText;
+        meshChannelChatTitleView = meshChannelTitleView;
+        textMeshChannelExpandedLog = null;
+        textMeshChannelExpandedTitle = null;
+        editMeshChannelExpandedMessage = null;
+        meshChannelChatDialog = null;
+        renderActiveMeshChatLog();
+        updateExpandMeshChannelChatButtonState();
     }
 
     private void appendMeshChannelMessage(BtConnectionManager.MeshChannelMessage message) {
@@ -1956,6 +2106,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (session.isRoom) {
             beginRoomServerSession(session);
         }
+        updateExpandMeshChannelChatButtonState();
     }
 
     private void clearMeshContactChatMode() {
@@ -2184,6 +2335,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         buildMeshChannelButtonStrip();
         appendLog("Removed device contact " + contact.name);
+        updateExpandMeshChannelChatButtonState();
     }
 
     private void applyDeviceContactMetadataUpdates(
@@ -2455,6 +2607,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         updateMeshChatInputHint();
         refreshMeshChannelStripSelection();
+        updateExpandMeshChannelChatButtonState();
     }
 
     private void appendMeshContactChatLine(MeshContactChatSession session,
@@ -2677,6 +2830,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         buildMeshChannelButtonStrip();
         appendLog("Room '" + (displayName != null ? displayName : pubKeyHex) + "' removed.");
+        updateExpandMeshChannelChatButtonState();
     }
 
     private void joinRoomServerContact(BtConnectionManager.MeshDeviceContact contact,
@@ -3292,6 +3446,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
             return;
         }
         scheduleScrollToMeshChatSection();
+        updateExpandMeshChannelChatButtonState();
     }
 
     private void scheduleRoomLoginAfterContactsSync(@Nullable MeshContactChatSession session) {
@@ -3827,6 +3982,9 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (editMeshChannelMessage != null) {
             editMeshChannelMessage.setHint(hint);
+        }
+        if (editMeshChannelExpandedMessage != null) {
+            editMeshChannelExpandedMessage.setHint(hint);
         }
     }
 
@@ -6535,12 +6693,15 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         }
         if (meshChannelChatDialog != null && meshChannelChatDialog.isShowing()) {
             meshChannelChatDialog.dismiss();
+        } else {
+            finishExpandedMeshChannelChatClose();
         }
         meshChannelChatDialog = null;
         meshChannelChatLogView = null;
         meshChannelChatTitleView = null;
         meshChannelChatActiveIndex = -1;
         activeMeshContactPubKey = null;
+        updateExpandMeshChannelChatButtonState();
     }
 
     @Override

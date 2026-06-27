@@ -776,6 +776,17 @@
                     android:text="Send"
                     android:background="@drawable/bg_meshcore_button_yellow" />
             </LinearLayout>
+
+            <Button
+                android:id="@+id/btn_expand_mesh_channel_chat"
+                style="@style/MeshcorePillButton.Beacon"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Expand Chat Window"
+                android:enabled="false"
+                android:visibility="gone"
+                android:background="@drawable/bg_meshcore_button_yellow" />
         </LinearLayout>
 
         <!-- ==================== SETTINGS ==================== -->
