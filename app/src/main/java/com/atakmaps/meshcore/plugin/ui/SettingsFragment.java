@@ -591,6 +591,10 @@ public class SettingsFragment extends PluginPreferenceFragment
         if (!(pref instanceof EditTextPreference)) {
             return;
         }
+        pref.setPersistent(false);
+        if (!isSmartBeaconParamKey(key)) {
+            syncEditTextPreferenceFromAtak(key);
+        }
         pref.setOnPreferenceChangeListener((preference, newValue) -> {
             String text = newValue != null ? newValue.toString().trim() : "";
             Context ctx = resolveSettingsContext();
@@ -625,6 +629,8 @@ public class SettingsFragment extends PluginPreferenceFragment
         if (!(pref instanceof ListPreference)) {
             return;
         }
+        pref.setPersistent(false);
+        syncListPreferenceFromAtak(key, defaultStringForPreferenceKey(key));
         pref.setOnPreferenceClickListener(preference -> {
             scheduleApplyRowStyles();
             return false;
@@ -976,18 +982,17 @@ public class SettingsFragment extends PluginPreferenceFragment
         if (ctx == null) {
             return;
         }
-        SharedPreferences atak = getPrefs(ctx);
         setListPreferenceValue(PREF_BEACON_INTERVAL,
-                atak.getString(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL));
+                readStringPrefFromAtak(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL));
         setListPreferenceValue(PREF_RETRY_INTERVAL_MIN,
-                atak.getString(PREF_RETRY_INTERVAL_MIN, DEFAULT_RETRY_INTERVAL_MIN));
+                readStringPrefFromAtak(PREF_RETRY_INTERVAL_MIN, DEFAULT_RETRY_INTERVAL_MIN));
         setListPreferenceValue(PREF_RETRY_MAX,
-                atak.getString(PREF_RETRY_MAX, DEFAULT_RETRY_MAX));
+                readStringPrefFromAtak(PREF_RETRY_MAX, DEFAULT_RETRY_MAX));
         syncCheckBoxPreferenceFromAtak(PREF_PING_REPLY_ENABLED, DEFAULT_PING_REPLY_ENABLED);
         syncCheckBoxPreferenceFromAtak(PREF_DISABLE_MESH_BEACON_LIMITING, false);
         syncCheckBoxPreferenceFromAtak(NetSlotConfig.PREF_ADMIN_SETTINGS_ENABLED, false);
         setEditTextPreferenceText(PREF_ENCRYPTION_PASSPHRASE,
-                atak.getString(PREF_ENCRYPTION_PASSPHRASE, ""));
+                readStringPrefFromAtak(PREF_ENCRYPTION_PASSPHRASE, ""));
         syncSmartBeaconPreferenceValues();
     }
 
@@ -1010,6 +1015,56 @@ public class SettingsFragment extends PluginPreferenceFragment
         if (pref instanceof EditTextPreference) {
             ((EditTextPreference) pref).setText(value != null ? value : "");
         }
+    }
+
+    private static String defaultStringForPreferenceKey(String key) {
+        if (PREF_BEACON_INTERVAL.equals(key)) {
+            return DEFAULT_BEACON_INTERVAL;
+        }
+        if (PREF_RETRY_INTERVAL_MIN.equals(key)) {
+            return DEFAULT_RETRY_INTERVAL_MIN;
+        }
+        if (PREF_RETRY_MAX.equals(key)) {
+            return DEFAULT_RETRY_MAX;
+        }
+        return "";
+    }
+
+    private static String readStringPrefFromAtak(Context context, String key, String defaultValue) {
+        if (context == null) {
+            return defaultValue;
+        }
+        SharedPreferences prefs = getPrefs(context);
+        if (!prefs.contains(key)) {
+            return defaultValue;
+        }
+        Object raw = prefs.getAll().get(key);
+        if (raw == null) {
+            return defaultValue;
+        }
+        if (raw instanceof String) {
+            String value = ((String) raw).trim();
+            return value.isEmpty() ? defaultValue : value;
+        }
+        if (raw instanceof Integer || raw instanceof Long || raw instanceof Float) {
+            return String.valueOf(raw);
+        }
+        if (raw instanceof Boolean) {
+            return ((Boolean) raw) ? "true" : "false";
+        }
+        return defaultValue;
+    }
+
+    private String readStringPrefFromAtak(String key, String defaultValue) {
+        return readStringPrefFromAtak(resolveSettingsContext(), key, defaultValue);
+    }
+
+    private void syncListPreferenceFromAtak(String key, String defaultValue) {
+        setListPreferenceValue(key, readStringPrefFromAtak(key, defaultValue));
+    }
+
+    private void syncEditTextPreferenceFromAtak(String key) {
+        setEditTextPreferenceText(key, readStringPrefFromAtak(key, ""));
     }
 
     private void syncSmartBeaconPreferenceValues() {
@@ -1507,14 +1562,11 @@ public class SettingsFragment extends PluginPreferenceFragment
     }
 
     private void updateSummaries() {
-        SharedPreferences prefs =
-                getPreferenceManager().getSharedPreferences();
-
         Preference beaconPref = findPreference(PREF_BEACON_INTERVAL);
         if (beaconPref != null) {
             String beaconValue = getListPreferenceValueLabel(PREF_BEACON_INTERVAL);
             if (beaconValue == null || beaconValue.isEmpty()) {
-                beaconValue = prefs.getString(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL)
+                beaconValue = readStringPrefFromAtak(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL)
                         + " seconds";
             }
             beaconPref.setSummary(formatSummaryWithValue(
@@ -1567,8 +1619,7 @@ public class SettingsFragment extends PluginPreferenceFragment
     }
 
     public static int getBeaconIntervalSec(Context context) {
-        String val = getPrefs(context)
-                .getString(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL);
+        String val = readStringPrefFromAtak(context, PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL);
         try {
             return Integer.parseInt(val);
         } catch (NumberFormatException e) {
@@ -1594,8 +1645,7 @@ public class SettingsFragment extends PluginPreferenceFragment
     }
 
     public static long getRetryIntervalMs(Context context) {
-        String val = getPrefs(context)
-                .getString(PREF_RETRY_INTERVAL_MIN, DEFAULT_RETRY_INTERVAL_MIN);
+        String val = readStringPrefFromAtak(context, PREF_RETRY_INTERVAL_MIN, DEFAULT_RETRY_INTERVAL_MIN);
         try {
             return Long.parseLong(val) * 60_000L;
         } catch (NumberFormatException e) {
@@ -1604,8 +1654,7 @@ public class SettingsFragment extends PluginPreferenceFragment
     }
 
     public static int getMaxChatRetries(Context context) {
-        String val = getPrefs(context)
-                .getString(PREF_RETRY_MAX, DEFAULT_RETRY_MAX);
+        String val = readStringPrefFromAtak(context, PREF_RETRY_MAX, DEFAULT_RETRY_MAX);
         try {
             return Math.max(1, Integer.parseInt(val));
         } catch (NumberFormatException e) {
@@ -1657,14 +1706,13 @@ public class SettingsFragment extends PluginPreferenceFragment
     }
 
     public static String getEncryptionPassphrase(Context context) {
-        return getPrefs(context)
-                .getString(PREF_ENCRYPTION_PASSPHRASE, "");
+        return readStringPrefFromAtak(context, PREF_ENCRYPTION_PASSPHRASE, "");
     }
 
     private String getEditTextPreferenceValue(String key) {
         Context ctx = resolveSettingsContext();
         if (ctx != null) {
-            String stored = getPrefs(ctx).getString(key, "");
+            String stored = readStringPrefFromAtak(key, "");
             if (stored != null && !stored.isEmpty()) {
                 return stored;
             }
@@ -3367,8 +3415,7 @@ public class SettingsFragment extends PluginPreferenceFragment
         if (PREF_BEACON_INTERVAL.equals(key)) {
             String label = getListPreferenceValueLabel(key);
             if (label == null || label.isEmpty()) {
-                SharedPreferences prefs = getPreferenceManager().getSharedPreferences();
-                label = prefs.getString(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL) + " seconds";
+                label = readStringPrefFromAtak(PREF_BEACON_INTERVAL, DEFAULT_BEACON_INTERVAL) + " seconds";
             }
             return label;
         }
