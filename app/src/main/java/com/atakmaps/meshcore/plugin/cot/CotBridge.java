@@ -2168,7 +2168,7 @@ public class CotBridge {
         String callsign = CotBuilder.extractMapCotSenderCallsign(event);
         if (callsign != null && !callsign.isEmpty()) {
             try {
-                Contact c = com.atakmaps.meshcore.plugin.contacts.ContactMergeUtil
+                Contact c = com.atakmaps.meshcore.plugin.chat.ContactMergeUtil
                         .findContactByCallsignVariants(Contacts.getInstance(), callsign);
                 if (c instanceof IndividualContact) {
                     return (IndividualContact) c;
