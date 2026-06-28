@@ -653,6 +653,10 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
      * directory and keep reminding the user to import it until ATAK shows it installed.
      * Does not assume any prior MeshCore build supplied the iconset.
      */
+    /** Defer iconset auto-import until ATAK finishes cold start (avoids UI deadlock). */
+    private static final long ICONSET_IMPORT_START_DELAY_MS = 10_000L;
+    private static final long ICONSET_IMPORT_RETRY_MS = 15_000L;
+
     private void startMeshIconsetReminder(Context pluginCtx, Context uiCtx) {
         if (meshIconsetReminderHandler != null && meshIconsetReminderRunnable != null) {
             meshIconsetReminderHandler.removeCallbacks(meshIconsetReminderRunnable);
@@ -664,12 +668,15 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 boolean missing = MeshcoreIconsetInstaller.ensureStagedAndPromptIfMissing(
                         pluginCtx, uiCtx);
                 if (missing && meshIconsetReminderHandler != null) {
-                    // Persistent guidance while missing; staging + throttling handled inside installer.
-                    meshIconsetReminderHandler.postDelayed(this, 15000L);
+                    meshIconsetReminderHandler.postDelayed(this, ICONSET_IMPORT_RETRY_MS);
                 }
             }
         };
-        meshIconsetReminderHandler.post(meshIconsetReminderRunnable);
+        if (mapView != null) {
+            mapView.postDelayed(meshIconsetReminderRunnable, ICONSET_IMPORT_START_DELAY_MS);
+        } else {
+            meshIconsetReminderHandler.postDelayed(meshIconsetReminderRunnable, ICONSET_IMPORT_START_DELAY_MS);
+        }
     }
 
     private void setupMeshMapItemClickListener() {

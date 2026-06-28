@@ -16,6 +16,7 @@ local.properties
 app/libs/atak-civ/
 ATAK-CIV-*/
 *.zip
+!app/src/main/assets/meschore.zip
 
 # Signing
 *.keystore
