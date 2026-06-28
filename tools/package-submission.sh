@@ -63,13 +63,17 @@ TRUST_ASSETS=(
   "app/src/main/assets/atakmaps-ca.p12"
   "app/src/main/assets/isrg-root-x1.pem"
 )
-for asset in "${TRUST_ASSETS[@]}"; do
+# Iconset asset must be committed — TPC builds omit gitignored files from source zips.
+BUNDLED_ASSETS=(
+  "app/src/main/assets/meschore.zip"
+)
+for asset in "${TRUST_ASSETS[@]}" "${BUNDLED_ASSETS[@]}"; do
   if [[ ! -f "${ROOT}/${asset}" ]]; then
-    echo "Missing trust asset: ${asset}" >&2
+    echo "Missing required asset: ${asset}" >&2
     exit 1
   fi
   if ! git ls-files --error-unmatch "${asset}" >/dev/null 2>&1; then
-    echo "Trust asset not committed (will be omitted from TPC zip): ${asset}" >&2
+    echo "Required asset not committed (will be omitted from TPC zip): ${asset}" >&2
     echo "Run: git add ${asset} && git commit" >&2
     exit 1
   fi
@@ -108,6 +112,11 @@ verify_submission_zip() {
     exit 1
   fi
   echo "Verified TPC target in zip: ${tpp_root}/gradle.properties atak.version=${atak_ver}"
+  if ! unzip -l "${zip_path}" | grep -q "${tpp_root}/app/src/main/assets/meschore.zip"; then
+    echo "ERROR: ${zip_path} missing ${tpp_root}/app/src/main/assets/meschore.zip" >&2
+    exit 1
+  fi
+  echo "Verified iconset asset in zip: ${tpp_root}/app/src/main/assets/meschore.zip"
 }
 verify_submission_zip "${SOURCE_PATH}" "${TPP_ROOT}" "${ATAK_VER}"
 
@@ -126,6 +135,11 @@ APK_NAME=""
 if [[ -n "${APK}" && -f "${APK}" ]]; then
   APK_NAME="$(basename "${APK}")"
   cp -f "${APK}" "${PLUGINS_DIR}/${APK_NAME}"
+  if ! unzip -l "${APK}" | grep -q 'assets/meschore.zip'; then
+    echo "ERROR: release APK missing assets/meschore.zip: ${APK}" >&2
+    exit 1
+  fi
+  echo "Verified iconset asset in APK: assets/meschore.zip"
 fi
 
 MANIFEST="${PLUGINS_DIR}/${PLUGIN_SLUG}-${VERSION}-ATAK-${ATAK_VER}-submission-MANIFEST.txt"

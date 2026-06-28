@@ -82,11 +82,12 @@ Hard gate for any merge touching startup, certs, prefs, ProGuard, or lifecycle.
 | Trust + prefs + reflection | `MeshCoreMapComponent.java` — keep the `configureUpdateServerStatic` → `installUpdateServerTruststoreCompat` → `reloadCertificateManagerFromDatabase` → `registerUpdateServerCA` → deferred sync chain |
 | Early hook | `MeshCoreLifecycle.java` — must keep `MeshCoreMapComponent.applyUpdateServerTrustEarly` in constructor |
 | Bundled trust material | `app/src/main/assets/atakmaps-ca.p12`, `app/src/main/assets/isrg-root-x1.pem` |
+| Bundled iconset (map icons) | `app/src/main/assets/meschore.zip` — **must stay committed**; `package-submission.sh` verifies source zip + release APK |
 | PKCS#12 unlock key | `app/src/main/res/values/strings.xml` → `meshcore_trust_bundle_p12_key` (Base64, `translatable="false"`) |
 
 **Do not:**
 - Remove or reorder the trust chain, or delay it until after ATAK starts repo HTTPS sync.
-- Remove the cert assets or the string resource.
+- Remove the cert assets, **meschore.zip**, or the string resource.
 - Use a Java string literal for the PKCS#12 password (Fortify will flag it).
 
 **After a merge touching these files:** clean-install on device with `pm clear com.atakmap.app.civ`, check logcat for `MeshCore` cert tags and TAK Package Management green sync.
