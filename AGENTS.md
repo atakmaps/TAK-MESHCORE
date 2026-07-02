@@ -2,7 +2,7 @@
 
 ## Project overview
 
-MeshCore is an Android ATAK plugin (APK) that bridges MeshCore BLE companions to ATAK for off-grid awareness and chat. Built with the Android Gradle Plugin and ATAK-CIV **5.5.1** SDK.
+MeshCore is an Android ATAK plugin (APK) that bridges MeshCore BLE companions to ATAK for off-grid awareness and chat. Built with the Android Gradle Plugin and ATAK-CIV **5.6.0** SDK.
 
 - **Package / applicationId:** `com.atakmaps.meshcore.plugin`
 - **Java namespace:** `com.atakmaps.meshcore.plugin`
@@ -16,7 +16,7 @@ This repo is **not** UV-PRO. Do not change `com.uvpro.plugin` paths on the atakm
 |------|---------|
 | JDK | 17 |
 | Android SDK | API 35 |
-| ATAK-CIV SDK | 5.5.1.x in `app/libs/atak-civ/` (gitignored) |
+| ATAK-CIV SDK | 5.6.0.x in `app/libs/atak-civ/` (gitignored; `./tools/use-atak-sdk.sh 5.6.0`) |
 
 ## Build
 
@@ -28,31 +28,31 @@ export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ./gradlew :app:assembleCivRelease            # TPC / release
 ```
 
-APK naming: `ATAK-Plugin-Meshcore-<version>-<git>-5.5.1-civ-release.apk`
+APK naming: `ATAK-Plugin-Meshcore-<version>-<git>-5.6.0-civ-release.apk`
 
 ## TPC submission
 
 See `Plugins/Handoff Docs/MESHCORE-TPC-SUBMISSION.md`.
 
-**Dual ATAK targets (5.5.1 + 5.6.0)** — default for “ready for zip”:
+**ATAK 5.6.0 only** — default for “ready for zip”:
 
 ```bash
 ./tools/build-submission-zips.sh
 ```
 
-Produces both `MeshCore-<ver>-ATAK-5.5.1-source.zip` and `MeshCore-<ver>-ATAK-5.6.0-source.zip` in `Plugins/TAK Submissions/`. Uses `tools/use-atak-sdk.sh` to swap SDK jars; restores 5.5.1 when done.
+Produces `MeshCore-<ver>-ATAK-5.6.0-source.zip` in `Plugins/TAK Submissions/`. Uses `tools/use-atak-sdk.sh 5.6.0`.
 
 5.6 SDK default path: `~/Documents/ATAK/Versions/ATAK-CIV-5.6.0.18-SDK` (override with `ATAK_560_SDK`).
 
-Single-target build (legacy):
+Manual build:
 
 ```bash
-./tools/use-atak-sdk.sh 5.5.1   # or 5.6.0
-./gradlew :app:assembleCivRelease   # add -Patak.version=5.6.0 for 5.6
-ATAK_VERSION=5.5.1 ./tools/package-submission.sh
+./tools/use-atak-sdk.sh 5.6.0
+./gradlew :app:assembleCivRelease -Patak.version=5.6.0
+ATAK_VERSION=5.6.0 ./tools/package-submission.sh
 ```
 
-Upload the zip matching your TPC portal ATAK compatibility (5.5.1 or 5.6.0).
+Upload the **5.6.0** source zip to TPC (portal ATAK compatibility **5.6.0 CIV**).
 
 ## Versioning
 

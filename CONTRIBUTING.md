@@ -4,7 +4,7 @@ MeshCore connects ATAK to MeshCore radios over BLE. Repo: `atakmaps/TAK-MESHCORE
 
 ## Building
 
-1. Clone and install ATAK-CIV 5.5.1 SDK under `app/libs/atak-civ/` (see README).
+1. Clone and install ATAK-CIV **5.6.0** SDK under `app/libs/atak-civ/` (see README; `./tools/use-atak-sdk.sh 5.6.0`).
 2. JDK **17**, `local.properties` with `sdk.dir=...`
 3. `./gradlew assembleCivDebug` or `./gradlew :app:assembleCivRelease`
 
@@ -17,8 +17,8 @@ Before `package-submission.sh`:
 - [ ] **Iconset asset committed:** `app/src/main/assets/meschore.zip` (required in APK + TPC source zip; `.gitignore` has `!app/src/main/assets/meschore.zip`)
 - [ ] All submission sources **committed** on `main`
 - [ ] `./gradlew :app:assembleCivRelease` succeeds
-- [ ] `./tools/package-submission.sh` produces `MeshCore-*-ATAK-5.5.1-source.zip`
-- [ ] Portal metadata matches: **TAK-MeshCore**, `com.atakmaps.meshcore.plugin`, ATAK **5.5.1 CIV**
+- [ ] `./tools/package-submission.sh` produces `MeshCore-*-ATAK-5.6.0-source.zip`
+- [ ] Portal metadata matches: **TAK-MeshCore**, `com.atakmaps.meshcore.plugin`, ATAK **5.6.0 CIV**
 
 Full details: `Plugins/Handoff Docs/MESHCORE-TPC-SUBMISSION.md`
 

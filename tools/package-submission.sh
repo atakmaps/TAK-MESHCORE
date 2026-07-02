@@ -43,7 +43,7 @@ resolve_atak_version() {
     fi
   done
   shopt -u nullglob
-  echo "5.5.1"
+  echo "5.6.0"
 }
 ATAK_VER="$(resolve_atak_version)"
 
@@ -82,7 +82,7 @@ done
 git archive --format=zip --prefix="${TPP_ROOT}/" -o "${SOURCE_PATH}" HEAD
 
 # TPC compiles from the archived source only — inject ATAK target so devkitVersion
-# matches the zip name (build.gradle defaults to 5.5.1 without this).
+# matches the zip name (build.gradle defaults to 5.6.0 without this).
 inject_atak_version_into_zip() {
   local zip_path="$1" tpp_root="$2" atak_ver="$3"
   local tmpdir gradle_props
