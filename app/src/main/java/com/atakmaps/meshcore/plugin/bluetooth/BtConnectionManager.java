@@ -1605,9 +1605,8 @@ public class BtConnectionManager {
             Log.w(TAG, "sendKissFrame failed: envelope too large for mesh channel");
             return false;
         }
-        String routeLabel = pathLenEncoded == OUT_PATH_FLOOD
-                ? "flood"
-                : "direct hops=" + com.atakmaps.meshcore.plugin.util.MeshPathUtil.pathHopCount(pathLenEncoded);
+        String routeLabel = com.atakmaps.meshcore.plugin.util.MeshPathUtil
+                .formatTxRoute(pathLenEncoded);
         Log.d(TAG, "TX ATAK_DATA ch=" + channel + " route=" + routeLabel
                 + " ax25=" + ax25Frame.length + " bytes chunks=" + total
                 + (routePeerHint != null ? " peer=" + routePeerHint : ""));
@@ -2986,7 +2985,9 @@ public class BtConnectionManager {
             }
             String routed = extractRoutableEnvelope(message);
             if (routed != null) {
-                Log.d(TAG, "RX mesh env len=" + routed.length());
+                Log.d(TAG, "RX mesh env len=" + routed.length()
+                        + " rxPath=" + com.atakmaps.meshcore.plugin.util.MeshPathUtil
+                                .formatRxRepeaterPath(envPathLen));
                 handleMeshMessage(routed, envPathLen);
             } else {
                 Log.d(TAG, "RX non-env text len=" + message.length());
@@ -3100,25 +3101,80 @@ public class BtConnectionManager {
     }
 
     private void handleChannelData(byte[] pkt) {
-        if (pkt == null || pkt.length < 9) {
+        ChannelDataRecv parsed = parseChannelDataRecv(pkt);
+        if (parsed == null) {
             return;
         }
-        int dataType = ((pkt[7] & 0xFF) << 8) | (pkt[6] & 0xFF);
-        int dataLen = pkt[8] & 0xFF;
-        int available = pkt.length - 9;
+        String routed = extractRoutableEnvelope(parsed.payloadText);
+        if (routed != null) {
+            int pathLen = parsed.hopCount != null ? parsed.hopCount : 0;
+            Log.d(TAG, "RX mesh datagram env len=" + routed.length()
+                    + " ch=" + parsed.channelIndex
+                    + " rxPath=" + com.atakmaps.meshcore.plugin.util.MeshPathUtil
+                            .formatRxRepeaterPath(pathLen));
+            handleMeshMessage(routed, pathLen);
+        }
+    }
+
+    private static final class ChannelDataRecv {
+        final int channelIndex;
+        final Integer hopCount;
+        final String payloadText;
+
+        ChannelDataRecv(int channelIndex, Integer hopCount, String payloadText) {
+            this.channelIndex = channelIndex;
+            this.hopCount = hopCount;
+            this.payloadText = payloadText;
+        }
+    }
+
+    /**
+     * Parse {@code RESP_CHANNEL_DATA_RECV} (0x1B). Layout mirrors TX with optional
+     * path wire bytes after {@code path_len}; falls back to legacy fixed offsets.
+     */
+    @Nullable
+    private ChannelDataRecv parseChannelDataRecv(byte[] pkt) {
+        if (pkt == null || pkt.length < 9) {
+            return null;
+        }
+        int channelIndex = pkt[1] & 0xFF;
+        int pathLenRaw = pkt[2] & 0xFF;
+        Integer hopCount = com.atakmaps.meshcore.plugin.util.MeshPathUtil
+                .rxPathLenToHopCount(pathLenRaw);
+        int payloadOff = findChannelDataPayloadOffset(pkt, pathLenRaw);
+        if (payloadOff < 0 || pkt.length < payloadOff + 3) {
+            return null;
+        }
+        int dataType = ((pkt[payloadOff + 1] & 0xFF) << 8) | (pkt[payloadOff] & 0xFF);
+        int dataLen = pkt[payloadOff + 2] & 0xFF;
+        int dataStart = payloadOff + 3;
+        int available = pkt.length - dataStart;
         if (available <= 0 || dataLen <= 0) {
-            return;
+            return null;
         }
         int copyLen = Math.min(dataLen, available);
         if (dataType != ATAK_DATA_TYPE_AX25 && dataType != ATAK_DATA_TYPE_RAW) {
-            return;
+            return null;
         }
-        String text = new String(pkt, 9, copyLen, StandardCharsets.UTF_8);
-        String routed = extractRoutableEnvelope(text);
-        if (routed != null) {
-            Log.d(TAG, "RX mesh datagram env len=" + routed.length());
-            handleMeshMessage(routed, 0);
+        String text = new String(pkt, dataStart, copyLen, StandardCharsets.UTF_8);
+        return new ChannelDataRecv(channelIndex, hopCount, text);
+    }
+
+    /** Locate dataType/dataLen/payload start; tries path-aware offset then legacy. */
+    private int findChannelDataPayloadOffset(byte[] pkt, int pathLenRaw) {
+        int pathWireLen = com.atakmaps.meshcore.plugin.util.MeshPathUtil
+                .pathWireByteLen(pathLenRaw);
+        int[] candidates = {3 + pathWireLen, 6};
+        for (int base : candidates) {
+            if (pkt.length < base + 3) {
+                continue;
+            }
+            int dataType = ((pkt[base + 1] & 0xFF) << 8) | (pkt[base] & 0xFF);
+            if (dataType == ATAK_DATA_TYPE_AX25 || dataType == ATAK_DATA_TYPE_RAW) {
+                return base;
+            }
         }
+        return -1;
     }
 
     private void applyChannelInfo(byte[] pkt) {
@@ -3966,7 +4022,9 @@ public class BtConnectionManager {
             acc.parts.put(seq, chunk);
             acc.lastUpdateMs = System.currentTimeMillis();
             Log.d(TAG, "RX chunk msgId=" + msgId + " seq=" + seq + "/" + total
-                    + " chunkBytes=" + chunk.length + " have=" + acc.parts.size());
+                    + " chunkBytes=" + chunk.length + " have=" + acc.parts.size()
+                    + " rxPath=" + com.atakmaps.meshcore.plugin.util.MeshPathUtil
+                            .formatRxRepeaterPath(pathLen));
             if (acc.parts.size() < total) return;
 
             int len = 0;
@@ -3983,7 +4041,9 @@ public class BtConnectionManager {
                 off += p.length;
             }
             chunkBuffers.remove(msgId);
-            Log.d(TAG, "Reassembled msgId=" + msgId + " bytes=" + ax25.length);
+            Log.d(TAG, "Reassembled msgId=" + msgId + " bytes=" + ax25.length
+                    + " rxPath=" + com.atakmaps.meshcore.plugin.util.MeshPathUtil
+                            .formatRxRepeaterPath(pathLen));
 
             for (RawDataListener listener : rawDataListeners) {
                 try {
@@ -3995,7 +4055,9 @@ public class BtConnectionManager {
                     Log.w(TAG, "RawDataListener failed: " + e.getMessage());
                 }
             }
-            Log.d(TAG, "Routing reassembled AX.25 bytes=" + ax25.length);
+            Log.d(TAG, "Routing reassembled AX.25 bytes=" + ax25.length
+                    + " rxPath=" + com.atakmaps.meshcore.plugin.util.MeshPathUtil
+                            .formatRxRepeaterPath(pathLen));
             packetRouter.routeIncoming(ax25, pathLen);
         } catch (Exception ignored) {
         }

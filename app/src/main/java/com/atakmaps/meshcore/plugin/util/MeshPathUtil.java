@@ -64,4 +64,45 @@ public final class MeshPathUtil {
         }
         return pathLen & 63;
     }
+
+    /**
+     * RX path label from firmware channel metadata ({@code path_len} byte on receive).
+     * {@code pathLen <= 0} means no repeater-hop metadata (direct RF or unknown).
+     */
+    public static String formatRxRepeaterPath(int pathLen) {
+        if (pathLen <= 0) {
+            return "direct-or-unknown";
+        }
+        return pathLen + (pathLen == 1 ? " repeater-hop" : " repeater-hops");
+    }
+
+    /** TX route label from encoded {@code path_len} on {@code CMD_SEND_CHANNEL_DATA}. */
+    public static String formatTxRoute(int pathLenEncoded) {
+        if (isFloodPathLen(pathLenEncoded)) {
+            return "flood";
+        }
+        if (isUsableDirectPath(pathLenEncoded)) {
+            int hops = pathHopCount(pathLenEncoded);
+            return hops == 1
+                    ? "direct-via-repeater hops=1"
+                    : "direct-via-repeater hops=" + hops;
+        }
+        return "unknown";
+    }
+
+    /**
+     * Normalize RX {@code path_len} byte to a repeater hop/repeat count for logging.
+     * Returns {@code null} when firmware marks flood/unknown ({@code 0xFF}).
+     */
+    public static Integer rxPathLenToHopCount(int pathLenRaw) {
+        int encoded = pathLenRaw & 0xFF;
+        if (encoded == 0xFF) {
+            return null;
+        }
+        if (isUsableDirectPath(encoded)) {
+            return pathHopCount(encoded);
+        }
+        int repeats = encoded & 0x3F;
+        return repeats > 0 ? repeats : null;
+    }
 }

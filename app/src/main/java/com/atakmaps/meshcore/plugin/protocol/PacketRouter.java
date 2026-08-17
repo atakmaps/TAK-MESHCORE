@@ -12,6 +12,8 @@ import com.atakmap.android.maps.MapView;
 import com.atakmap.coremap.cot.event.CotDetail;
 import com.atakmap.coremap.cot.event.CotEvent;
 
+import com.atakmaps.meshcore.plugin.util.MeshPathUtil;
+
 import com.atakmaps.meshcore.plugin.ax25.Ax25Frame;
 import com.atakmaps.meshcore.plugin.chat.ChatBridge;
 import com.atakmaps.meshcore.plugin.chat.ContactMergeUtil;
@@ -119,7 +121,8 @@ public class PacketRouter {
         byte[] infoBytes = frame.getInfoField();
 
         Log.d(TAG, "Received from " + srcCall + "-" + srcSsid +
-                " → " + destCall + ": " + info.length() + " bytes");
+                " → " + destCall + ": " + info.length() + " bytes"
+                + " rxPath=" + MeshPathUtil.formatRxRepeaterPath(pathLen));
 
         // Notify listener of received packet
         if (packetCountListener != null) {
@@ -290,7 +293,8 @@ public class PacketRouter {
                         packet.getPayload());
                 if (reassembled != null) {
                     Log.d(TAG, "Fragment reassembly complete: "
-                            + reassembled.length + " bytes");
+                            + reassembled.length + " bytes"
+                            + " rxPath=" + MeshPathUtil.formatRxRepeaterPath(pathLen));
                     cotBridge.injectCompressedCot(reassembled, pathLen);
                 }
                 break;

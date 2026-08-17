@@ -47,6 +47,7 @@ import com.atakmaps.meshcore.plugin.protocol.PingReplyNotifier;
 import com.atakmaps.meshcore.plugin.ui.SettingsFragment;
 import com.atakmaps.meshcore.plugin.MeshCoreContactHandler;
 import com.atakmaps.meshcore.plugin.util.CallsignUtil;
+import com.atakmaps.meshcore.plugin.util.MeshPathUtil;
 
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -1499,8 +1500,10 @@ public class CotBridge {
                             pingMv.getContext(), event);
                 }
 
-                String hopStr = pathLen <= 0 ? "direct" : pathLen + (pathLen == 1 ? " hop" : " hops");
-                Log.d(TAG, "CoT received: type=" + event.getType() + " via " + hopStr);
+                String hopStr = MeshPathUtil.formatRxRepeaterPath(pathLen);
+                Log.d(TAG, "CoT RF RX uid=" + event.getUID()
+                        + " type=" + event.getType()
+                        + " rxPath=" + hopStr);
 
                 // Send TYPE_COT_ACK back to cancel the sender's retry watchdog.
                 String ackUid = event.getUID();
@@ -2212,7 +2215,13 @@ public class CotBridge {
             }
 
             boolean singleFragment = CotBuilder.fitsSingleRfFragment(compressed);
-            Log.d(TAG, "CoT RF payload: compressed=" + compressed.length
+            String routePeerHint = extractRoutePeerHint(event);
+            String txRoute = (routePeerHint != null && btManager.hasResolvableDirectRoute(routePeerHint))
+                    ? "direct-via-repeater"
+                    : "flood";
+            Log.d(TAG, "CoT RF TX uid=" + event.getUID()
+                    + " route=" + txRoute
+                    + " compressed=" + compressed.length
                     + " singleFragment=" + singleFragment
                     + " type=" + event.getType());
 
@@ -2232,9 +2241,9 @@ public class CotBridge {
                     MeshCorePacket.TYPE_COT, compressed);
 
             String txFragStr = packets.size() + (packets.size() == 1 ? " fragment" : " fragments");
-            Log.d(TAG, "CoT sent over mesh: " + compressed.length + " bytes, " + txFragStr);
-
-            String routePeerHint = extractRoutePeerHint(event);
+            Log.d(TAG, "CoT RF TX uid=" + event.getUID()
+                    + " route=" + txRoute
+                    + " fragments=" + txFragStr);
 
             for (int i = 0; i < packets.size(); i++) {
                 if (i > 0 && packets.size() > 1) {
@@ -2319,8 +2328,9 @@ public class CotBridge {
         if (cotUid == null || cotUid.trim().isEmpty()) return;
         PendingOutboundCot removed = pendingOutboundCots.remove(cotUid.trim());
         if (removed != null) {
-            Log.d(TAG, "CoT ACK received uid=" + cotUid.trim()
-                    + " after " + removed.retryCount + " retries");
+            Log.d(TAG, "CoT RF ACK uid=" + cotUid.trim()
+                    + " txDelivered afterRetries=" + removed.retryCount
+                    + " (rx repeater-hop count is logged on receiver only)");
         }
     }
 
