@@ -1,6 +1,7 @@
 package com.atakmaps.meshcore.plugin.bluetooth;
 
 import android.content.Context;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 
@@ -14,6 +15,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * Resolves ATAK peer labels to MeshCore device-contact routes for direct TX.
  */
 final class MeshContactRouteResolver {
+
+    private static final String TAG = "MeshCore.Route";
 
     static final class DirectRoute {
         final int pathLenEncoded;
@@ -50,9 +53,22 @@ final class MeshContactRouteResolver {
         }
         String prefix = contact.pubKeyHex.trim().toUpperCase(Locale.US).substring(0, 12);
         liveByPubKeyPrefix.put(prefix, contact);
-        String nameKey = normalizeNameKey(contact.name);
-        if (!nameKey.isEmpty()) {
-            liveByNameKey.put(nameKey, contact);
+        indexNameKeys(contact);
+    }
+
+    private void indexNameKeys(BtConnectionManager.MeshDeviceContact contact) {
+        if (contact.name == null || contact.name.trim().isEmpty()) {
+            return;
+        }
+        String raw = contact.name.trim();
+        putNameKey(normalizeNameKey(raw), contact);
+        putNameKey(CallsignUtil.toRadioCallsign(raw).toUpperCase(Locale.US), contact);
+        putNameKey(CallsignUtil.alphanumericCallsignKey(raw), contact);
+    }
+
+    private void putNameKey(String key, BtConnectionManager.MeshDeviceContact contact) {
+        if (key != null && !key.isEmpty()) {
+            liveByNameKey.put(key, contact);
         }
     }
 
@@ -70,10 +86,36 @@ final class MeshContactRouteResolver {
             return null;
         }
         byte[] wire = MeshPathUtil.pathWireBytes(contact.outPathLen, contact.outPath);
-        if (wire == null || wire.length == 0) {
+        if (wire == null) {
             return null;
         }
         return new DirectRoute(contact.outPathLen & 0xFF, wire);
+    }
+
+    /** Human-readable reason direct routing failed (for TX logs). */
+    String describeRouteMiss(@Nullable String peerHint, @Nullable String deviceAddress) {
+        if (peerHint == null || peerHint.trim().isEmpty()) {
+            return "empty peer hint";
+        }
+        BtConnectionManager.MeshDeviceContact contact =
+                lookupContact(peerHint.trim(), deviceAddress);
+        if (contact == null) {
+            return "no firmware contact for hint=" + peerHint.trim();
+        }
+        int encoded = contact.outPathLen & 0xFF;
+        if (!MeshPathUtil.isUsableDirectPath(contact.outPathLen)) {
+            if (encoded == 0xFF) {
+                return "contact " + contact.name + " out_path unknown (0xFF) — firmware will flood";
+            }
+            return "contact " + contact.name + " out_path unusable (0x"
+                    + Integer.toHexString(encoded) + ")";
+        }
+        byte[] wire = MeshPathUtil.pathWireBytes(contact.outPathLen, contact.outPath);
+        if (wire == null) {
+            return "contact " + contact.name + " out_path wire missing";
+        }
+        int hops = MeshPathUtil.pathHopCount(contact.outPathLen);
+        return hops == 0 ? "ok zero-hop direct" : "ok hops=" + hops;
     }
 
     @Nullable
@@ -90,15 +132,14 @@ final class MeshContactRouteResolver {
             return MeshDeviceContactCache.findByPubKeyPrefix(context, deviceAddress, suffix);
         }
         if (upper.startsWith(ANDROID_PREFIX)) {
-            BtConnectionManager.MeshDeviceContact byName =
-                    findByNameKey(normalizeNameKey(hint.substring(ANDROID_PREFIX.length())));
+            String bare = hint.substring(ANDROID_PREFIX.length());
+            BtConnectionManager.MeshDeviceContact byName = findByNameHint(bare);
             if (byName != null) {
                 return byName;
             }
-            return MeshDeviceContactCache.findByNodeName(
-                    context, deviceAddress, hint.substring(ANDROID_PREFIX.length()));
+            return MeshDeviceContactCache.findByNodeName(context, deviceAddress, bare);
         }
-        BtConnectionManager.MeshDeviceContact byName = findByNameKey(normalizeNameKey(hint));
+        BtConnectionManager.MeshDeviceContact byName = findByNameHint(hint);
         if (byName != null) {
             return byName;
         }
@@ -132,6 +173,29 @@ final class MeshContactRouteResolver {
     }
 
     @Nullable
+    private BtConnectionManager.MeshDeviceContact findByNameHint(String nameHint) {
+        if (nameHint == null || nameHint.trim().isEmpty()) {
+            return null;
+        }
+        String trimmed = nameHint.trim();
+        BtConnectionManager.MeshDeviceContact live = findByNameKey(normalizeNameKey(trimmed));
+        if (live != null) {
+            return live;
+        }
+        live = findByNameKey(CallsignUtil.toRadioCallsign(trimmed).toUpperCase(Locale.US));
+        if (live != null) {
+            return live;
+        }
+        for (java.util.Map.Entry<String, BtConnectionManager.MeshDeviceContact> e
+                : liveByNameKey.entrySet()) {
+            if (matchesNameHint(e.getKey(), trimmed) || matchesNameHint(e.getValue().name, trimmed)) {
+                return e.getValue();
+            }
+        }
+        return null;
+    }
+
+    @Nullable
     private BtConnectionManager.MeshDeviceContact findByNameKey(String nameKey) {
         if (nameKey == null || nameKey.isEmpty()) {
             return null;
@@ -140,22 +204,20 @@ final class MeshContactRouteResolver {
         if (live != null) {
             return live;
         }
-        String radio = CallsignUtil.toRadioCallsign(nameKey).toUpperCase(Locale.US);
-        if (!radio.isEmpty()) {
-            live = liveByNameKey.get(radio);
-            if (live != null) {
-                return live;
-            }
-        }
         for (java.util.Map.Entry<String, BtConnectionManager.MeshDeviceContact> e
                 : liveByNameKey.entrySet()) {
-            String key = e.getKey();
-            if (key.equalsIgnoreCase(nameKey)
-                    || CallsignUtil.toRadioCallsign(key).equalsIgnoreCase(radio)) {
+            if (e.getKey().equalsIgnoreCase(nameKey)) {
                 return e.getValue();
             }
         }
         return null;
+    }
+
+    private static boolean matchesNameHint(@Nullable String stored, String hint) {
+        if (stored == null || hint == null) {
+            return false;
+        }
+        return CallsignUtil.isSameCallsignAlias(stored, hint);
     }
 
     private static String normalizeNameKey(String name) {

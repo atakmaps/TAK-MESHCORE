@@ -824,10 +824,8 @@ public class CotBridge {
                     continue;
                 }
                 String candidate = name.trim().toUpperCase(Locale.US);
-                if (candidate.equals(target)
-                        || candidate.equals(targetRadio)
-                        || com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(candidate)
-                            .equalsIgnoreCase(targetRadio)) {
+                if (CallsignUtil.isSameCallsignAlias(candidate, target)
+                        || CallsignUtil.isSameCallsignAlias(candidate, targetRadio)) {
                     return uid.trim();
                 }
             }
@@ -838,49 +836,92 @@ public class CotBridge {
 
     /**
      * Resolve a directed CoT destination to the best mesh route hint (pubkey/node UID or callsign).
+     * Prefers a hint whose firmware {@code out_path} resolves to direct/repeater routing.
      */
     @Nullable
     private String resolveRoutePeerHintForDestination(String destUid) {
         if (destUid == null || destUid.trim().isEmpty()) {
             return null;
         }
+        java.util.ArrayList<String> candidates = new java.util.ArrayList<>();
+        collectRouteHintCandidates(destUid.trim(), candidates);
+        if (btManager != null) {
+            for (String hint : candidates) {
+                if (hint != null && !hint.trim().isEmpty()
+                        && btManager.hasResolvableDirectRoute(hint.trim())) {
+                    Log.d(TAG, "Route hint direct: dest=" + destUid.trim()
+                            + " hint=" + hint.trim());
+                    return hint.trim();
+                }
+            }
+            if (!candidates.isEmpty()) {
+                String fallback = candidates.get(0);
+                Log.d(TAG, "Route hint flood: dest=" + destUid.trim()
+                        + " hint=" + fallback + " reason="
+                        + btManager.describeDirectRouteMiss(fallback));
+                return fallback;
+            }
+        }
+        return destUid.trim();
+    }
+
+    private void collectRouteHintCandidates(String destUid, java.util.List<String> out) {
+        if (destUid == null || destUid.trim().isEmpty()) {
+            return;
+        }
         String trimmed = destUid.trim();
+        addRouteHintCandidate(out, trimmed);
         String upper = trimmed.toUpperCase(Locale.US);
         if (upper.startsWith("MESHCORE-NODE-") || upper.startsWith("MESHCORE-RPTR-")) {
-            return trimmed;
+            return;
         }
         try {
             Contact c = Contacts.getInstance().getContactByUuid(trimmed);
             if (c instanceof IndividualContact) {
-                String hint = resolveMeshRouteHintForPeer((IndividualContact) c);
-                if (hint != null) {
-                    if (btManager != null && btManager.hasResolvableDirectRoute(hint)) {
-                        return hint;
-                    }
-                    String meshUid = findMeshNodeUidForPeer((IndividualContact) c);
-                    if (meshUid != null) {
-                        return meshUid;
-                    }
-                    return hint;
+                IndividualContact peer = (IndividualContact) c;
+                addRouteHintCandidate(out, findMeshNodeUidForPeer(peer));
+                addRouteHintCandidate(out, resolveMeshRouteHintForPeer(peer));
+                String name = peer.getName();
+                if (name != null && !name.trim().isEmpty()) {
+                    String bare = name.trim().toUpperCase(Locale.US);
+                    addRouteHintCandidate(out, ANDROID_UID_PREFIX + bare);
+                    addRouteHintCandidate(out, ANDROID_UID_PREFIX
+                            + CallsignUtil.alphanumericCallsignKey(bare));
+                    addRouteHintCandidate(out, CallsignUtil.toRadioCallsign(bare));
                 }
             }
         } catch (Exception ignored) {
         }
         String aliasCanonical = btechUidAliases.get(upper);
-        if (aliasCanonical != null) {
-            return resolveRoutePeerHintForDestination(aliasCanonical);
+        if (aliasCanonical != null && !aliasCanonical.equalsIgnoreCase(trimmed)) {
+            collectRouteHintCandidates(aliasCanonical, out);
         }
         if (upper.startsWith(ANDROID_UID_PREFIX)) {
             String bare = upper.substring(ANDROID_UID_PREFIX.length());
             if (!isOpaqueDeviceId(bare)) {
-                return trimmed;
+                addRouteHintCandidate(out, ANDROID_UID_PREFIX + bare);
+                addRouteHintCandidate(out, ANDROID_UID_PREFIX
+                        + CallsignUtil.alphanumericCallsignKey(bare));
+                addRouteHintCandidate(out, CallsignUtil.toRadioCallsign(bare));
             }
         }
         String mapped = resolveBtechUidForId(trimmed);
         if (mapped != null && !mapped.equalsIgnoreCase(trimmed)) {
-            return resolveRoutePeerHintForDestination(mapped);
+            collectRouteHintCandidates(mapped, out);
         }
-        return trimmed;
+    }
+
+    private static void addRouteHintCandidate(java.util.List<String> out, @Nullable String hint) {
+        if (hint == null || hint.trim().isEmpty()) {
+            return;
+        }
+        String value = hint.trim();
+        for (String existing : out) {
+            if (existing.equalsIgnoreCase(value)) {
+                return;
+            }
+        }
+        out.add(value);
     }
 
     private static boolean hasMeshRadioConnector(IndividualContact contact) {
@@ -2216,9 +2257,7 @@ public class CotBridge {
 
             boolean singleFragment = CotBuilder.fitsSingleRfFragment(compressed);
             String routePeerHint = extractRoutePeerHint(event);
-            String txRoute = (routePeerHint != null && btManager.hasResolvableDirectRoute(routePeerHint))
-                    ? "direct-via-repeater"
-                    : "flood";
+            String txRoute = btManager.formatTxRouteLabel(routePeerHint);
             Log.d(TAG, "CoT RF TX uid=" + event.getUID()
                     + " route=" + txRoute
                     + " compressed=" + compressed.length

@@ -192,16 +192,16 @@ public final class MeshDeviceContactCache {
         if (bare.toUpperCase(Locale.US).startsWith("ANDROID-")) {
             bare = bare.substring("ANDROID-".length());
         }
-        String key = bare.trim().toUpperCase(Locale.US);
-        String radio = CallsignUtil.toRadioCallsign(key).toUpperCase(Locale.US);
+        String key = CallsignUtil.alphanumericCallsignKey(bare);
+        String radio = CallsignUtil.toRadioCallsign(bare).toUpperCase(Locale.US);
         for (BtConnectionManager.MeshDeviceContact contact : load(context, deviceAddress)) {
             if (contact.name == null) {
                 continue;
             }
-            String contactName = contact.name.trim().toUpperCase(Locale.US);
-            if (contactName.equals(key)
-                    || contactName.equals(radio)
-                    || CallsignUtil.toRadioCallsign(contactName).equals(radio)) {
+            String contactName = contact.name.trim();
+            if (CallsignUtil.isSameCallsignAlias(contactName, bare)
+                    || CallsignUtil.isSameCallsignAlias(contactName, key)
+                    || contactName.equalsIgnoreCase(radio)) {
                 return contact;
             }
         }

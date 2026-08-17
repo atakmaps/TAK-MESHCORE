@@ -16,8 +16,12 @@ public final class MeshPathUtil {
     /** True when {@code path_len} is valid for {@code sendDirect} (not flood/unknown). */
     public static boolean isUsableDirectPath(int pathLen) {
         int encoded = pathLen & 0xFF;
-        if (encoded == 0xFF || encoded == 0) {
+        if (encoded == 0xFF) {
             return false;
+        }
+        // Firmware: path_len=0 means zero-hop direct (same RF hop, no repeater chain).
+        if (encoded == 0) {
+            return true;
         }
         int hashCount = encoded & 63;
         int hashSize = ((encoded >> 6) & 0x03) + 1;
@@ -27,12 +31,20 @@ public final class MeshPathUtil {
         return hashCount * hashSize <= 64;
     }
 
+    /** Zero-hop direct route ({@code out_path_len == 0}, no path wire bytes). */
+    public static boolean isZeroHopDirectPath(int pathLen) {
+        return (pathLen & 0xFF) == 0;
+    }
+
     /** Wire byte length written after {@code path_len} in {@code CMD_SEND_CHANNEL_DATA}. */
     public static int pathWireByteLen(int pathLen) {
-        if (!isUsableDirectPath(pathLen)) {
+        int encoded = pathLen & 0xFF;
+        if (encoded == 0xFF || !isUsableDirectPath(pathLen)) {
             return 0;
         }
-        int encoded = pathLen & 0xFF;
+        if (encoded == 0) {
+            return 0;
+        }
         int hashCount = encoded & 63;
         int hashSize = ((encoded >> 6) & 0x03) + 1;
         return hashCount * hashSize;
@@ -45,9 +57,13 @@ public final class MeshPathUtil {
      * @param pathBuf 64-byte contact path buffer from firmware (may be null)
      */
     public static byte[] pathWireBytes(int pathLen, byte[] pathBuf) {
-        int wireLen = pathWireByteLen(pathLen);
-        if (wireLen <= 0) {
+        int encoded = pathLen & 0xFF;
+        if (encoded == 0xFF || !isUsableDirectPath(pathLen)) {
             return null;
+        }
+        int wireLen = pathWireByteLen(pathLen);
+        if (wireLen == 0) {
+            return new byte[0];
         }
         if (pathBuf == null || pathBuf.length < wireLen) {
             return null;
@@ -83,6 +99,9 @@ public final class MeshPathUtil {
         }
         if (isUsableDirectPath(pathLenEncoded)) {
             int hops = pathHopCount(pathLenEncoded);
+            if (hops == 0) {
+                return "direct-zero-hop";
+            }
             return hops == 1
                     ? "direct-via-repeater hops=1"
                     : "direct-via-repeater hops=" + hops;

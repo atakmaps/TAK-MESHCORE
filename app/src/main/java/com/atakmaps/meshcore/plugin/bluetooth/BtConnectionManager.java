@@ -1564,6 +1564,29 @@ public class BtConnectionManager {
                 != null;
     }
 
+    /** Why {@code routePeerHint} does not resolve to direct companion routing (for TX logs). */
+    @NonNull
+    public String describeDirectRouteMiss(@Nullable String routePeerHint) {
+        if (!connected.get()) {
+            return "not connected";
+        }
+        return routeResolver.describeRouteMiss(routePeerHint, getConnectedDeviceAddress());
+    }
+
+    /** TX route label for a resolved peer hint ({@code flood}, {@code direct-zero-hop}, etc.). */
+    @NonNull
+    public String formatTxRouteLabel(@Nullable String routePeerHint) {
+        if (!connected.get() || routePeerHint == null || routePeerHint.trim().isEmpty()) {
+            return "flood";
+        }
+        MeshContactRouteResolver.DirectRoute route =
+                routeResolver.resolveDirectRoute(routePeerHint.trim(), getConnectedDeviceAddress());
+        if (route == null) {
+            return "flood";
+        }
+        return com.atakmaps.meshcore.plugin.util.MeshPathUtil.formatTxRoute(route.pathLenEncoded);
+    }
+
     /**
      * Send AX.25 over {@code ATAK_DATA}. When {@code routePeerHint} resolves to a device contact
      * with a known {@code out_path}, uses companion direct routing instead of flood.
@@ -1598,6 +1621,10 @@ public class BtConnectionManager {
         if (route != null) {
             pathLenEncoded = route.pathLenEncoded;
             pathWire = route.pathWireBytes;
+        } else if (routePeerHint != null && !routePeerHint.trim().isEmpty()) {
+            Log.d(TAG, "TX flood fallback peer=" + routePeerHint.trim()
+                    + " reason=" + routeResolver.describeRouteMiss(
+                            routePeerHint.trim(), getConnectedDeviceAddress()));
         }
 
         int total = sendAx25EnvelopeChunks(channel, msgIdStr, ax25Frame, pathLenEncoded, pathWire);
@@ -3924,8 +3951,9 @@ public class BtConnectionManager {
         i += CONTACT_PUB_KEY_BYTES;
         out[i++] = (byte) (contact.type & 0xFF);
         out[i++] = (byte) (flags & 0xFF);
-        int pathLen = contact.outPathLen;
-        if (pathLen <= 0 || pathLen > 63) {
+        int pathLen = contact.outPathLen & 0xFF;
+        if (pathLen != OUT_PATH_UNKNOWN && !com.atakmaps.meshcore.plugin.util.MeshPathUtil
+                .isUsableDirectPath(pathLen)) {
             pathLen = OUT_PATH_UNKNOWN;
         }
         out[i++] = (byte) (pathLen & 0xFF);
