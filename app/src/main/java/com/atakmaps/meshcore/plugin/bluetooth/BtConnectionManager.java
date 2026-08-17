@@ -140,6 +140,8 @@ public class BtConnectionManager {
 
     private static final int MAX_MESH_MESSAGE_LEN = 130; // leave room below 133 chars
     private static final int MAX_RAW_AX25_CHUNK = 57; // 57 bytes -> 76 Base64 chars
+    /** Delay between UVAX1 sub-chunks so repeaters can store-and-forward without loss. */
+    private static final long MESH_MULTI_CHUNK_PACE_MS = 200L;
     private static final int ADVERT_LOC_NONE = 0;
     private static final int ADVERT_LOC_SHARE = 1;
     private static final String ENV_PREFIX = "UVAX1|";
@@ -1649,14 +1651,31 @@ public class BtConnectionManager {
                 Log.w(TAG, "Mesh payload too long, dropping frame");
                 return 0;
             }
-            enqueueCommand(buildSendChannelDataCommand(
-                    channel,
-                    pathLenEncoded,
-                    pathWire,
-                    ATAK_DATA_TYPE_AX25,
-                    payload.getBytes(StandardCharsets.UTF_8)));
+            final String chunkPayload = payload;
+            long paceMs = total > 1 ? MESH_MULTI_CHUNK_PACE_MS * i : 0L;
+            if (paceMs <= 0L) {
+                enqueueAx25ChannelPayload(channel, pathLenEncoded, pathWire, chunkPayload);
+            } else {
+                ioHandler.postDelayed(
+                        () -> enqueueAx25ChannelPayload(
+                                channel, pathLenEncoded, pathWire, chunkPayload),
+                        paceMs);
+            }
         }
         return total;
+    }
+
+    private void enqueueAx25ChannelPayload(int channel, int pathLenEncoded, byte[] pathWire,
+                                           String payload) {
+        if (payload == null || payload.isEmpty()) {
+            return;
+        }
+        enqueueCommand(buildSendChannelDataCommand(
+                channel,
+                pathLenEncoded,
+                pathWire,
+                ATAK_DATA_TYPE_AX25,
+                payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     }
 
     private static String buildAx25EnvelopePayload(String msgIdStr, int seq, int total, byte[] raw) {

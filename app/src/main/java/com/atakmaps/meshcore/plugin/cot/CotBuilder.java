@@ -13,12 +13,15 @@ import com.atakmap.coremap.cot.event.CotEvent;
 import com.atakmap.coremap.cot.event.CotPoint;
 import com.atakmap.coremap.maps.coords.GeoPoint;
 
+import com.atakmaps.meshcore.plugin.protocol.PacketFragmenter;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.TimeZone;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -645,6 +648,122 @@ public class CotBuilder {
         } catch (Exception e) {
             Log.w(TAG, "minifyCotXml failed — using original CoT", e);
             return original;
+        }
+    }
+
+    /** MIL-STD-2525 unit point types ({@code a-f-G}, {@code a-h-G}, …). */
+    private static final Pattern RF_COMPACT_POINT_TYPE =
+            Pattern.compile("a-[a-z]-G");
+
+    private static final long RF_MAX_STALE_MS = 7L * 24L * 60L * 60L * 1000L;
+
+    /**
+     * Extra minification for map points so gzip payload fits a single 240-byte RF fragment.
+     * Preserves {@code type}, {@code point}, {@code contact}, and {@code __dest}; drops
+     * redundant {@code color}/{@code usericon} when {@code type} carries affiliation.
+     */
+    public static String minifyCotXmlForRf(CotEvent event) {
+        if (event == null) {
+            return null;
+        }
+        String base = minifyCotXml(event);
+        if (base == null) {
+            return null;
+        }
+        String type = event.getType();
+        if (type == null || !RF_COMPACT_POINT_TYPE.matcher(type).matches()) {
+            return base;
+        }
+        try {
+            CotEvent clone = CotEvent.parse(base);
+            if (clone == null) {
+                return base;
+            }
+            CotPoint pt = clone.getCotPoint();
+            if (pt != null) {
+                clone.setPoint(new CotPoint(
+                        roundCoord(pt.getLat(), 5),
+                        roundCoord(pt.getLon(), 5),
+                        0,
+                        CotPoint.UNKNOWN,
+                        CotPoint.UNKNOWN));
+            }
+            capStaleWindow(clone);
+            if ("h-g-i-g-o".equals(clone.getHow())) {
+                clone.setHow("m-g");
+            }
+            CotDetail detail = clone.getDetail();
+            if (detail != null) {
+                for (CotDetail child : detail.getChildren()) {
+                    if (child == null) {
+                        continue;
+                    }
+                    String name = child.getElementName();
+                    if ("color".equals(name) || "usericon".equals(name) || "contact".equals(name)) {
+                        detail.removeChild(child);
+                    }
+                }
+            }
+            String rfXml = clone.toString();
+            rfXml = rfXml.replaceAll("<\\?xml[^?]*\\?>", "");
+            rfXml = rfXml.replaceAll(" access='[^']*'", "")
+                    .replaceAll(" access=\"[^\"]*\"", "");
+            rfXml = rfXml.replaceAll("\\.\\d{3}Z", "Z");
+            return rfXml.trim();
+        } catch (Exception e) {
+            Log.w(TAG, "minifyCotXmlForRf failed — using standard minify", e);
+            return base;
+        }
+    }
+
+    /**
+     * GZIP the smallest of full, standard-minified, and RF-minified XML for mesh TX.
+     */
+    public static byte[] compressBestForRf(CotEvent event) {
+        if (event == null) {
+            return null;
+        }
+        byte[] best = compressCot(event.toString());
+        if (best == null) {
+            return null;
+        }
+        String minXml = minifyCotXml(event);
+        if (minXml != null) {
+            byte[] min = compressCot(minXml);
+            if (min != null && min.length < best.length) {
+                best = min;
+            }
+        }
+        String rfXml = minifyCotXmlForRf(event);
+        if (rfXml != null) {
+            byte[] rf = compressCot(rfXml);
+            if (rf != null && rf.length < best.length) {
+                best = rf;
+            }
+        }
+        return best;
+    }
+
+    /** @return true when gzip payload fits one {@link PacketFragmenter} frame. */
+    public static boolean fitsSingleRfFragment(byte[] compressed) {
+        return compressed != null
+                && compressed.length <= PacketFragmenter.MAX_FRAGMENT_PAYLOAD;
+    }
+
+    private static double roundCoord(double value, int decimalPlaces) {
+        double scale = Math.pow(10, decimalPlaces);
+        return Math.round(value * scale) / scale;
+    }
+
+    private static void capStaleWindow(CotEvent event) {
+        if (event == null || event.getStart() == null || event.getStale() == null) {
+            return;
+        }
+        long startMs = event.getStart().getMilliseconds();
+        long staleMs = event.getStale().getMilliseconds();
+        if (staleMs - startMs > RF_MAX_STALE_MS) {
+            event.setStale(new com.atakmap.coremap.maps.time.CoordinatedTime(
+                    startMs + RF_MAX_STALE_MS));
         }
     }
 

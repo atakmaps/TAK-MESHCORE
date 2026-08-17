@@ -2172,6 +2172,9 @@ public class CotBridge {
     /** Max compressed CoT size to send over RF. Larger items flood the channel. */
     private static final int MAX_COT_COMPRESSED_BYTES = 4096;
 
+    /** Pause between multi-fragment CoT AX.25 frames so repeaters can forward each chunk. */
+    private static final long COT_FRAGMENT_PACE_MS = 250L;
+
     public void sendCotOverRadio(CotEvent event) {
         sendCotOverRadioInternal(event, true);
     }
@@ -2202,23 +2205,15 @@ public class CotBridge {
 
         com.atakmaps.meshcore.plugin.protocol.RfTxArbitrator.get().markOpenRlTxStart();
         try {
-            String xml = event.toString();
-            byte[] full = CotBuilder.compressCot(xml);
-            if (full == null) {
+            byte[] compressed = CotBuilder.compressBestForRf(event);
+            if (compressed == null) {
                 Log.e(TAG, "Failed to compress CoT for radio");
                 return;
             }
 
-            // Try minified CoT (heavy detail children stripped). Only use it if it
-            // is strictly smaller — never-worse fallback to today's behavior.
-            String minXml = CotBuilder.minifyCotXml(event);
-            Log.d(TAG, "CoT minified XML:\n" + (minXml != null ? minXml : "(null — using full)"));
-            byte[] min = (minXml != null) ? CotBuilder.compressCot(minXml) : null;
-            byte[] compressed = (min != null && min.length < full.length) ? min : full;
-
-            Log.d(TAG, "CoT size: full=" + full.length
-                    + " min=" + (min == null ? -1 : min.length)
-                    + " used=" + compressed.length
+            boolean singleFragment = CotBuilder.fitsSingleRfFragment(compressed);
+            Log.d(TAG, "CoT RF payload: compressed=" + compressed.length
+                    + " singleFragment=" + singleFragment
                     + " type=" + event.getType());
 
             if (compressed.length > MAX_COT_COMPRESSED_BYTES) {
@@ -2230,7 +2225,6 @@ public class CotBridge {
 
             Log.d(TAG, "Sending CoT over radio: type=" + event.getType()
                     + " uid=" + event.getUID()
-                    + " xmlBytes=" + xml.length()
                     + " compressedBytes=" + compressed.length);
 
             // Fragment if needed
@@ -2242,7 +2236,16 @@ public class CotBridge {
 
             String routePeerHint = extractRoutePeerHint(event);
 
-            for (MeshCorePacket packet : packets) {
+            for (int i = 0; i < packets.size(); i++) {
+                if (i > 0 && packets.size() > 1) {
+                    try {
+                        Thread.sleep(COT_FRAGMENT_PACE_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+                MeshCorePacket packet = packets.get(i);
                 byte[] packetBytes = packet.encode();
                 // Encrypt entire packet bytes if enabled
                 if (encryptionManager != null && encryptionManager.isEnabled()) {
