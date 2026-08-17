@@ -160,6 +160,7 @@ public class BtConnectionManager {
 
     private final Context context;
     private final PacketRouter packetRouter;
+    private final MeshContactRouteResolver routeResolver;
     private final AtomicBoolean connected = new AtomicBoolean(false);
     private final AtomicBoolean connecting = new AtomicBoolean(false);
     private final AtomicBoolean shouldReconnect = new AtomicBoolean(true);
@@ -369,6 +370,8 @@ public class BtConnectionManager {
         public final int type;
         public final int flags;
         public final int outPathLen;
+        /** 64-byte path buffer from firmware; only first {@link MeshPathUtil#pathWireByteLen} bytes are used on TX. */
+        public final byte[] outPath;
         public final String name;
         public final int lastAdvertTimestamp;
         public final double gpsLat;
@@ -378,10 +381,18 @@ public class BtConnectionManager {
         public MeshDeviceContact(String pubKeyHex, int type, int flags, int outPathLen,
                                  String name, int lastAdvertTimestamp,
                                  double gpsLat, double gpsLon, int lastMod) {
+            this(pubKeyHex, type, flags, outPathLen, null, name,
+                    lastAdvertTimestamp, gpsLat, gpsLon, lastMod);
+        }
+
+        public MeshDeviceContact(String pubKeyHex, int type, int flags, int outPathLen,
+                                 byte[] outPath, String name, int lastAdvertTimestamp,
+                                 double gpsLat, double gpsLon, int lastMod) {
             this.pubKeyHex = pubKeyHex;
             this.type = type;
             this.flags = flags;
             this.outPathLen = outPathLen;
+            this.outPath = outPath;
             this.name = name;
             this.lastAdvertTimestamp = lastAdvertTimestamp;
             this.gpsLat = gpsLat;
@@ -589,6 +600,7 @@ public class BtConnectionManager {
                 : context;
         this.context = atakContext;
         this.packetRouter = packetRouter;
+        this.routeResolver = new MeshContactRouteResolver(atakContext);
         this.btAdapter = BluetoothAdapter.getDefaultAdapter();
         ioThread.start();
         ioHandler = new Handler(ioThread.getLooper());
@@ -1533,9 +1545,31 @@ public class BtConnectionManager {
     }
 
     /**
-     * Send AX.25 frame over MeshCore channel using chunked Base64 text envelopes.
+     * Send AX.25 frame over MeshCore channel using chunked Base64 text envelopes (mesh flood).
      */
     public boolean sendKissFrame(byte[] ax25Frame) {
+        return sendKissFrame(ax25Frame, null);
+    }
+
+    /**
+     * True when {@code routePeerHint} resolves to a device contact with a usable direct path.
+     */
+    public boolean hasResolvableDirectRoute(@Nullable String routePeerHint) {
+        if (!connected.get() || routePeerHint == null || routePeerHint.trim().isEmpty()) {
+            return false;
+        }
+        return routeResolver.resolveDirectRoute(routePeerHint.trim(), getConnectedDeviceAddress())
+                != null;
+    }
+
+    /**
+     * Send AX.25 over {@code ATAK_DATA}. When {@code routePeerHint} resolves to a device contact
+     * with a known {@code out_path}, uses companion direct routing instead of flood.
+     *
+     * @param routePeerHint ATAK UID, {@code ANDROID-{callsign}}, {@code MESHCORE-NODE-*}, callsign,
+     *                      or pubkey prefix; null for flood (broadcast / unknown peer).
+     */
+    public boolean sendKissFrame(byte[] ax25Frame, @Nullable String routePeerHint) {
         if (!connected.get()) {
             Log.w(TAG, "Cannot send: not connected");
             return false;
@@ -1552,13 +1586,29 @@ public class BtConnectionManager {
         int channel = getMeshChannelIndex();
         int msgId = outboundMsgId.getAndIncrement() & 0x7fffffff;
         String msgIdStr = String.valueOf(msgId);
-        int total = sendAx25EnvelopeChunks(channel, msgIdStr, ax25Frame);
+
+        MeshContactRouteResolver.DirectRoute route = null;
+        if (routePeerHint != null && !routePeerHint.trim().isEmpty()) {
+            route = routeResolver.resolveDirectRoute(routePeerHint, getConnectedDeviceAddress());
+        }
+        int pathLenEncoded = OUT_PATH_FLOOD;
+        byte[] pathWire = null;
+        if (route != null) {
+            pathLenEncoded = route.pathLenEncoded;
+            pathWire = route.pathWireBytes;
+        }
+
+        int total = sendAx25EnvelopeChunks(channel, msgIdStr, ax25Frame, pathLenEncoded, pathWire);
         if (total <= 0) {
             Log.w(TAG, "sendKissFrame failed: envelope too large for mesh channel");
             return false;
         }
-        Log.d(TAG, "TX ATAK_DATA ch=" + channel + " ax25=" + ax25Frame.length + " bytes"
-                + " chunks=" + total);
+        String routeLabel = pathLenEncoded == OUT_PATH_FLOOD
+                ? "flood"
+                : "direct hops=" + com.atakmaps.meshcore.plugin.util.MeshPathUtil.pathHopCount(pathLenEncoded);
+        Log.d(TAG, "TX ATAK_DATA ch=" + channel + " route=" + routeLabel
+                + " ax25=" + ax25Frame.length + " bytes chunks=" + total
+                + (routePeerHint != null ? " peer=" + routePeerHint : ""));
         packetRouter.notifyPacketTransmitted();
         return true;
     }
@@ -1568,10 +1618,17 @@ public class BtConnectionManager {
      * frame fits the 130-char mesh envelope limit (typical OPENRL GPS beacons).
      */
     private int sendAx25EnvelopeChunks(int channel, String msgIdStr, byte[] ax25Frame) {
+        return sendAx25EnvelopeChunks(channel, msgIdStr, ax25Frame, OUT_PATH_FLOOD, null);
+    }
+
+    private int sendAx25EnvelopeChunks(int channel, String msgIdStr, byte[] ax25Frame,
+                                       int pathLenEncoded, byte[] pathWire) {
         String singlePayload = buildAx25EnvelopePayload(msgIdStr, 1, 1, ax25Frame);
         if (singlePayload != null && singlePayload.length() <= MAX_MESH_MESSAGE_LEN) {
             enqueueCommand(buildSendChannelDataCommand(
                     channel,
+                    pathLenEncoded,
+                    pathWire,
                     ATAK_DATA_TYPE_AX25,
                     singlePayload.getBytes(StandardCharsets.UTF_8)));
             return 1;
@@ -1594,6 +1651,8 @@ public class BtConnectionManager {
             }
             enqueueCommand(buildSendChannelDataCommand(
                     channel,
+                    pathLenEncoded,
+                    pathWire,
                     ATAK_DATA_TYPE_AX25,
                     payload.getBytes(StandardCharsets.UTF_8)));
         }
@@ -1637,6 +1696,8 @@ public class BtConnectionManager {
         }
         enqueueCommand(buildSendChannelDataCommand(
                 getMeshChannelIndex(),
+                OUT_PATH_FLOOD,
+                null,
                 ATAK_DATA_TYPE_RAW,
                 payload.getBytes(StandardCharsets.UTF_8)));
         return true;
@@ -2413,9 +2474,21 @@ public class BtConnectionManager {
             }
         }
         for (ConnectionListener l : listeners) l.onConnected(device);
+        warmRouteCacheFromDisk();
+    }
+
+    private void warmRouteCacheFromDisk() {
+        String addr = getConnectedDeviceAddress();
+        if (addr == null) {
+            return;
+        }
+        for (MeshDeviceContact contact : MeshDeviceContactCache.load(context, addr)) {
+            routeResolver.indexContact(contact);
+        }
     }
 
     private void notifyDisconnected(String reason) {
+        routeResolver.clear();
         for (ConnectionListener l : listeners) l.onDisconnected(reason);
     }
 
@@ -2489,6 +2562,7 @@ public class BtConnectionManager {
     }
 
     private void notifyDeviceContactUpdated(MeshDeviceContact contact) {
+        routeResolver.indexContact(contact);
         for (MeshDeviceContactUpdateListener l : deviceContactUpdateListeners) {
             try {
                 l.onDeviceContactUpdated(contact);
@@ -2713,12 +2787,21 @@ public class BtConnectionManager {
     }
 
     private byte[] buildSendChannelDataCommand(int channel, int dataType, byte[] payload) {
+        return buildSendChannelDataCommand(channel, OUT_PATH_FLOOD, null, dataType, payload);
+    }
+
+    private byte[] buildSendChannelDataCommand(int channel, int pathLenEncoded,
+                                               byte[] pathWire, int dataType, byte[] payload) {
+        int pathWireLen = pathWire != null ? pathWire.length : 0;
         int payloadLen = payload != null ? payload.length : 0;
-        ByteBuffer buf = ByteBuffer.allocate(6 + payloadLen);
+        ByteBuffer buf = ByteBuffer.allocate(6 + pathWireLen + payloadLen);
         buf.order(ByteOrder.LITTLE_ENDIAN);
         buf.put(CMD_SEND_CHANNEL_DATA);
         buf.put((byte) Math.max(0, Math.min(7, channel)));
-        buf.put((byte) OUT_PATH_FLOOD);
+        buf.put((byte) (pathLenEncoded & 0xFF));
+        if (pathWireLen > 0) {
+            buf.put(pathWire);
+        }
         buf.put((byte) (dataType & 0xFF));
         buf.put((byte) ((dataType >> 8) & 0xFF));
         if (payloadLen > 0) {
@@ -3710,6 +3793,8 @@ public class BtConnectionManager {
             int type = pkt[i++] & 0xFF;
             int flags = pkt[i++] & 0xFF;
             int outPathLen = pkt[i++] & 0xFF;
+            byte[] outPath = new byte[CONTACT_PATH_BYTES];
+            System.arraycopy(pkt, i, outPath, 0, CONTACT_PATH_BYTES);
             i += CONTACT_PATH_BYTES;
             String nameRaw = new String(pkt, i, CONTACT_NAME_BYTES, StandardCharsets.UTF_8);
             int nul = nameRaw.indexOf('\0');
@@ -3740,7 +3825,7 @@ public class BtConnectionManager {
             if (name.isEmpty()) {
                 name = pubKeyHex.length() >= 12 ? pubKeyHex.substring(0, 12) : pubKeyHex;
             }
-            return new MeshDeviceContact(pubKeyHex, type, flags, outPathLen, name,
+            return new MeshDeviceContact(pubKeyHex, type, flags, outPathLen, outPath, name,
                     lastAdvertTs, gpsLat, gpsLon, lastMod);
         } catch (Exception e) {
             Log.w(TAG, "parseDeviceContactPacket failed", e);
@@ -3769,6 +3854,9 @@ public class BtConnectionManager {
             pathLen = OUT_PATH_UNKNOWN;
         }
         out[i++] = (byte) (pathLen & 0xFF);
+        if (contact.outPath != null && contact.outPath.length >= CONTACT_PATH_BYTES) {
+            System.arraycopy(contact.outPath, 0, out, i, CONTACT_PATH_BYTES);
+        }
         i += CONTACT_PATH_BYTES;
         byte[] nameBytes = (contact.name != null ? contact.name : "")
                 .getBytes(StandardCharsets.UTF_8);
@@ -3820,6 +3908,9 @@ public class BtConnectionManager {
         final java.util.ArrayList<MeshDeviceContact> results =
                 new java.util.ArrayList<>(pendingDeviceContactsList);
         pendingDeviceContactsList.clear();
+        for (MeshDeviceContact contact : results) {
+            routeResolver.indexContact(contact);
+        }
         mainHandler.post(() -> {
             if (listener == null) {
                 return;

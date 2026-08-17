@@ -8,6 +8,7 @@ import com.atakmap.android.contact.Contact;
 import com.atakmap.android.contact.ContactConnectorManager;
 import com.atakmap.android.contact.Contacts;
 import com.atakmap.android.contact.IndividualContact;
+import com.atakmap.android.contact.IpConnector;
 import com.atakmap.android.maps.MapItem;
 import com.atakmap.android.contact.PluginConnector;
 import com.atakmap.android.preference.AtakPreferences;
@@ -690,6 +691,42 @@ public class MeshCoreContactHandler extends
             upper = upper.substring(0, upper.length() - 5).trim();
         }
         return upper;
+    }
+
+    /**
+     * After contact merge, ensure the keeper row carries mesh send routing even when the
+     * primary UID is an opaque Wi‑Fi {@code ANDROID-{hex}}.
+     */
+    public static void ensureMergedAtakPeerMeshConnectors(IndividualContact contact) {
+        if (contact == null) {
+            return;
+        }
+        String uid = contact.getUID();
+        if (uid == null || uid.trim().isEmpty()) {
+            return;
+        }
+        String upper = uid.trim().toUpperCase(Locale.US);
+        if (upper.startsWith(MESH_NODE_UID_PREFIX) || upper.startsWith(MESH_RPTR_UID_PREFIX)) {
+            return;
+        }
+        if (!isEstablishedRfAtakContact(uid.trim())) {
+            return;
+        }
+        try {
+            if (contact.getConnector(MeshSendMessageConnector.CONNECTOR_TYPE) == null) {
+                contact.addConnector(new MeshSendMessageConnector());
+            }
+            if (contact.getConnector(GeoChatConnector.CONNECTOR_TYPE) == null) {
+                contact.addConnector(new GeoChatConnector(
+                        buildNativeConnectorSeed(contact.getName())));
+            }
+            if (contact.getConnector(IpConnector.CONNECTOR_TYPE) == null) {
+                contact.addConnector(new IpConnector((String) null));
+            }
+            writeDefaultConnectorPref(uid.trim(), GeoChatConnector.CONNECTOR_TYPE);
+        } catch (Exception e) {
+            Log.w("MeshCore.Handler", "ensureMergedAtakPeerMeshConnectors failed", e);
+        }
     }
 
     /**

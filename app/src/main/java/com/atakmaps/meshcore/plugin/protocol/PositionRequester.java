@@ -102,7 +102,7 @@ public final class PositionRequester {
                 }
             }
             Ax25Frame frame = Ax25Frame.createMeshCoreFrame(sender, 0, packetBytes);
-            boolean ok = tx.sendKissFrame(frame.encode());
+            boolean ok = tx.sendKissFrame(frame.encode(), contactUid != null ? contactUid : atakTarget);
             if (ok) {
                 PingReplyNotifier.noteDirectedPingSent(ctx, atakTarget, "MeshCore");
             }

@@ -3,6 +3,7 @@ package com.atakmaps.meshcore.plugin.cot;
 import android.util.Log;
 
 import com.atakmaps.meshcore.plugin.ax25.MeshcoreIconset;
+import com.atakmaps.meshcore.plugin.util.CallsignUtil;
 
 import com.atakmap.android.cot.CotMapComponent;
 import com.atakmap.android.maps.MapView;
@@ -123,10 +124,30 @@ public class CotBuilder {
                                             long staleMillis,
                                             String cotTypeOverride,
                                             String remarksInner) {
+        return buildPositionCot(callsign, lat, lon, alt, speed, course, teamColor,
+                staleMillis, cotTypeOverride, remarksInner, null);
+    }
+
+    /**
+     * ATAK peer position CoT — team tint via {@code __group}, no {@code meschore} usericon.
+     *
+     * @param mapUidOverride when set, updates that existing map/contact marker (e.g. opaque
+     *                       Wi‑Fi {@code ANDROID-{hex}}); otherwise {@code ANDROID-<CALLSIGN>}
+     */
+    public static CotEvent buildPositionCot(String callsign,
+                                            double lat, double lon,
+                                            double alt, double speed,
+                                            double course, String teamColor,
+                                            long staleMillis,
+                                            String cotTypeOverride,
+                                            String remarksInner,
+                                            String mapUidOverride) {
         CotEvent event = new CotEvent();
 
         String normalizedCall = callsign.trim().toUpperCase();
-        String uid = "ANDROID-" + normalizedCall;
+        String uid = (mapUidOverride != null && !mapUidOverride.trim().isEmpty())
+                ? mapUidOverride.trim()
+                : "ANDROID-" + normalizedCall;
         event.setUID(uid);
         event.setType((cotTypeOverride != null && !cotTypeOverride.trim().isEmpty())
                 ? cotTypeOverride.trim()
@@ -1058,6 +1079,9 @@ public class CotBuilder {
             }
             String trimmed = dest.trim();
             if (self.equalsIgnoreCase(trimmed)) {
+                return true;
+            }
+            if (CallsignUtil.isSameCallsignAlias(self, trimmed)) {
                 return true;
             }
             if (uidResolver != null) {

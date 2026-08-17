@@ -2383,7 +2383,7 @@ public class MeshCoreDropDownReceiver extends DropDownReceiver
         if (cached != null) {
             merged = new BtConnectionManager.MeshDeviceContact(
                     contact.pubKeyHex, contact.type,
-                    cached.flags, cached.outPathLen, contact.name,
+                    cached.flags, contact.outPathLen, contact.outPath, contact.name,
                     contact.lastAdvertTimestamp > 0
                             ? contact.lastAdvertTimestamp : cached.lastAdvertTimestamp,
                     contact.gpsLat != 0.0 ? contact.gpsLat : cached.gpsLat,

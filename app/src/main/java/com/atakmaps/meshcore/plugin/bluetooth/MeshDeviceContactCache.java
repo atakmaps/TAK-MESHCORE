@@ -7,6 +7,8 @@ import android.preference.PreferenceManager;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.atakmaps.meshcore.plugin.util.CallsignUtil;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -168,7 +170,7 @@ public final class MeshDeviceContactCache {
                         ? (c.flags | BtConnectionManager.CONTACT_FLAG_FAVORITE)
                         : (c.flags & ~BtConnectionManager.CONTACT_FLAG_FAVORITE);
                 updated.add(new BtConnectionManager.MeshDeviceContact(
-                        c.pubKeyHex, c.type, flags, c.outPathLen, c.name,
+                        c.pubKeyHex, c.type, flags, c.outPathLen, c.outPath, c.name,
                         c.lastAdvertTimestamp, c.gpsLat, c.gpsLon, c.lastMod));
                 changed = true;
             } else {
@@ -178,6 +180,32 @@ public final class MeshDeviceContactCache {
         if (changed) {
             save(context, addr, updated);
         }
+    }
+
+    @Nullable
+    public static BtConnectionManager.MeshDeviceContact findByNodeName(
+            Context context, @Nullable String deviceAddress, @Nullable String nameHint) {
+        if (nameHint == null || nameHint.trim().isEmpty()) {
+            return null;
+        }
+        String bare = nameHint.trim();
+        if (bare.toUpperCase(Locale.US).startsWith("ANDROID-")) {
+            bare = bare.substring("ANDROID-".length());
+        }
+        String key = bare.trim().toUpperCase(Locale.US);
+        String radio = CallsignUtil.toRadioCallsign(key).toUpperCase(Locale.US);
+        for (BtConnectionManager.MeshDeviceContact contact : load(context, deviceAddress)) {
+            if (contact.name == null) {
+                continue;
+            }
+            String contactName = contact.name.trim().toUpperCase(Locale.US);
+            if (contactName.equals(key)
+                    || contactName.equals(radio)
+                    || CallsignUtil.toRadioCallsign(contactName).equals(radio)) {
+                return contact;
+            }
+        }
+        return null;
     }
 
     @Nullable
@@ -285,6 +313,9 @@ public final class MeshDeviceContactCache {
                 o.put("type", c.type);
                 o.put("flags", c.flags);
                 o.put("outPathLen", c.outPathLen);
+                if (c.outPath != null && c.outPath.length > 0) {
+                    o.put("outPathHex", bytesToHex(c.outPath));
+                }
                 o.put("name", c.name);
                 o.put("lastAdvertTimestamp", c.lastAdvertTimestamp);
                 o.put("gpsLat", c.gpsLat);
@@ -309,6 +340,7 @@ public final class MeshDeviceContactCache {
                         o.optInt("type", 0),
                         o.optInt("flags", 0),
                         o.optInt("outPathLen", 0),
+                        decodeOutPathHex(o.optString("outPathHex", null)),
                         o.optString("name", ""),
                         o.optInt("lastAdvertTimestamp", 0),
                         o.optDouble("gpsLat", 0.0),
@@ -318,5 +350,42 @@ public final class MeshDeviceContactCache {
         } catch (JSONException ignored) {
         }
         return out;
+    }
+
+    @Nullable
+    private static byte[] decodeOutPathHex(@Nullable String hex) {
+        if (hex == null || hex.trim().isEmpty()) {
+            return null;
+        }
+        String cleaned = hex.trim();
+        if (cleaned.length() % 2 != 0) {
+            return null;
+        }
+        int len = cleaned.length() / 2;
+        byte[] out = new byte[Math.min(len, 64)];
+        try {
+            for (int i = 0; i < out.length; i++) {
+                out[i] = (byte) Integer.parseInt(cleaned.substring(i * 2, i * 2 + 2), 16);
+            }
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (len < 64) {
+            byte[] padded = new byte[64];
+            System.arraycopy(out, 0, padded, 0, out.length);
+            return padded;
+        }
+        return out;
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(String.format(Locale.US, "%02X", b & 0xFF));
+        }
+        return sb.toString();
     }
 }

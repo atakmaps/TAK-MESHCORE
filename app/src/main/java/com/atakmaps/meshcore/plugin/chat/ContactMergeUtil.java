@@ -135,8 +135,10 @@ public final class ContactMergeUtil {
             for (IndividualContact ic : candidates) {
                 int score = scorePreferredNativeContact(ic);
                 String uid = ic.getUID() != null ? ic.getUID().trim().toUpperCase(Locale.US) : "";
+                String contactName = ic.getName() != null ? ic.getName().trim() : rawCallsign;
                 if (keepUidHint != null && !keepUidHint.trim().isEmpty()
-                        && uid.equalsIgnoreCase(keepUidHint.trim())) {
+                        && uid.equalsIgnoreCase(keepUidHint.trim())
+                        && !isSyntheticCallsignUid(uid, contactName)) {
                     score += 200;
                 }
                 if (score > bestScore) {
@@ -154,9 +156,44 @@ public final class ContactMergeUtil {
                 }
                 Log.d(TAG, "collapseDuplicate removing uid=" + ic.getUID()
                         + " keeping uid=" + keepUid + " callsign=" + rawCallsign);
+                propagateTransportAliasesFromDuplicate(keep, ic);
                 contacts.removeContact(ic);
             }
             finishContactMerge(keep, rawCallsign);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static void propagateTransportAliasesFromDuplicate(IndividualContact keep,
+                                                               IndividualContact removed) {
+        if (keep == null || removed == null) {
+            return;
+        }
+        CotBridge bridge = mergeRoutingBridge;
+        if (bridge == null) {
+            return;
+        }
+        String keepUid = keep.getUID();
+        String removedUid = removed.getUID();
+        if (keepUid == null || removedUid == null || removedUid.equalsIgnoreCase(keepUid)) {
+            return;
+        }
+        bridge.registerBtechContactUidAlias(removedUid, keepUid);
+    }
+
+    static void removeDuplicateUidContact(Contacts contacts, String candidateUid, String keepUid) {
+        if (contacts == null || candidateUid == null || candidateUid.trim().isEmpty()) {
+            return;
+        }
+        String c = candidateUid.trim();
+        if (keepUid != null && c.equalsIgnoreCase(keepUid.trim())) {
+            return;
+        }
+        try {
+            Contact dup = contacts.getContactByUuid(c);
+            if (dup != null) {
+                contacts.removeContact(dup);
+            }
         } catch (Exception ignored) {
         }
     }
@@ -297,6 +334,11 @@ public final class ContactMergeUtil {
         } else if (keep.getName() != null && !keep.getName().trim().isEmpty()) {
             bridge.removeOrphanRfMapMarkerForCallsign(keep.getName(), keep.getUID());
         }
+    }
+
+    /** Package-visible for {@link ChatBridge#ensurePluginChatContact}. */
+    static void finishContactMergePublic(IndividualContact keep, String callsignRaw) {
+        finishContactMerge(keep, callsignRaw);
     }
 
     private static boolean isOrphanSyntheticRadioContact(IndividualContact ic,

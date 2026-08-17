@@ -208,6 +208,10 @@ public class ChatBridge {
 
     private volatile boolean loggedPluginChatBundleKeysMissingUid;
 
+    private final android.os.Handler contactMergeHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private Runnable pendingCollapseAllTask;
+
     public ChatBridge(Context pluginContext, MapView mapView) {
         this.pluginContext = pluginContext;
         this.mapView = mapView;
@@ -337,12 +341,29 @@ public class ChatBridge {
                     MeshCoreContactHandler.ensureMeshInboundChatContact(
                             extractMeshPublicKeyCandidate(senderUid));
                 } else {
-                    ensurePluginChatContact(fromCallsign, senderUid);
-                    ContactMergeUtil.collapseDuplicateContactsForCallsign(fromCallsign, senderUid);
-                }
-                cotBridge.registerBtechContactUid(senderUid);
-                if (fromCallsign != null && !fromCallsign.trim().isEmpty()) {
-                    cotBridge.registerBtechContactId(fromCallsign, senderUid);
+                    String canonicalUid = ensurePluginChatContact(fromCallsign, senderUid);
+                    if (canonicalUid == null || canonicalUid.isEmpty()) {
+                        canonicalUid = senderUid;
+                    } else {
+                        senderUid = canonicalUid;
+                    }
+                    ContactMergeUtil.collapseDuplicateContactsForCallsign(fromCallsign, null);
+                    if (canonicalUid != null && !canonicalUid.isEmpty()) {
+                        cotBridge.registerBtechContactUid(canonicalUid);
+                        String wireUid = lineSenderUid != null && !lineSenderUid.isEmpty()
+                                ? lineSenderUid : null;
+                        if (wireUid != null && !wireUid.equalsIgnoreCase(canonicalUid)) {
+                            cotBridge.registerBtechContactUidAlias(wireUid, canonicalUid);
+                        }
+                        if (fromCallsign != null && !fromCallsign.trim().isEmpty()) {
+                            cotBridge.registerBtechContactId(fromCallsign, canonicalUid);
+                            String radioTrunc = CallsignUtil.toRadioCallsign(fromCallsign);
+                            if (radioTrunc != null && !radioTrunc.isEmpty()
+                                    && !radioTrunc.equalsIgnoreCase(fromCallsign.trim())) {
+                                cotBridge.registerBtechContactId(radioTrunc, canonicalUid);
+                            }
+                        }
+                    }
                 }
             }
             String selfUid = null;
@@ -491,6 +512,39 @@ public class ChatBridge {
 
     public static void collapseAllCallsignAliasDuplicates() {
         ContactMergeUtil.collapseAllCallsignAliasDuplicates();
+    }
+
+    private void scheduleCollapseAllCallsignDuplicatesDebounced() {
+        if (pendingCollapseAllTask != null) {
+            contactMergeHandler.removeCallbacks(pendingCollapseAllTask);
+        }
+        pendingCollapseAllTask = () -> {
+            pendingCollapseAllTask = null;
+            collapseAllCallsignAliasDuplicates();
+        };
+        contactMergeHandler.postDelayed(pendingCollapseAllTask, 350L);
+    }
+
+    private void scheduleContactMergeForNetworkContact(String contactUid) {
+        if (contactUid == null || contactUid.trim().isEmpty()) {
+            return;
+        }
+        contactMergeHandler.post(() -> {
+            try {
+                Contact c = Contacts.getInstance().getContactByUuid(contactUid.trim());
+                if (!(c instanceof IndividualContact)) {
+                    return;
+                }
+                IndividualContact ic = (IndividualContact) c;
+                String name = ic.getName();
+                if (name == null || name.trim().isEmpty()) {
+                    return;
+                }
+                ContactMergeUtil.collapseDuplicateContactsForCallsign(name, null);
+                ic.dispatchChangeEvent();
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     private boolean inboundDestinationMatchesLocalMeshPubKey(String rawDestination) {
@@ -792,44 +846,18 @@ public class ChatBridge {
         if (loc.isEmpty()) {
             return false;
         }
-        if (loc.equalsIgnoreCase(r)) {
+        if (CallsignUtil.isSameCallsignAlias(loc, r)) {
             return true;
-        }
-        try {
-            if (CallsignUtil.toRadioCallsign(loc).equalsIgnoreCase(r)) {
-                return true;
-            }
-        } catch (Exception ignored) {
         }
         try {
             com.atakmap.android.maps.PointMapItem selfMarker = mapView.getSelfMarker();
             if (selfMarker != null) {
                 String m = selfMarker.getMetaString("callsign", null);
-                if (m != null) {
-                    if (m.trim().equalsIgnoreCase(r)) {
-                        return true;
-                    }
-                    try {
-                        if (CallsignUtil.toRadioCallsign(m.trim()).equalsIgnoreCase(r)) {
-                            return true;
-                        }
-                    } catch (Exception ignored2) {
-                    }
+                if (m != null && CallsignUtil.isSameCallsignAlias(m.trim(), r)) {
+                    return true;
                 }
             }
         } catch (Exception ignored) {
-        }
-        if (r.startsWith(ANDROID_UID_PREFIX)) {
-            String bare = r.substring(ANDROID_UID_PREFIX.length());
-            if (loc.equalsIgnoreCase(bare)) {
-                return true;
-            }
-            try {
-                if (CallsignUtil.toRadioCallsign(loc).equalsIgnoreCase(bare)) {
-                    return true;
-                }
-            } catch (Exception ignored) {
-            }
         }
         return false;
     }
@@ -957,12 +985,28 @@ public class ChatBridge {
             if (!callsign.isEmpty()) {
                 Contact byCallsign = ContactMergeUtil.findContactByCallsignVariants(contacts, callsign);
                 if (byCallsign instanceof IndividualContact) {
-                    return byCallsign.getUID();
+                    IndividualContact ic = (IndividualContact) byCallsign;
+                    ContactMergeUtil.removeDuplicateUidContact(contacts, uid, ic.getUID());
+                    ContactMergeUtil.collapseDuplicateContactsForCallsign(callsign, ic.getUID());
+                    com.atakmaps.meshcore.plugin.MeshCoreContactHandler.applyEstablishedContactConnectors(ic);
+                    ContactMergeUtil.finishContactMergePublic(ic, callsign);
+                    return ic.getUID();
                 }
             }
             Contact existing = contacts.getContactByUuid(uid);
             if (existing instanceof IndividualContact) {
-                return uid;
+                return ((IndividualContact) existing).getUID();
+            }
+            if (!callsign.isEmpty()) {
+                ContactMergeUtil.collapseDuplicateContactsForCallsign(callsign, null);
+                Contact merged = ContactMergeUtil.findContactByCallsignVariants(contacts, callsign);
+                if (merged instanceof IndividualContact) {
+                    IndividualContact ic = (IndividualContact) merged;
+                    ContactMergeUtil.removeDuplicateUidContact(contacts, uid, ic.getUID());
+                    com.atakmaps.meshcore.plugin.MeshCoreContactHandler.applyEstablishedContactConnectors(ic);
+                    ContactMergeUtil.finishContactMergePublic(ic, callsign);
+                    return ic.getUID();
+                }
             }
             if (existing != null) {
                 Log.w(TAG, "Cannot ensure plugin chat contact; non-individual UID exists: " + uid);
@@ -1218,10 +1262,12 @@ public class ChatBridge {
             contactsUnreadSyncListener = new Contacts.OnContactsChangedListener() {
                 @Override
                 public void onContactsSizeChange(Contacts contacts) {
+                    scheduleCollapseAllCallsignDuplicatesDebounced();
                 }
 
                 @Override
                 public void onContactChanged(String contactUid) {
+                    scheduleContactMergeForNetworkContact(contactUid);
                     if (contactUid == null || !contactUid.startsWith("ANDROID-")) {
                         return;
                     }
@@ -1886,7 +1932,12 @@ public class ChatBridge {
             byte[] ax25 = frame.encode();
 
             Log.d(TAG, "Sending chat over radio: " + ax25.length + " bytes");
-            btManager.sendKissFrame(ax25);
+            String routePeerHint = null;
+            if (room != null && !room.contains(" ")
+                    && !"All Chat Rooms".equalsIgnoreCase(room.trim())) {
+                routePeerHint = room.trim();
+            }
+            btManager.sendKissFrame(ax25, routePeerHint);
 
             // Store wireRoom (already compressed) so retries use the same wire-form destination
             // and don't fall back to the raw room which createChatPacket would truncate differently.

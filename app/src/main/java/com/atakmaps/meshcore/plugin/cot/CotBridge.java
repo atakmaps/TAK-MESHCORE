@@ -7,6 +7,8 @@ import android.util.Log;
 
 import android.os.Bundle;
 
+import androidx.annotation.Nullable;
+
 import com.atakmap.android.chat.GeoChatConnector;
 import com.atakmap.android.chat.GeoChatService;
 import com.atakmap.android.contact.Contact;
@@ -141,6 +143,12 @@ public class CotBridge {
      * Key is typically the normalized callsign (upper) or a known chat-room label.
      */
     private final Map<String, String> btechIdToUid = new ConcurrentHashMap<>();
+
+    /**
+     * Alternate wire UIDs (e.g. {@code ANDROID-DEV_ONE}) mapped to the merged keeper UID
+     * (often opaque Wi‑Fi {@code ANDROID-…}) so mesh routing still recognizes both forms.
+     */
+    private final Map<String, String> btechUidAliases = new ConcurrentHashMap<>();
 
     private final RfSlottedCoTScheduler slottedCoTScheduler = new RfSlottedCoTScheduler();
 
@@ -399,6 +407,35 @@ public class CotBridge {
     }
 
     /**
+     * Register a secondary UID (typically synthetic {@code ANDROID-<CALLSIGN>}) that routes
+     * to the merged keeper without creating a second Contacts row.
+     */
+    public void registerBtechContactUidAlias(String aliasUid, String canonicalUid) {
+        if (aliasUid == null || canonicalUid == null) {
+            return;
+        }
+        String alias = aliasUid.trim();
+        String canonical = canonicalUid.trim();
+        if (alias.isEmpty() || canonical.isEmpty() || alias.equalsIgnoreCase(canonical)) {
+            return;
+        }
+        btechUidAliases.put(alias.toUpperCase(Locale.US), canonical);
+        registerBtechContactUid(alias);
+    }
+
+    /**
+     * Resolve a wire UID to the merged keeper when an alias was registered during contact merge.
+     */
+    public String resolveBtechCanonicalUid(String uid) {
+        if (uid == null || uid.trim().isEmpty()) {
+            return null;
+        }
+        String trimmed = uid.trim();
+        String alias = btechUidAliases.get(trimmed.toUpperCase(Locale.US));
+        return alias != null ? alias : trimmed;
+    }
+
+    /**
      * Register a plugin-created BTECH contact identifier (e.g. callsign) → UID mapping.
      * Used for routing GeoChat messages where ATAK does not provide explicit toUIDs.
      */
@@ -480,8 +517,12 @@ public class CotBridge {
         if (trimmed.isEmpty()) {
             return false;
         }
-        return btechContactUids.contains(trimmed)
-                || btechContactUids.contains(trimmed.toUpperCase(Locale.US));
+        if (btechContactUids.contains(trimmed)
+                || btechContactUids.contains(trimmed.toUpperCase(Locale.US))) {
+            return true;
+        }
+        String canonical = btechUidAliases.get(trimmed.toUpperCase(Locale.US));
+        return canonical != null && btechContactUids.contains(canonical);
     }
 
     public boolean isRadioConnected() {
@@ -576,46 +617,20 @@ public class CotBridge {
         if (loc.isEmpty()) {
             return false;
         }
-        if (loc.equalsIgnoreCase(r)) {
+        if (CallsignUtil.isSameCallsignAlias(loc, r)) {
             return true;
-        }
-        try {
-            if (CallsignUtil.toRadioCallsign(loc).equalsIgnoreCase(r)) {
-                return true;
-            }
-        } catch (Exception ignored) {
         }
         try {
             if (mapView != null) {
                 com.atakmap.android.maps.PointMapItem selfMarker = mapView.getSelfMarker();
                 if (selfMarker != null) {
                     String m = selfMarker.getMetaString("callsign", null);
-                    if (m != null) {
-                        if (m.trim().equalsIgnoreCase(r)) {
-                            return true;
-                        }
-                        try {
-                            if (CallsignUtil.toRadioCallsign(m.trim()).equalsIgnoreCase(r)) {
-                                return true;
-                            }
-                        } catch (Exception ignored2) {
-                        }
+                    if (m != null && CallsignUtil.isSameCallsignAlias(m.trim(), r)) {
+                        return true;
                     }
                 }
             }
         } catch (Exception ignored) {
-        }
-        if (r.startsWith(ANDROID_UID_PREFIX)) {
-            String bare = r.substring(ANDROID_UID_PREFIX.length());
-            if (loc.equalsIgnoreCase(bare)) {
-                return true;
-            }
-            try {
-                if (CallsignUtil.toRadioCallsign(loc).equalsIgnoreCase(bare)) {
-                    return true;
-                }
-            } catch (Exception ignored) {
-            }
         }
         return false;
     }
@@ -685,11 +700,24 @@ public class CotBridge {
                 }
             } catch (Exception ignored) {
             }
-            if (isBtechContactUid(trimmed) && !isOpaqueDeviceUid(trimmed)) {
-                return true;
+            if (isBtechContactUid(trimmed)) {
+                if (!isOpaqueDeviceUid(trimmed)) {
+                    return true;
+                }
+                if (hasDirectMeshRouteForDestination(trimmed)) {
+                    return true;
+                }
             }
         }
         return false;
+    }
+
+    private boolean hasDirectMeshRouteForDestination(String destUid) {
+        if (destUid == null || destUid.trim().isEmpty() || btManager == null) {
+            return false;
+        }
+        String routeHint = resolveRoutePeerHintForDestination(destUid.trim());
+        return routeHint != null && btManager.hasResolvableDirectRoute(routeHint);
     }
 
     private boolean hasRfMapRecipientPath(IndividualContact contact) {
@@ -697,6 +725,11 @@ public class CotBridge {
             return false;
         }
         if (hasMeshRadioConnector(contact)) {
+            return true;
+        }
+        String routeHint = resolveMeshRouteHintForPeer(contact);
+        if (routeHint != null && btManager != null
+                && btManager.hasResolvableDirectRoute(routeHint)) {
             return true;
         }
         String uid = contact.getUID();
@@ -707,14 +740,146 @@ public class CotBridge {
         if (contact == null) {
             return false;
         }
-        String uid = contact.getUID();
-        if (uid != null && isOpaqueDeviceUid(uid)) {
-            return true;
-        }
         if (hasMeshRadioConnector(contact)) {
             return false;
         }
+        String routeHint = resolveMeshRouteHintForPeer(contact);
+        if (routeHint != null && btManager != null
+                && btManager.hasResolvableDirectRoute(routeHint)) {
+            return false;
+        }
+        String meshNodeUid = findMeshNodeUidForPeer(contact);
+        if (meshNodeUid != null) {
+            return false;
+        }
+        String uid = contact.getUID();
+        if (uid != null && isOpaqueDeviceUid(uid)) {
+            if (isBtechContactUid(uid.trim()) && routeHint != null) {
+                return false;
+            }
+            return resolveRoutableNetworkEndpoint(contact) != null;
+        }
         return resolveRoutableNetworkEndpoint(contact) != null;
+    }
+
+    /**
+     * Best mesh route hint for a merged ATAK peer: {@code MESHCORE-NODE-*}, then
+     * {@code ANDROID-<CALLSIGN>}, then the callsign itself.
+     */
+    @Nullable
+    private String resolveMeshRouteHintForPeer(IndividualContact contact) {
+        if (contact == null) {
+            return null;
+        }
+        String meshNodeUid = findMeshNodeUidForPeer(contact);
+        if (meshNodeUid != null && !meshNodeUid.trim().isEmpty()) {
+            return meshNodeUid.trim();
+        }
+        String name = contact.getName();
+        if (name != null && !name.trim().isEmpty()) {
+            return ANDROID_UID_PREFIX + name.trim().toUpperCase(Locale.US);
+        }
+        String uid = contact.getUID();
+        if (uid != null && uid.toUpperCase(Locale.US).startsWith(ANDROID_UID_PREFIX)) {
+            String bare = uid.substring(ANDROID_UID_PREFIX.length());
+            if (!isOpaqueDeviceId(bare)) {
+                return uid.trim();
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    private String findMeshNodeUidForPeer(IndividualContact contact) {
+        if (contact == null) {
+            return null;
+        }
+        String peerName = contact.getName();
+        if (peerName == null || peerName.trim().isEmpty()) {
+            return null;
+        }
+        String target = peerName.trim().toUpperCase(Locale.US);
+        String targetRadio = com.atakmaps.meshcore.plugin.util.CallsignUtil
+                .toRadioCallsign(target).toUpperCase(Locale.US);
+        try {
+            java.util.List<Contact> all = Contacts.getInstance().getAllContacts();
+            if (all == null) {
+                return null;
+            }
+            for (Contact c : all) {
+                if (!(c instanceof IndividualContact)) {
+                    continue;
+                }
+                String uid = c.getUID();
+                if (uid == null) {
+                    continue;
+                }
+                String upper = uid.toUpperCase(Locale.US);
+                if (!upper.startsWith("MESHCORE-NODE-") && !upper.startsWith("MESHCORE-RPTR-")) {
+                    continue;
+                }
+                String name = c.getName();
+                if (name == null || name.trim().isEmpty()) {
+                    continue;
+                }
+                String candidate = name.trim().toUpperCase(Locale.US);
+                if (candidate.equals(target)
+                        || candidate.equals(targetRadio)
+                        || com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(candidate)
+                            .equalsIgnoreCase(targetRadio)) {
+                    return uid.trim();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Resolve a directed CoT destination to the best mesh route hint (pubkey/node UID or callsign).
+     */
+    @Nullable
+    private String resolveRoutePeerHintForDestination(String destUid) {
+        if (destUid == null || destUid.trim().isEmpty()) {
+            return null;
+        }
+        String trimmed = destUid.trim();
+        String upper = trimmed.toUpperCase(Locale.US);
+        if (upper.startsWith("MESHCORE-NODE-") || upper.startsWith("MESHCORE-RPTR-")) {
+            return trimmed;
+        }
+        try {
+            Contact c = Contacts.getInstance().getContactByUuid(trimmed);
+            if (c instanceof IndividualContact) {
+                String hint = resolveMeshRouteHintForPeer((IndividualContact) c);
+                if (hint != null) {
+                    if (btManager != null && btManager.hasResolvableDirectRoute(hint)) {
+                        return hint;
+                    }
+                    String meshUid = findMeshNodeUidForPeer((IndividualContact) c);
+                    if (meshUid != null) {
+                        return meshUid;
+                    }
+                    return hint;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        String aliasCanonical = btechUidAliases.get(upper);
+        if (aliasCanonical != null) {
+            return resolveRoutePeerHintForDestination(aliasCanonical);
+        }
+        if (upper.startsWith(ANDROID_UID_PREFIX)) {
+            String bare = upper.substring(ANDROID_UID_PREFIX.length());
+            if (!isOpaqueDeviceId(bare)) {
+                return trimmed;
+            }
+        }
+        String mapped = resolveBtechUidForId(trimmed);
+        if (mapped != null && !mapped.equalsIgnoreCase(trimmed)) {
+            return resolveRoutePeerHintForDestination(mapped);
+        }
+        return trimmed;
     }
 
     private static boolean hasMeshRadioConnector(IndividualContact contact) {
@@ -869,11 +1034,17 @@ public class CotBridge {
         if (id == null) return null;
         String key = id.trim().toUpperCase();
         if (key.isEmpty()) return null;
+        if (key.startsWith(ANDROID_UID_PREFIX)) {
+            String aliasCanonical = btechUidAliases.get(key);
+            if (aliasCanonical != null) {
+                return aliasCanonical;
+            }
+        }
         if (isOpaqueDeviceId(key)) {
             return null;
         }
         if (isBtechContactUid(key)) {
-            return key;
+            return resolveBtechCanonicalUid(key);
         }
         String mapped = btechIdToUid.get(key);
         if (mapped != null) return mapped;
@@ -1102,13 +1273,33 @@ public class CotBridge {
                                   double alt, double speed, double course,
                                   String senderTeamFromPeer, String cotTypeOverride) {
         injectPositionCot(callsign, lat, lon, alt, speed, course,
-                senderTeamFromPeer, cotTypeOverride, null);
+                senderTeamFromPeer, cotTypeOverride, null, null);
+    }
+
+    /**
+     * Position inject for ATAK peers at an explicit map UID (merged / Wi‑Fi keeper).
+     * Uses native team tint — not the {@code meschore} node iconset.
+     */
+    public void injectAtakPeerPositionCotAtMapUid(String callsign, double lat, double lon,
+                                                  double alt, double speed, double course,
+                                                  String senderTeamFromPeer,
+                                                  String mapUidOverride) {
+        injectPositionCot(callsign, lat, lon, alt, speed, course,
+                senderTeamFromPeer, null, null, mapUidOverride);
     }
 
     private void injectPositionCot(String callsign, double lat, double lon,
                                    double alt, double speed, double course,
                                    String senderTeamFromPeer, String cotTypeOverride,
                                    String remarksInner) {
+        injectPositionCot(callsign, lat, lon, alt, speed, course,
+                senderTeamFromPeer, cotTypeOverride, remarksInner, null);
+    }
+
+    private void injectPositionCot(String callsign, double lat, double lon,
+                                   double alt, double speed, double course,
+                                   String senderTeamFromPeer, String cotTypeOverride,
+                                   String remarksInner, String mapUidOverride) {
         try {
             String teamForCot = senderTeamFromPeer != null && !senderTeamFromPeer.trim().isEmpty()
                     ? senderTeamFromPeer.trim()
@@ -1118,10 +1309,12 @@ public class CotBridge {
                     callsign, lat, lon, alt, speed, course, teamForCot,
                     resolveInboundContactStaleMs(),
                     cotTypeOverride,
-                    remarksInner);
+                    remarksInner,
+                    mapUidOverride);
 
             if (event != null && event.isValid()) {
-                Log.d(TAG, "Injecting position CoT for " + callsign + " team=" + teamForCot);
+                Log.d(TAG, "Injecting position CoT for " + callsign + " uid=" + event.getUID()
+                        + " team=" + teamForCot);
                 try {
                     String uid = event.getUID();
                     if (uid != null && uid.startsWith(ANDROID_UID_PREFIX)) {
@@ -1139,6 +1332,15 @@ public class CotBridge {
                 MapView pingMv = MapView.getMapView();
                 if (pingMv != null) {
                     PingReplyNotifier.maybeNotifyPingReply(pingMv.getContext(), callsign);
+                }
+                String normalizedCall = callsign != null
+                        ? callsign.trim().toUpperCase(java.util.Locale.US) : "";
+                if (!normalizedCall.isEmpty() && mapUidOverride != null
+                        && !mapUidOverride.trim().isEmpty()) {
+                    String syntheticUid = ANDROID_UID_PREFIX + normalizedCall;
+                    if (!syntheticUid.equalsIgnoreCase(mapUidOverride.trim())) {
+                        removeOrphanRfMapMarkerForCallsign(normalizedCall, mapUidOverride.trim());
+                    }
                 }
             } else {
                 Log.w(TAG, "Invalid position CoT for " + callsign);
@@ -1330,6 +1532,8 @@ public class CotBridge {
     /**
      * Convert auto-generated ATAK point names (U.27.xxxxxx / N.27.xxxxxx) into
      * plain map-point presentation so they do not appear as pseudo-contacts.
+     * When the sender included explicit symbology ({@code usericon} or a non-generic
+     * CoT type such as {@code a-n-G}), preserve type/icon and only normalize callsign.
      */
     private void sanitizeInboundAutoPointCot(CotEvent event) {
         if (event == null) {
@@ -1371,13 +1575,39 @@ public class CotBridge {
         if (!callsignLooksAuto && !uidLooksAuto) {
             return;
         }
+        boolean preserveSymbology = hasExplicitPointSymbology(event, detail);
         contact.setAttribute("callsign", "Point");
-        event.setType("b-m-p-s-p-i");
+        if (!preserveSymbology) {
+            event.setType("b-m-p-s-p-i");
+        }
         Log.d(TAG, "Sanitized inbound auto-point CoT uid=" + event.getUID()
                 + " callsign=" + trimmed
                 + " callsignAuto=" + callsignLooksAuto
                 + " uidAuto=" + uidLooksAuto
+                + " preserveSymbology=" + preserveSymbology
+                + " type=" + event.getType()
                 + " -> Point");
+    }
+
+    /** True when inbound point CoT carries sender-chosen affiliation/icon, not a bare drop. */
+    private static boolean hasExplicitPointSymbology(CotEvent event, CotDetail detail) {
+        if (event == null || detail == null) {
+            return false;
+        }
+        String type = event.getType();
+        if (type != null && !type.isEmpty()
+                && !"b-m-p-s-p-i".equals(type)
+                && !"b-m-p-s-p-loc".equals(type)) {
+            return true;
+        }
+        CotDetail usericon = detail.getFirstChildByName(0, "usericon");
+        if (usericon != null) {
+            String path = usericon.getAttribute("iconsetpath");
+            if (path != null && !path.trim().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1511,13 +1741,35 @@ public class CotBridge {
             com.atakmap.android.contact.IndividualContact contact) {
         if (contact == null) return;
         String uid = contact.getUID();
+        if (uid == null || uid.trim().isEmpty()) {
+            return;
+        }
+        String keeperUid = uid.trim();
+        String bareUid = null;
+        if (keeperUid.toUpperCase(Locale.US).startsWith(ANDROID_UID_PREFIX)) {
+            bareUid = keeperUid.substring(ANDROID_UID_PREFIX.length());
+        }
         String name = contact.getName();
-        if (uid != null && !uid.trim().isEmpty()) {
-            registerBtechContactUid(uid.trim());
-            if (name != null && !name.trim().isEmpty()) {
-                registerBtechAliases(name.trim(), uid.trim(), null, null);
+        if (bareUid == null || !isOpaqueDeviceId(bareUid)) {
+            registerBtechContactUid(keeperUid);
+        }
+        if (name != null && !name.trim().isEmpty()) {
+            String normalized = name.trim().toUpperCase(Locale.US);
+            registerBtechContactId(normalized, keeperUid);
+            String syntheticUid = ANDROID_UID_PREFIX + normalized;
+            if (!syntheticUid.equalsIgnoreCase(keeperUid)) {
+                registerBtechContactUidAlias(syntheticUid, keeperUid);
+            }
+            String radio = com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(normalized);
+            if (radio != null && !radio.trim().isEmpty()
+                    && !radio.equalsIgnoreCase(normalized)) {
+                registerBtechContactId(radio.trim(), keeperUid);
             }
         }
+        if (bareUid != null && !bareUid.isEmpty() && !isOpaqueDeviceId(bareUid)) {
+            registerBtechContactId(bareUid, keeperUid);
+        }
+        com.atakmaps.meshcore.plugin.MeshCoreContactHandler.ensureMergedAtakPeerMeshConnectors(contact);
         com.atakmaps.meshcore.plugin.MeshCoreContactHandler.applyEstablishedContactConnectors(contact);
     }
 
@@ -1928,6 +2180,20 @@ public class CotBridge {
         sendCotOverRadioInternal(event, false);
     }
 
+    /**
+     * Primary directed recipient for mesh route lookup; null when broadcast (use flood).
+     */
+    private String extractRoutePeerHint(CotEvent event) {
+        if (event == null) {
+            return null;
+        }
+        java.util.List<String> destUids = CotBuilder.extractDirectedDestUids(event);
+        if (destUids.isEmpty()) {
+            return null;
+        }
+        return resolveRoutePeerHintForDestination(destUids.get(0));
+    }
+
     private void sendCotOverRadioInternal(CotEvent event, boolean registerRetry) {
         if (btManager == null || !btManager.isConnected()) {
             Log.w(TAG, "Not connected to radio — cannot send CoT");
@@ -1974,6 +2240,8 @@ public class CotBridge {
             String txFragStr = packets.size() + (packets.size() == 1 ? " fragment" : " fragments");
             Log.d(TAG, "CoT sent over mesh: " + compressed.length + " bytes, " + txFragStr);
 
+            String routePeerHint = extractRoutePeerHint(event);
+
             for (MeshCorePacket packet : packets) {
                 byte[] packetBytes = packet.encode();
                 // Encrypt entire packet bytes if enabled
@@ -1987,7 +2255,7 @@ public class CotBridge {
                 Ax25Frame frame = Ax25Frame.createMeshCoreFrame(
                         localCallsign, 0, packetBytes);
                 byte[] ax25 = frame.encode();
-                btManager.sendKissFrame(ax25);
+                btManager.sendKissFrame(ax25, routePeerHint);
             }
 
             // Register ACK watchdog — skip GeoChat CoT (b-t-f*) which uses chat retry.
@@ -3333,6 +3601,7 @@ public class CotBridge {
         pendingOutboundCots.clear();
         btechContactUids.clear();
         btechIdToUid.clear();
+        btechUidAliases.clear();
         saRelayLastSentByUid.clear();
         recentLocalRelayKeys.clear();
         Log.d(TAG, "CotBridge disposed");
