@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.util.Log;
 
+import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 
 import com.atakmap.android.chat.ChatManagerMapComponent;
@@ -68,9 +69,15 @@ public class ChatBridge {
             "com.atakmap.android.chat.SEND_MESSAGE";
     /** RF payload wrapper for non-radio destination gatewaying (B -> A -> TAK). */
     private static final String GW_PREFIX = "__UVGW__|";
+    /**
+     * Optional prefix on native MeshCore DMs so ATAK senders can correlate delivered receipts.
+     * Format: {@code __MCMID__|<wireMid>|<message>}
+     */
+    private static final String ATAK_WIRE_MID_PREFIX = "__MCMID__|";
     private static final String ANDROID_UID_PREFIX = "ANDROID-";
     private static final String MESH_NODE_UID_PREFIX = "MESHCORE-NODE-";
     private static final String MESH_RPTR_UID_PREFIX = "MESHCORE-RPTR-";
+    private static final String MESH_DISPLAY_SUFFIX = "-MESH";
 
     /**
      * Broadcast action for outbound GeoChat to a contact whose delivery path uses
@@ -142,6 +149,11 @@ public class ChatBridge {
      */
     private final ConcurrentHashMap<Integer, String> outboundWireMidToLocalLineUid =
             new ConcurrentHashMap<>();
+    /**
+     * Inbound compact {@code TYPE_CHAT} wire id → sender route hint for ACK TX routing.
+     */
+    private final ConcurrentHashMap<Integer, String> inboundWireMidToSenderRouteHint =
+            new ConcurrentHashMap<>();
     private static final int MAX_OUTBOUND_ACK_ENTRIES = 384;
 
     /**
@@ -183,17 +195,25 @@ public class ChatBridge {
     private static final class PendingOutboundChat {
         final int wireMid;
         final String sender;
+        /** Wire-form destination (6-char) used for retransmit. */
         final String room;
+        /** Human-readable recipient label for failure UI (e.g. {@code DEV_TWO-MESH}). */
+        final String recipientLabel;
         final String message;
         final String geoChatLineUid; // may be null
+        final String routePeerHint; // may be null
         volatile int retryCount;
 
-        PendingOutboundChat(int wireMid, String sender, String room, String message, String geoChatLineUid) {
+        PendingOutboundChat(int wireMid, String sender, String room, String message,
+                            String geoChatLineUid, String routePeerHint,
+                            @Nullable String recipientLabel) {
             this.wireMid = wireMid;
             this.sender = sender;
             this.room = room;
+            this.recipientLabel = recipientLabel;
             this.message = message;
             this.geoChatLineUid = geoChatLineUid;
+            this.routePeerHint = routePeerHint;
             this.retryCount = 0;
         }
     }
@@ -403,6 +423,15 @@ public class ChatBridge {
 
         Log.d(TAG, "Injecting radio message (mid=" + radioPacketMessageId + "): "
                 + fromCallsign + " → " + chatRoom + ": " + message);
+
+        if (radioPacketMessageId > 0) {
+            String senderHint = senderUid != null && !senderUid.isEmpty()
+                    ? senderUid : fromCallsign;
+            String routeHint = resolveRoutePeerHintForRoom(senderHint);
+            if (routeHint != null && !routeHint.isEmpty()) {
+                inboundWireMidToSenderRouteHint.put(radioPacketMessageId, routeHint);
+            }
+        }
 
         if (GeoChatContactListHelper.isContactListUpdateMessage(message)
                 && radioPacketMessageId > 0) {
@@ -637,8 +666,15 @@ public class ChatBridge {
      * Send an outbound ATAK GeoChat to a MeshCore node as a native pubkey-to-pubkey DM
      * ({@code CMD_SEND_TXT_MSG}) instead of the proprietary {@code 0xFF01} AX.25 channel datagram
      * (which native MeshCore clients reject as "Unhandled"). Returns true if handled here.
+     *
+     * When {@code geoChatLineUidOrNull} is set, embeds a wire id prefix so the peer can reply with
+     * a compact {@code TYPE_ACK} for ATAK delivered ticks (mesh-only contacts without ATAK peers).
      */
-    private boolean trySendNativeMeshDm(String destUidHint, String roomHint, String message) {
+    private boolean trySendNativeMeshDm(String destUidHint, String roomHint, String message,
+                                        @Nullable String geoChatLineUidOrNull) {
+        if (shouldPreferCompactTypeChat(destUidHint, roomHint, geoChatLineUidOrNull)) {
+            return false;
+        }
         if (btManager == null || !btManager.isConnected()) {
             return false;
         }
@@ -658,12 +694,241 @@ public class ChatBridge {
         if (pubKey.isEmpty()) {
             return false;
         }
-        boolean ok = btManager.sendContactTextMessage(pubKey, message.trim());
+
+        String payload = message.trim();
+        int wireMid = 0;
+        if (geoChatLineUidOrNull != null && geoChatLineUidOrNull.startsWith("GeoChat.")) {
+            wireMid = MeshCorePacket.allocateChatWireMessageId();
+            outboundWireMidToLocalLineUid.put(wireMid, geoChatLineUidOrNull.trim());
+            trimOutboundAckMap();
+            payload = ATAK_WIRE_MID_PREFIX + wireMid + "|" + payload;
+        }
+
+        boolean ok = btManager.sendContactTextMessage(pubKey, payload);
         if (ok) {
             Log.d(TAG, "Outbound GeoChat sent as native MeshCore DM pubkeyPrefix="
-                    + pubKey.substring(0, Math.min(12, pubKey.length())) + " len=" + message.trim().length());
+                    + pubKey.substring(0, Math.min(12, pubKey.length()))
+                    + " len=" + message.trim().length()
+                    + (wireMid != 0 ? " wireMid=" + wireMid : ""));
         }
         return ok;
+    }
+
+    /**
+     * ATAK-to-ATAK GeoChat should use compact {@code TYPE_CHAT} so wire ACKs and route hints apply.
+     * Native mesh DM is reserved for mesh-only peers (native MeshCore app users).
+     */
+    private boolean shouldPreferCompactTypeChat(@Nullable String destUidHint,
+                                                @Nullable String roomHint,
+                                                @Nullable String geoChatLineUidOrNull) {
+        if (geoChatLineUidOrNull != null && geoChatLineUidOrNull.startsWith("GeoChat.")) {
+            return true;
+        }
+        String hint = destUidHint != null && !destUidHint.trim().isEmpty()
+                ? destUidHint.trim() : (roomHint != null ? roomHint.trim() : null);
+        if (hint == null || hint.isEmpty()) {
+            return false;
+        }
+        String upper = hint.toUpperCase(Locale.US);
+        if (upper.startsWith(ANDROID_UID_PREFIX)) {
+            return true;
+        }
+        if (cotBridge != null) {
+            String mapped = cotBridge.resolveBtechUidForId(hint);
+            if (mapped != null && mapped.toUpperCase(Locale.US).startsWith(ANDROID_UID_PREFIX)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Nullable
+    private String resolveRoutePeerHintForRoom(@Nullable String room) {
+        if (room == null || room.trim().isEmpty()) {
+            return null;
+        }
+        String trimmed = room.trim();
+        if ("All Chat Rooms".equalsIgnoreCase(trimmed) || trimmed.contains(" ")) {
+            return null;
+        }
+        if (cotBridge != null) {
+            String firmwareName = resolveFirmwareStyleContactName(trimmed);
+            if (firmwareName != null && !firmwareName.isEmpty()) {
+                String resolved = cotBridge.resolveRoutePeerHint(firmwareName);
+                if (resolved != null && !resolved.isEmpty()) {
+                    return resolved;
+                }
+            }
+            String resolved = cotBridge.resolveRoutePeerHint(trimmed);
+            if (resolved != null && !resolved.isEmpty()) {
+                return resolved;
+            }
+            String upper = trimmed.toUpperCase(Locale.US);
+            if (!upper.startsWith(ANDROID_UID_PREFIX)
+                    && !ContactMergeUtil.isMeshNodeUid(trimmed)) {
+                resolved = cotBridge.resolveRoutePeerHint(ANDROID_UID_PREFIX + trimmed);
+                if (resolved != null && !resolved.isEmpty()) {
+                    return resolved;
+                }
+                if (firmwareName != null && !firmwareName.isEmpty()) {
+                    resolved = cotBridge.resolveRoutePeerHint(
+                            ANDROID_UID_PREFIX + firmwareName);
+                    if (resolved != null && !resolved.isEmpty()) {
+                        return resolved;
+                    }
+                }
+            }
+        }
+        String firmwareName = resolveFirmwareStyleContactName(trimmed);
+        return firmwareName != null && !firmwareName.isEmpty() ? firmwareName : trimmed;
+    }
+
+    /**
+     * Mesh-node GeoChat threads often use {@code DEV_TWO-MESH} while the firmware contact table
+     * indexes the peer as {@code DEV_TWO}. Map display labels to the routable firmware name.
+     */
+    @Nullable
+    private String resolveFirmwareStyleContactName(@Nullable String room) {
+        if (room == null || room.trim().isEmpty()) {
+            return null;
+        }
+        String trimmed = room.trim();
+        String upper = trimmed.toUpperCase(Locale.US);
+
+        String stripped = stripMeshDisplaySuffix(trimmed);
+        if (stripped != null && !stripped.isEmpty()) {
+            return stripped;
+        }
+
+        if (upper.startsWith(MESH_NODE_UID_PREFIX) || upper.startsWith(MESH_RPTR_UID_PREFIX)) {
+            try {
+                Contact c = Contacts.getInstance().getContactByUuid(trimmed);
+                if (c != null && c.getName() != null && !c.getName().trim().isEmpty()) {
+                    String name = c.getName().trim();
+                    String base = stripMeshDisplaySuffix(name);
+                    return base != null ? base : name;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        try {
+            java.util.List<Contact> all = Contacts.getInstance().getAllContacts();
+            if (all == null) {
+                return null;
+            }
+            for (Contact c : all) {
+                if (c == null || c.getName() == null) {
+                    continue;
+                }
+                if (!CallsignUtil.isSameCallsignAlias(c.getName(), trimmed)) {
+                    continue;
+                }
+                String uid = c.getUID();
+                if (uid == null) {
+                    continue;
+                }
+                String uidUpper = uid.toUpperCase(Locale.US);
+                if (uidUpper.startsWith(MESH_NODE_UID_PREFIX)
+                        || uidUpper.startsWith(MESH_RPTR_UID_PREFIX)) {
+                    String base = stripMeshDisplaySuffix(c.getName().trim());
+                    return base != null ? base : c.getName().trim();
+                }
+                if (uidUpper.startsWith(ANDROID_UID_PREFIX)) {
+                    return uid.substring(ANDROID_UID_PREFIX.length());
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    @Nullable
+    private static String stripMeshDisplaySuffix(@Nullable String label) {
+        if (label == null) {
+            return null;
+        }
+        String trimmed = label.trim();
+        if (trimmed.toUpperCase(Locale.US).endsWith(MESH_DISPLAY_SUFFIX)) {
+            String base = trimmed.substring(0, trimmed.length() - MESH_DISPLAY_SUFFIX.length()).trim();
+            return base.isEmpty() ? null : base;
+        }
+        return null;
+    }
+
+    @Nullable
+    private String getLocalMeshNodeDisplayName() {
+        String localPk = getLocalMeshPublicKey();
+        if (localPk.isEmpty()) {
+            return null;
+        }
+        try {
+            java.util.List<Contact> all = Contacts.getInstance().getAllContacts();
+            if (all == null) {
+                return null;
+            }
+            for (Contact c : all) {
+                if (c == null) {
+                    continue;
+                }
+                String uid = c.getUID();
+                if (uid == null || !ContactMergeUtil.isMeshNodeUid(uid)) {
+                    continue;
+                }
+                if (localPk.equalsIgnoreCase(extractMeshPublicKeyCandidate(uid))) {
+                    String name = c.getName();
+                    return name != null && !name.trim().isEmpty() ? name.trim() : null;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    @Nullable
+    private String resolveRoutePeerHintForAck(@Nullable String senderPeerHint, int wireMid) {
+        if (senderPeerHint != null && !senderPeerHint.trim().isEmpty()) {
+            String resolved = resolveRoutePeerHintForRoom(senderPeerHint.trim());
+            if (resolved != null && !resolved.isEmpty()) {
+                return resolved;
+            }
+        }
+        String stored = inboundWireMidToSenderRouteHint.get(wireMid);
+        if (stored != null && !stored.isEmpty()) {
+            return stored;
+        }
+        return senderPeerHint != null ? senderPeerHint.trim() : null;
+    }
+
+    private static final class ParsedAtakWireMidMessage {
+        final int wireMid;
+        final String text;
+
+        ParsedAtakWireMidMessage(int wireMid, String text) {
+            this.wireMid = wireMid;
+            this.text = text;
+        }
+    }
+
+    @Nullable
+    private static ParsedAtakWireMidMessage parseAtakWireMidPrefix(@Nullable String text) {
+        if (text == null || !text.startsWith(ATAK_WIRE_MID_PREFIX)) {
+            return null;
+        }
+        int sep = text.indexOf('|', ATAK_WIRE_MID_PREFIX.length());
+        if (sep <= ATAK_WIRE_MID_PREFIX.length()) {
+            return null;
+        }
+        try {
+            int wireMid = Integer.parseInt(
+                    text.substring(ATAK_WIRE_MID_PREFIX.length(), sep));
+            String body = text.substring(sep + 1);
+            if (wireMid != 0 && body != null) {
+                return new ParsedAtakWireMidMessage(wireMid, body);
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        return null;
     }
 
     /**
@@ -748,9 +1013,23 @@ public class ChatBridge {
         recentlyInjectedMeshDmKeys.put(dedupKey, now + MESH_DM_DEDUP_TTL_MS);
         // Prune expired entries to avoid unbounded growth.
         recentlyInjectedMeshDmKeys.entrySet().removeIf(e -> now >= e.getValue());
+
+        ParsedAtakWireMidMessage parsed = parseAtakWireMidPrefix(text.trim());
+        String injectText = parsed != null ? parsed.text : text.trim();
+        int ackWireMid = parsed != null ? parsed.wireMid : 0;
+
         Log.d(TAG, "Inbound native MeshCore DM from " + fromCallsign
-                + " (" + senderUid + ") len=" + text.trim().length());
-        return injectRadioMessage(fromCallsign, localCallsign, text.trim(), mid);
+                + " (" + senderUid + ") len=" + injectText.length()
+                + (ackWireMid != 0 ? " wireMid=" + ackWireMid : ""));
+
+        int injectMid = ackWireMid != 0 ? ackWireMid : mid;
+        boolean ok = injectRadioMessage(fromCallsign, localCallsign, injectText, injectMid);
+        if (ok && ackWireMid != 0) {
+            String senderHint = senderUid != null && !senderUid.isEmpty()
+                    ? senderUid : fromCallsign;
+            sendRadioChatAck(ackWireMid, MeshCorePacket.ACK_KIND_DELIVERED, senderHint);
+        }
+        return ok;
     }
 
     private String resolveExistingMeshContactUidByPubKeyPrefix(String prefixUpper) {
@@ -847,6 +1126,17 @@ public class ChatBridge {
             return false;
         }
         if (CallsignUtil.isSameCallsignAlias(loc, r)) {
+            return true;
+        }
+        String localMeshDisplay = getLocalMeshNodeDisplayName();
+        if (localMeshDisplay != null && CallsignUtil.isSameRadioStation(localMeshDisplay, r)) {
+            return true;
+        }
+        String strippedRoom = stripMeshDisplaySuffix(r);
+        if (strippedRoom == null) {
+            strippedRoom = stripMeshDisplaySuffix(resolveFullCallsignForWireForm(r));
+        }
+        if (strippedRoom != null && CallsignUtil.isSameCallsignAlias(loc, strippedRoom)) {
             return true;
         }
         try {
@@ -1247,7 +1537,7 @@ public class ChatBridge {
                     Integer wireMid = extractWireMidFromMarkReadBundle(b);
                     String uid = convo.trim();
                     if (wireMid != null && cotBridge != null && cotBridge.isBtechContactUid(uid)) {
-                        sendRadioChatAck(wireMid, MeshCorePacket.ACK_KIND_READ);
+                        sendRadioChatAck(wireMid, MeshCorePacket.ACK_KIND_READ, uid);
                     }
                 }
             };
@@ -1462,7 +1752,7 @@ public class ChatBridge {
         if (mids == null || mids.isEmpty()) return;
         for (Integer mid : mids) {
             Log.d(TAG, "Sending READ ACK mid=" + mid + " conversation=" + conversationId);
-            sendRadioChatAck(mid, MeshCorePacket.ACK_KIND_READ);
+            sendRadioChatAck(mid, MeshCorePacket.ACK_KIND_READ, conversationId);
         }
     }
 
@@ -1588,7 +1878,7 @@ public class ChatBridge {
         } else if (!"All Chat Rooms".equalsIgnoreCase(room) && !outbound.startsWith(GW_PREFIX)) {
             // Mesh-node DM: send as a native MeshCore contact message (pubkey DM), not the
             // proprietary 0xFF01 AX.25 datagram that native clients reject.
-            if (trySendNativeMeshDm(conversationId, room, msg)) {
+            if (trySendNativeMeshDm(conversationId, room, msg, lineUid)) {
                 return true;
             }
         }
@@ -1860,7 +2150,7 @@ public class ChatBridge {
                 && !message.startsWith(GW_PREFIX)) {
             // Mesh-node DM: send as a native MeshCore contact message (pubkey DM), not the
             // proprietary 0xFF01 AX.25 datagram that native clients reject.
-            if (trySendNativeMeshDm(chatRoom, chatRoom, message)) {
+            if (trySendNativeMeshDm(chatRoom, chatRoom, message, lineUid)) {
                 return;
             }
         }
@@ -1911,9 +2201,14 @@ public class ChatBridge {
             // truncation ("JESTER_25" → "JESTER") does not match UV-Pro's form ("JSTR25"),
             // so messages sent to UV-Pro contacts were silently dropped.  Broadcast rooms
             // that contain spaces ("All Chat Rooms") are left unchanged.
-            String wireRoom = (room != null && !room.contains(" "))
-                    ? com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(room)
-                    : room;
+            String wireRoomSource = room;
+            String firmwareRoom = resolveFirmwareStyleContactName(room);
+            if (firmwareRoom != null && !firmwareRoom.isEmpty()) {
+                wireRoomSource = firmwareRoom;
+            }
+            String wireRoom = (wireRoomSource != null && !wireRoomSource.contains(" "))
+                    ? com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(wireRoomSource)
+                    : wireRoomSource;
             MeshCorePacket packet = MeshCorePacket.createChatPacket(
                     com.atakmaps.meshcore.plugin.util.CallsignUtil.toRadioCallsign(sender),
                     wireRoom, wireMid, message);
@@ -1932,17 +2227,18 @@ public class ChatBridge {
             byte[] ax25 = frame.encode();
 
             Log.d(TAG, "Sending chat over radio: " + ax25.length + " bytes");
-            String routePeerHint = null;
-            if (room != null && !room.contains(" ")
-                    && !"All Chat Rooms".equalsIgnoreCase(room.trim())) {
-                routePeerHint = room.trim();
+            String routePeerHint = resolveRoutePeerHintForRoom(room);
+            if (routePeerHint != null && btManager != null) {
+                Log.d(TAG, "Chat TX route=" + btManager.formatTxRouteLabel(routePeerHint)
+                        + " room=" + room + " mid=" + wireMid);
             }
             btManager.sendKissFrame(ax25, routePeerHint);
 
             // Store wireRoom (already compressed) so retries use the same wire-form destination
             // and don't fall back to the raw room which createChatPacket would truncate differently.
             PendingOutboundChat pending =
-                    new PendingOutboundChat(wireMid, sender, wireRoom, message, geoChatLineUidOrNull);
+                    new PendingOutboundChat(wireMid, sender, wireRoom, message,
+                            geoChatLineUidOrNull, routePeerHint, room);
             pendingOutboundChats.put(wireMid, pending);
             Log.d(TAG, "Outbound pending registered mid=" + wireMid + " room=" + room);
             scheduleRetryCheck(wireMid);
@@ -2104,19 +2400,30 @@ public class ChatBridge {
      * Notify peer over RF that their chat frame was received (GeoChat delivered/read).
      */
     public void sendRadioChatAck(int wireMessageId, byte ackKind) {
+        sendRadioChatAck(wireMessageId, ackKind, null);
+    }
+
+    /**
+     * @param senderPeerHint callsign, {@code ANDROID-*}, or {@code MESHCORE-NODE-*} for direct TX
+     */
+    public void sendRadioChatAck(int wireMessageId, byte ackKind, @Nullable String senderPeerHint) {
         if (!relayOutgoing || btManager == null || !btManager.isConnected()) {
             return;
         }
+        final String routeHint = resolveRoutePeerHintForAck(senderPeerHint, wireMessageId);
         long delayMs = ackKind == MeshCorePacket.ACK_KIND_READ
                 ? RF_CHAT_ACK_READ_DELAY_MS
                 : RF_CHAT_ACK_DELIVERED_DELAY_MS;
         Log.d(TAG, "Scheduling radio chat ACK kind=" + ackKind + " mid=" + wireMessageId
-                + " in " + (delayMs / 1000) + "s");
+                + " in " + (delayMs / 1000) + "s"
+                + (routeHint != null ? " routeHint=" + routeHint : ""));
         android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
-        h.postDelayed(() -> sendRadioChatAckWhenReady(wireMessageId, ackKind, 0), delayMs);
+        h.postDelayed(() -> sendRadioChatAckWhenReady(
+                wireMessageId, ackKind, 0, routeHint), delayMs);
     }
 
-    private void sendRadioChatAckWhenReady(int wireMessageId, byte ackKind, int deferAttempt) {
+    private void sendRadioChatAckWhenReady(int wireMessageId, byte ackKind, int deferAttempt,
+                                           @Nullable String routePeerHint) {
         if (disposed || !relayOutgoing || btManager == null || !btManager.isConnected()) {
             return;
         }
@@ -2125,17 +2432,18 @@ public class ChatBridge {
                 android.os.Handler h = new android.os.Handler(
                         android.os.Looper.getMainLooper());
                 h.postDelayed(() -> sendRadioChatAckWhenReady(wireMessageId, ackKind,
-                                deferAttempt + 1),
+                                deferAttempt + 1, routePeerHint),
                         400L);
             } else {
                 Log.w(TAG, "Chat ACK deferred too long; dropping mid=" + wireMessageId);
             }
             return;
         }
-        transmitRadioChatAckNow(wireMessageId, ackKind);
+        transmitRadioChatAckNow(wireMessageId, ackKind, routePeerHint);
     }
 
-    private void transmitRadioChatAckNow(int wireMessageId, byte ackKind) {
+    private void transmitRadioChatAckNow(int wireMessageId, byte ackKind,
+                                         @Nullable String routePeerHint) {
         try {
             MeshCorePacket packet =
                     MeshCorePacket.createChatAckPacket(wireMessageId, ackKind);
@@ -2149,8 +2457,10 @@ public class ChatBridge {
             }
             Ax25Frame frame = Ax25Frame.createMeshCoreFrame(
                     localCallsign, 0, packetBytes);
-            btManager.sendKissFrame(frame.encode());
-            Log.d(TAG, "Sent radio chat ACK kind=" + ackKind + " mid=" + wireMessageId);
+            btManager.sendKissFrame(frame.encode(), routePeerHint);
+            Log.d(TAG, "Sent radio chat ACK kind=" + ackKind + " mid=" + wireMessageId
+                    + (routePeerHint != null
+                    ? " route=" + btManager.formatTxRouteLabel(routePeerHint) : ""));
         } catch (Exception e) {
             Log.e(TAG, "sendRadioChatAck failed", e);
         }
@@ -2183,6 +2493,9 @@ public class ChatBridge {
                 pending.retryCount++;
                 Log.d(TAG, "No DELIVERED ACK for mid=" + wireMid
                         + " — retransmitting (attempt " + pending.retryCount + "/" + maxRetries + ")");
+                if (btManager != null) {
+                    btManager.noteTxRouteFailure(pending.routePeerHint);
+                }
                 retransmitChat(wireMid, pending);
                 scheduleRetryCheck(wireMid);
             } else {
@@ -2215,7 +2528,10 @@ public class ChatBridge {
                 }
             }
             Ax25Frame frame = Ax25Frame.createMeshCoreFrame(localCallsign, 0, packetBytes);
-            btManager.sendKissFrame(frame.encode());
+            String routePeerHint = pending.routePeerHint != null
+                    ? pending.routePeerHint
+                    : resolveRoutePeerHintForRoom(pending.room);
+            btManager.sendKissFrame(frame.encode(), routePeerHint);
         } catch (Exception e) {
             Log.e(TAG, "Retry transmit failed mid=" + wireMid, e);
         }
@@ -2234,8 +2550,7 @@ public class ChatBridge {
                 .computeIfAbsent(peerKey, k -> new java.util.concurrent.ConcurrentLinkedQueue<>())
                 .add(pending);
 
-        final String peerDisplay = peer;
-        final int retriesMade = pending.retryCount;
+        final String peerDisplay = resolveFriendlyRecipientLabel(pending);
         new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
             try {
                 // AlertDialog — stays on screen until user taps OK.
@@ -2244,7 +2559,7 @@ public class ChatBridge {
                                 com.atakmap.android.maps.MapView.getMapView().getContext());
                 builder.setTitle("Message Not Delivered");
                 builder.setMessage("Message to " + peerDisplay
-                        + " will be delivered when user is rediscovered.");
+                        + " will be delivered when the user is rediscovered.");
                 builder.setIcon(android.R.drawable.ic_dialog_alert);
                 builder.setPositiveButton("OK", null);
                 builder.setCancelable(false);
@@ -2254,7 +2569,8 @@ public class ChatBridge {
                 // Fallback toast if dialog can't be shown.
                 try {
                     android.widget.Toast.makeText(pluginContext,
-                            "Message to " + peerDisplay + " will be delivered when user is rediscovered.",
+                            "Message to " + peerDisplay
+                                    + " will be delivered when the user is rediscovered.",
                             android.widget.Toast.LENGTH_LONG).show();
                 } catch (Exception ignored) {}
             }
@@ -2266,11 +2582,102 @@ public class ChatBridge {
                         NotificationUtil.RED,
                         "Message Not Delivered",
                         "MeshCore",
-                        "Message to " + peerDisplay + " will be delivered when user is rediscovered.");
+                        "Message to " + peerDisplay
+                                + " will be delivered when the user is rediscovered.");
             } catch (Exception e) {
                 Log.e(TAG, "Failed to post delivery failure notification", e);
             }
         });
+    }
+
+    /**
+     * Resolve a user-facing recipient name for delivery-failure UI — never show raw 6-char wire
+     * codes like {@code DVTWMS} when a contact display name is available.
+     */
+    private String resolveFriendlyRecipientLabel(PendingOutboundChat pending) {
+        if (pending == null) {
+            return "recipient";
+        }
+        if (pending.recipientLabel != null && !pending.recipientLabel.trim().isEmpty()) {
+            String formatted = formatRecipientLabelForDisplay(pending.recipientLabel.trim());
+            if (!looksLikeOpaqueWireCallsign(formatted)) {
+                return formatted;
+            }
+        }
+        String fromLine = parseConversationFromGeoChatLineUid(pending.geoChatLineUid);
+        if (fromLine != null && !fromLine.isEmpty()) {
+            String formatted = formatRecipientLabelForDisplay(fromLine);
+            if (!looksLikeOpaqueWireCallsign(formatted)) {
+                return formatted;
+            }
+        }
+        if (pending.room != null && !pending.room.trim().isEmpty()) {
+            String full = resolveFullCallsignForWireForm(pending.room.trim());
+            if (full != null && !full.isEmpty()) {
+                return formatRecipientLabelForDisplay(full);
+            }
+            String firmware = resolveFirmwareStyleContactName(pending.room.trim());
+            if (firmware != null && !firmware.isEmpty()) {
+                return formatRecipientLabelForDisplay(firmware);
+            }
+            if (!looksLikeOpaqueWireCallsign(pending.room.trim())) {
+                return formatRecipientLabelForDisplay(pending.room.trim());
+            }
+        }
+        return "recipient";
+    }
+
+    @Nullable
+    private static String parseConversationFromGeoChatLineUid(@Nullable String lineUid) {
+        if (lineUid == null || !lineUid.startsWith("GeoChat.")) {
+            return null;
+        }
+        String[] parts = lineUid.split("\\.");
+        if (parts.length >= 3 && parts[2] != null && !parts[2].trim().isEmpty()) {
+            return parts[2].trim();
+        }
+        return null;
+    }
+
+    private String formatRecipientLabelForDisplay(String label) {
+        if (label == null || label.trim().isEmpty()) {
+            return "recipient";
+        }
+        String trimmed = label.trim();
+        String upper = trimmed.toUpperCase(Locale.US);
+        if (upper.startsWith(ANDROID_UID_PREFIX)) {
+            String bare = trimmed.substring(ANDROID_UID_PREFIX.length()).trim();
+            if (!bare.isEmpty()) {
+                return bare;
+            }
+        }
+        if (ContactMergeUtil.isMeshNodeUid(trimmed)) {
+            try {
+                Contact c = Contacts.getInstance().getContactByUuid(trimmed);
+                if (c != null && c.getName() != null && !c.getName().trim().isEmpty()) {
+                    return c.getName().trim();
+                }
+            } catch (Exception ignored) {
+            }
+            return "mesh contact";
+        }
+        try {
+            Contact c = Contacts.getInstance().getContactByUuid(trimmed);
+            if (c != null && c.getName() != null && !c.getName().trim().isEmpty()) {
+                return c.getName().trim();
+            }
+        } catch (Exception ignored) {
+        }
+        return trimmed;
+    }
+
+    /** True for 6-char vowel-compressed wire labels that are not meaningful to operators. */
+    private static boolean looksLikeOpaqueWireCallsign(String value) {
+        if (value == null) {
+            return false;
+        }
+        String s = value.trim();
+        return s.length() > 0 && s.length() <= 6 && s.matches("[A-Za-z0-9]+");
     }
 
     /**
@@ -2290,6 +2697,9 @@ public class ChatBridge {
             // Cancel retry watchdog — message reached the recipient.
             PendingOutboundChat removed = pendingOutboundChats.remove(wireMessageId);
             if (removed != null) {
+                if (btManager != null) {
+                    btManager.clearTxRouteFailure(removed.routePeerHint);
+                }
                 Log.d(TAG, "DELIVERED ACK cancelled retry watchdog mid=" + wireMessageId);
             }
             cotBridge.injectGeoChatReceipt(lineUid, false);
@@ -2513,6 +2923,7 @@ public class ChatBridge {
         pendingOutboundChats.clear();
         failedOutboundChatsByPeer.clear();
         outboundWireMidToLocalLineUid.clear();
+        inboundWireMidToSenderRouteHint.clear();
         pendingReadAcksByConversation.clear();
         pendingUnreadConversationUids.clear();
         recentlyInjectedMeshDmKeys.clear();

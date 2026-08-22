@@ -652,15 +652,39 @@ public class CotBuilder {
     }
 
     /** MIL-STD-2525 unit point types ({@code a-f-G}, {@code a-h-G}, …). */
-    private static final Pattern RF_COMPACT_POINT_TYPE =
+    private static final Pattern RF_COMPACT_AFFILIATION_TYPE =
             Pattern.compile("a-[a-z]-G");
 
-    private static final long RF_MAX_STALE_MS = 7L * 24L * 60L * 60L * 1000L;
+    /** Detail nodes safe to drop for single-fragment RF map markers. */
+    private static final java.util.Set<String> RF_EXTRA_DROP_DETAILS =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "color",
+                    "usericon",
+                    "__group",
+                    "menu",
+                    "labels_on",
+                    "iconsetpath",
+                    "strokeColor",
+                    "fillColor",
+                    "remarks"));
+
+    /** Visual-style detail nodes — preserved on colored shapes/circles. */
+    private static final java.util.Set<String> RF_VISUAL_STYLE_DETAILS =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "color",
+                    "fillColor",
+                    "strokeColor",
+                    "shape",
+                    "ellipse",
+                    "height",
+                    "usericon"));
+
+    /** Shorter stale window keeps time attributes smaller on RF. */
+    private static final long RF_MAX_STALE_MS = 24L * 60L * 60L * 1000L;
 
     /**
      * Extra minification for map points so gzip payload fits a single 240-byte RF fragment.
-     * Preserves {@code type}, {@code point}, {@code contact}, and {@code __dest}; drops
-     * redundant {@code color}/{@code usericon} when {@code type} carries affiliation.
+     * Applies to affiliation points ({@code a-*-G}) and ATAK map markers ({@code b-m-p*}).
      */
     public static String minifyCotXmlForRf(CotEvent event) {
         if (event == null) {
@@ -670,50 +694,237 @@ public class CotBuilder {
         if (base == null) {
             return null;
         }
-        String type = event.getType();
-        if (type == null || !RF_COMPACT_POINT_TYPE.matcher(type).matches()) {
+        if (!isRfCompactMapItem(event)) {
             return base;
         }
+        boolean affiliationPoint = isRfAffiliationPoint(event);
+        boolean preserveVisualStyle = hasRfVisualStyle(event);
         try {
             CotEvent clone = CotEvent.parse(base);
             if (clone == null) {
                 return base;
             }
-            CotPoint pt = clone.getCotPoint();
-            if (pt != null) {
-                clone.setPoint(new CotPoint(
-                        roundCoord(pt.getLat(), 5),
-                        roundCoord(pt.getLon(), 5),
-                        0,
-                        CotPoint.UNKNOWN,
-                        CotPoint.UNKNOWN));
-            }
-            capStaleWindow(clone);
-            if ("h-g-i-g-o".equals(clone.getHow())) {
-                clone.setHow("m-g");
-            }
+            applyRfCompactEventFields(clone);
             CotDetail detail = clone.getDetail();
             if (detail != null) {
-                for (CotDetail child : detail.getChildren()) {
-                    if (child == null) {
-                        continue;
-                    }
-                    String name = child.getElementName();
-                    if ("color".equals(name) || "usericon".equals(name) || "contact".equals(name)) {
-                        detail.removeChild(child);
-                    }
-                }
+                compactDirectedDestUids(detail);
+                applyRfCompactDetail(detail, affiliationPoint, preserveVisualStyle);
             }
-            String rfXml = clone.toString();
-            rfXml = rfXml.replaceAll("<\\?xml[^?]*\\?>", "");
-            rfXml = rfXml.replaceAll(" access='[^']*'", "")
-                    .replaceAll(" access=\"[^\"]*\"", "");
-            rfXml = rfXml.replaceAll("\\.\\d{3}Z", "Z");
-            return rfXml.trim();
+            return normalizeRfXml(clone.toString());
         } catch (Exception e) {
             Log.w(TAG, "minifyCotXmlForRf failed — using standard minify", e);
             return base;
         }
+    }
+
+    /**
+     * Last-resort RF minify: same as {@link #minifyCotXmlForRf} but drops {@code contact} on all
+     * compact map types so gzip can fit one fragment on lossy links.
+     */
+    private static String minifyCotXmlForRfAggressive(CotEvent event) {
+        if (event == null || !isRfCompactMapItem(event) || hasRfVisualStyle(event)) {
+            return null;
+        }
+        String base = minifyCotXml(event);
+        if (base == null) {
+            return null;
+        }
+        try {
+            CotEvent clone = CotEvent.parse(base);
+            if (clone == null) {
+                return null;
+            }
+            applyRfCompactEventFields(clone);
+            CotDetail detail = clone.getDetail();
+            if (detail != null) {
+                compactDirectedDestUids(detail);
+                applyRfCompactDetail(detail, true, false);
+            }
+            return normalizeRfXml(clone.toString());
+        } catch (Exception e) {
+            Log.w(TAG, "minifyCotXmlForRfAggressive failed", e);
+            return null;
+        }
+    }
+
+    /** True for single-point map markers eligible for RF single-fragment minify. */
+    public static boolean isRfCompactMapItem(CotEvent event) {
+        if (event == null) {
+            return false;
+        }
+        String type = event.getType();
+        if (type == null || type.isEmpty()) {
+            return false;
+        }
+        if (RF_COMPACT_AFFILIATION_TYPE.matcher(type).matches()) {
+            return true;
+        }
+        if (!type.startsWith("b-m-p")) {
+            return false;
+        }
+        if (hasRfVisualStyle(event)) {
+            return true;
+        }
+        CotDetail detail = event.getDetail();
+        if (detail == null) {
+            return true;
+        }
+        // Multi-link shapes need corner geometry; simple markers/GOTOs do not.
+        int linkCount = 0;
+        for (CotDetail child : detail.getChildren()) {
+            if (child != null && "link".equals(child.getElementName())) {
+                linkCount++;
+            }
+        }
+        return linkCount <= 1;
+    }
+
+    private static boolean isRfAffiliationPoint(CotEvent event) {
+        String type = event != null ? event.getType() : null;
+        return type != null && RF_COMPACT_AFFILIATION_TYPE.matcher(type).matches();
+    }
+
+    /**
+     * Colored circles, operator points, and user-drawn shapes need style attrs on the receiver.
+     */
+    static boolean hasRfVisualStyle(CotEvent event) {
+        if (event == null) {
+            return false;
+        }
+        String type = event.getType();
+        if (type != null) {
+            if (type.startsWith("u-d-") || type.startsWith("u-rb")) {
+                return true;
+            }
+            if (type.startsWith("b-m-p-s-p-")
+                    && !"b-m-p-s-p-i".equals(type)
+                    && !"b-m-p-s-p-loc".equals(type)) {
+                return true;
+            }
+        }
+        CotDetail detail = event.getDetail();
+        if (detail == null) {
+            return false;
+        }
+        for (CotDetail child : detail.getChildren()) {
+            if (child == null || child.getElementName() == null) {
+                continue;
+            }
+            if (RF_VISUAL_STYLE_DETAILS.contains(child.getElementName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void applyRfCompactEventFields(CotEvent clone) {
+        CotPoint pt = clone.getCotPoint();
+        if (pt != null) {
+            clone.setPoint(new CotPoint(
+                    roundCoord(pt.getLat(), 5),
+                    roundCoord(pt.getLon(), 5),
+                    0,
+                    CotPoint.UNKNOWN,
+                    CotPoint.UNKNOWN));
+        }
+        capStaleWindow(clone);
+        String how = clone.getHow();
+        if ("h-g-i-g-o".equals(how) || "h-e".equals(how)) {
+            clone.setHow("m-g");
+        }
+    }
+
+    private static void applyRfCompactDetail(CotDetail detail, boolean dropContact,
+                                           boolean preserveVisualStyle) {
+        for (CotDetail child : detail.getChildren()) {
+            if (child == null) {
+                continue;
+            }
+            String name = child.getElementName();
+            if (name == null) {
+                continue;
+            }
+            if (RF_EXTRA_DROP_DETAILS.contains(name)) {
+                if (preserveVisualStyle && RF_VISUAL_STYLE_DETAILS.contains(name)) {
+                    continue;
+                }
+                detail.removeChild(child);
+                continue;
+            }
+            if (dropContact && "contact".equals(name)) {
+                detail.removeChild(child);
+                continue;
+            }
+            if (!dropContact && "contact".equals(name)) {
+                slimContactForRf(child);
+            }
+        }
+    }
+
+    /** Keep callsign only; drop endpoint and other ATAK-only contact attrs. */
+    private static void slimContactForRf(CotDetail contact) {
+        com.atakmap.coremap.cot.event.CotAttribute[] attrs = contact.getAttributes();
+        if (attrs != null) {
+            for (com.atakmap.coremap.cot.event.CotAttribute attr : attrs) {
+                if (attr == null || attr.getName() == null) {
+                    continue;
+                }
+                if (!"callsign".equals(attr.getName())) {
+                    contact.removeAttribute(attr.getName());
+                }
+            }
+        }
+        String callsign = contact.getAttribute("callsign");
+        if (callsign != null && !callsign.trim().isEmpty()) {
+            contact.setAttribute("callsign", CallsignUtil.toRadioCallsign(callsign.trim()));
+        }
+    }
+
+    /**
+     * Shorten synthetic {@code ANDROID-*} destination UIDs; receivers match via callsign alias.
+     */
+    private static void compactDirectedDestUids(CotDetail detail) {
+        CotDetail dest = detail.getChild("__dest");
+        if (dest == null) {
+            return;
+        }
+        for (CotDetail child : dest.getChildren()) {
+            if (child == null) {
+                continue;
+            }
+            String uid = child.getAttribute("uid");
+            if (uid == null || uid.trim().isEmpty()) {
+                continue;
+            }
+            String compact = compactDestUidForRf(uid.trim());
+            if (compact != null && !compact.equals(uid.trim())) {
+                child.setAttribute("uid", compact);
+            }
+        }
+    }
+
+    private static String compactDestUidForRf(String uid) {
+        String upper = uid.toUpperCase(Locale.US);
+        if (upper.startsWith("ANDROID-")) {
+            String bare = uid.substring("ANDROID-".length()).trim();
+            if (!bare.isEmpty()) {
+                return CallsignUtil.alphanumericCallsignKey(bare);
+            }
+        }
+        return uid;
+    }
+
+    private static String normalizeRfXml(String xml) {
+        if (xml == null) {
+            return null;
+        }
+        String rfXml = xml.replaceAll("<\\?xml[^?]*\\?>", "");
+        rfXml = rfXml.replaceAll(" access='[^']*'", "")
+                .replaceAll(" access=\"[^\"]*\"", "");
+        rfXml = rfXml.replaceAll(" version='[^']*'", "")
+                .replaceAll(" version=\"[^\"]*\"", "");
+        rfXml = rfXml.replaceAll("\\.\\d{3}Z", "Z");
+        return rfXml.trim();
     }
 
     /**
@@ -740,6 +951,21 @@ public class CotBuilder {
             if (rf != null && rf.length < best.length) {
                 best = rf;
             }
+        }
+        if (best.length > PacketFragmenter.MAX_FRAGMENT_PAYLOAD && isRfCompactMapItem(event)) {
+            String aggressiveXml = minifyCotXmlForRfAggressive(event);
+            if (aggressiveXml != null) {
+                byte[] aggressive = compressCot(aggressiveXml);
+                if (aggressive != null && aggressive.length < best.length) {
+                    best = aggressive;
+                }
+            }
+        }
+        if (best.length > PacketFragmenter.MAX_FRAGMENT_PAYLOAD
+                && Log.isLoggable(TAG, Log.DEBUG)) {
+            Log.d(TAG, "RF compress still multi-fragment: type=" + event.getType()
+                    + " bytes=" + best.length
+                    + " uid=" + event.getUID());
         }
         return best;
     }

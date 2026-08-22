@@ -603,6 +603,12 @@ public class BtConnectionManager {
         this.context = atakContext;
         this.packetRouter = packetRouter;
         this.routeResolver = new MeshContactRouteResolver(atakContext);
+        this.routeResolver.setStaleRepeaterPathListener((pubKeyHex, peerLabel) -> {
+            Log.d(TAG, "Refreshing stale repeater route for " + peerLabel);
+            requestContactByPubKeyHex(pubKeyHex);
+        });
+        this.packetRouter.setInboundPathListener(
+                (callsign, rxPathLen) -> routeResolver.noteInboundPath(callsign, rxPathLen));
         this.btAdapter = BluetoothAdapter.getDefaultAdapter();
         ioThread.start();
         ioHandler = new Handler(ioThread.getLooper());
@@ -1571,6 +1577,15 @@ public class BtConnectionManager {
             return "not connected";
         }
         return routeResolver.describeRouteMiss(routePeerHint, getConnectedDeviceAddress());
+    }
+
+    /** Escalate directed TX routing after delivery failure (zero-hop, then flood). */
+    public void noteTxRouteFailure(@Nullable String routePeerHint) {
+        routeResolver.noteTxRouteFailure(routePeerHint);
+    }
+
+    public void clearTxRouteFailure(@Nullable String routePeerHint) {
+        routeResolver.clearTxRouteFailure(routePeerHint);
     }
 
     /** TX route label for a resolved peer hint ({@code flood}, {@code direct-zero-hop}, etc.). */

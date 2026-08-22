@@ -835,6 +835,18 @@ public class CotBridge {
     }
 
     /**
+     * Resolve a peer label to the best mesh route hint (pubkey/node UID or callsign).
+     * Prefers a hint whose firmware {@code out_path} resolves to direct/repeater routing.
+     */
+    @Nullable
+    public String resolveRoutePeerHint(@Nullable String destUid) {
+        if (destUid == null || destUid.trim().isEmpty()) {
+            return null;
+        }
+        return resolveRoutePeerHintForDestination(destUid.trim());
+    }
+
+    /**
      * Resolve a directed CoT destination to the best mesh route hint (pubkey/node UID or callsign).
      * Prefers a hint whose firmware {@code out_path} resolves to direct/repeater routing.
      */
@@ -872,6 +884,9 @@ public class CotBridge {
         String trimmed = destUid.trim();
         addRouteHintCandidate(out, trimmed);
         String upper = trimmed.toUpperCase(Locale.US);
+        if (upper.endsWith("-MESH") && upper.length() > "-MESH".length()) {
+            addRouteHintCandidate(out, trimmed.substring(0, trimmed.length() - "-MESH".length()).trim());
+        }
         if (upper.startsWith("MESHCORE-NODE-") || upper.startsWith("MESHCORE-RPTR-")) {
             return;
         }
@@ -1651,6 +1666,9 @@ public class CotBridge {
                 return true;
             }
         }
+        if (CotBuilder.hasRfVisualStyle(event)) {
+            return true;
+        }
         return false;
     }
 
@@ -2351,6 +2369,9 @@ public class CotBridge {
                 pending.retryCount++;
                 Log.d(TAG, "CoT retry " + pending.retryCount + "/" + COT_MAX_RETRIES
                         + " uid=" + cotUid);
+                if (btManager != null) {
+                    btManager.noteTxRouteFailure(extractRoutePeerHint(pending.event));
+                }
                 sendCotOverRadioNoRetry(pending.event);
                 scheduleCotRetryCheck(cotUid);
             } else {
@@ -2367,6 +2388,9 @@ public class CotBridge {
         if (cotUid == null || cotUid.trim().isEmpty()) return;
         PendingOutboundCot removed = pendingOutboundCots.remove(cotUid.trim());
         if (removed != null) {
+            if (btManager != null) {
+                btManager.clearTxRouteFailure(extractRoutePeerHint(removed.event));
+            }
             Log.d(TAG, "CoT RF ACK uid=" + cotUid.trim()
                     + " txDelivered afterRetries=" + removed.retryCount
                     + " (rx repeater-hop count is logged on receiver only)");

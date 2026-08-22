@@ -2,6 +2,8 @@ package com.atakmaps.meshcore.plugin.protocol;
 
 import android.util.Log;
 
+import androidx.annotation.Nullable;
+
 import com.atakmap.android.contact.Contact;
 import com.atakmap.android.contact.Contacts;
 import com.atakmap.android.contact.IndividualContact;
@@ -53,6 +55,12 @@ public class PacketRouter {
     /** Listener for packet count updates */
     private PacketCountListener packetCountListener;
 
+    public interface InboundPathListener {
+        void onPeerInbound(String srcCallsign, int rxPathLen);
+    }
+
+    private InboundPathListener inboundPathListener;
+
     public interface PacketCountListener {
         void onPacketReceived();
 
@@ -71,6 +79,10 @@ public class PacketRouter {
 
     public void setPacketCountListener(PacketCountListener listener) {
         this.packetCountListener = listener;
+    }
+
+    public void setInboundPathListener(@Nullable InboundPathListener listener) {
+        this.inboundPathListener = listener;
     }
 
     /** Called by {@link com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager} after a successful KISS TX. */
@@ -123,6 +135,10 @@ public class PacketRouter {
         Log.d(TAG, "Received from " + srcCall + "-" + srcSsid +
                 " → " + destCall + ": " + info.length() + " bytes"
                 + " rxPath=" + MeshPathUtil.formatRxRepeaterPath(pathLen));
+
+        if (inboundPathListener != null && srcCall != null && !srcCall.trim().isEmpty()) {
+            inboundPathListener.onPeerInbound(srcCall.trim(), pathLen);
+        }
 
         // Notify listener of received packet
         if (packetCountListener != null) {
@@ -332,7 +348,7 @@ public class PacketRouter {
         Log.d(TAG, "Chat mid=" + messageId + " from " + sender + " [" + room + "] len=" + message.length());
         boolean accepted = chatBridge.injectRadioMessage(sender, room, message, messageId);
         if (accepted) {
-            chatBridge.sendRadioChatAck(messageId, MeshCorePacket.ACK_KIND_DELIVERED);
+            chatBridge.sendRadioChatAck(messageId, MeshCorePacket.ACK_KIND_DELIVERED, sender);
         } else {
             Log.d(TAG, "Skipping DELIVERED ACK for non-local chat mid=" + messageId
                     + " room=" + room + " sender=" + sender);
