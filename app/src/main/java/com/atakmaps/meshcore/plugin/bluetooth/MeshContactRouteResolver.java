@@ -22,6 +22,12 @@ final class MeshContactRouteResolver {
     private static final long DIRECT_RX_ROUTE_TTL_MS = 5L * 60L * 1000L;
     /** Throttle firmware {@code GET_CONTACT_BY_KEY} refresh requests per peer. */
     private static final long CONTACT_REFRESH_MIN_INTERVAL_MS = 60L * 1000L;
+    /**
+     * After a directed delivery ACK via repeater ({@code hops > 0}), ignore periodic
+     * GPS/ping for {@link #lastDirectInboundMsByNameKey} so idle marker TX keeps
+     * {@code out_path=0x1}. Same TTL as direct-RX window.
+     */
+    private static final long REPEATER_ROUTE_CONFIRMED_TTL_MS = DIRECT_RX_ROUTE_TTL_MS;
 
     interface StaleRepeaterPathListener {
         void onStaleRepeaterPath(String pubKeyHex, String peerLabel);
@@ -57,6 +63,9 @@ final class MeshContactRouteResolver {
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> lastContactRefreshRequestMsByNameKey =
             new ConcurrentHashMap<>();
+    /** Last time directed TX via repeater ({@code hops > 0}) was ACK'd for a peer. */
+    private final ConcurrentHashMap<String, Long> lastRepeaterRouteConfirmedMsByNameKey =
+            new ConcurrentHashMap<>();
     private volatile StaleRepeaterPathListener staleRepeaterPathListener;
 
     MeshContactRouteResolver(Context context) {
@@ -73,6 +82,7 @@ final class MeshContactRouteResolver {
         lastDirectInboundMsByNameKey.clear();
         txRouteEscalationByNameKey.clear();
         lastContactRefreshRequestMsByNameKey.clear();
+        lastRepeaterRouteConfirmedMsByNameKey.clear();
     }
 
     void indexContact(BtConnectionManager.MeshDeviceContact contact) {
@@ -82,6 +92,9 @@ final class MeshContactRouteResolver {
         String prefix = contact.pubKeyHex.trim().toUpperCase(Locale.US).substring(0, 12);
         liveByPubKeyPrefix.put(prefix, contact);
         indexNameKeys(contact);
+        if (MeshPathUtil.pathHopCount(contact.outPathLen) <= 0) {
+            clearRepeaterRouteConfirmed(contact.name);
+        }
         if (contact.name != null && !contact.name.trim().isEmpty()) {
             Log.d(TAG, "Contact route name=" + contact.name.trim()
                     + " out_path=0x" + Integer.toHexString(contact.outPathLen & 0xFF)
@@ -105,32 +118,75 @@ final class MeshContactRouteResolver {
         }
     }
 
-    /**
-     * Record inbound RF from a peer. Zero-hop / direct RX clears stale repeater routing
-     * preference and asks firmware to refresh the contact when cached {@code out_path}
-     * still points at a repeater.
-     */
+    enum InboundPathSignal {
+        /** Stale {@code out_path} refresh only (no recent-direct tracking). */
+        STALE_REFRESH,
+        /** Chat / CoT / ACK — may mark peer recently direct. */
+        APP_TRAFFIC,
+        /** Periodic GPS beacon or ping — may mark direct unless repeater path is confirmed. */
+        PERIODIC_BEACON
+    }
+
     void noteInboundPath(@Nullable String peerHint, int rxPathLen) {
+        noteInboundPath(peerHint, rxPathLen, InboundPathSignal.STALE_REFRESH);
+    }
+
+    /**
+     * Record inbound RF from a peer. App traffic and (usually) beacons can mark a peer
+     * recently direct for stale-repeater override; firmware contact refresh still runs
+     * for all zero-hop / unknown RX when cache says {@code hops > 0}.
+     */
+    void noteInboundPath(@Nullable String peerHint, int rxPathLen, InboundPathSignal signal) {
         if (peerHint == null || peerHint.trim().isEmpty()) {
             return;
         }
-        for (String key : nameKeysForHint(peerHint.trim())) {
-            if (rxPathLen <= 0) {
-                lastDirectInboundMsByNameKey.put(key, System.currentTimeMillis());
-                txRouteEscalationByNameKey.remove(key);
+        if (signal != InboundPathSignal.STALE_REFRESH && rxPathLen <= 0) {
+            boolean suppressPeriodic = signal == InboundPathSignal.PERIODIC_BEACON
+                    && isRepeaterRouteRecentlyConfirmed(peerHint.trim());
+            if (!suppressPeriodic) {
+                for (String key : nameKeysForHint(peerHint.trim())) {
+                    lastDirectInboundMsByNameKey.put(key, System.currentTimeMillis());
+                    txRouteEscalationByNameKey.remove(key);
+                }
+            } else {
+                Log.d(TAG, "Skip recent-direct from periodic beacon: peer=" + peerHint.trim()
+                        + " (repeater route confirmed recently)");
             }
         }
         if (rxPathLen > 0) {
             return;
         }
+        maybeRefreshStaleRepeaterPath(peerHint.trim());
+    }
+
+    /** Record successful directed delivery via repeater ({@code hops > 0}). */
+    void noteRepeaterRouteConfirmed(@Nullable String peerHint) {
+        if (peerHint == null || peerHint.trim().isEmpty()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        for (String key : nameKeysForHint(peerHint.trim())) {
+            lastRepeaterRouteConfirmedMsByNameKey.put(key, now);
+        }
+    }
+
+    int resolveTxHopCount(@Nullable String peerHint, @Nullable String deviceAddress) {
+        DirectRoute route = resolveDirectRoute(peerHint, deviceAddress);
+        if (route == null) {
+            return -1;
+        }
+        return MeshPathUtil.pathHopCount(route.pathLenEncoded);
+    }
+
+    private void maybeRefreshStaleRepeaterPath(String peerHint) {
         BtConnectionManager.MeshDeviceContact contact =
-                lookupContact(peerHint.trim(), null);
+                lookupContact(peerHint, null);
         if (contact == null || MeshPathUtil.pathHopCount(contact.outPathLen) <= 0) {
             return;
         }
         long now = System.currentTimeMillis();
         boolean shouldRefresh = true;
-        for (String key : nameKeysForHint(peerHint.trim())) {
+        for (String key : nameKeysForHint(peerHint)) {
             Long last = lastContactRefreshRequestMsByNameKey.get(key);
             if (last != null && now - last < CONTACT_REFRESH_MIN_INTERVAL_MS) {
                 shouldRefresh = false;
@@ -140,13 +196,13 @@ final class MeshContactRouteResolver {
         if (!shouldRefresh) {
             return;
         }
-        for (String key : nameKeysForHint(peerHint.trim())) {
+        for (String key : nameKeysForHint(peerHint)) {
             lastContactRefreshRequestMsByNameKey.put(key, now);
         }
         StaleRepeaterPathListener listener = staleRepeaterPathListener;
         if (listener != null && contact.pubKeyHex != null && !contact.pubKeyHex.trim().isEmpty()) {
             String label = contact.name != null && !contact.name.trim().isEmpty()
-                    ? contact.name.trim() : peerHint.trim();
+                    ? contact.name.trim() : peerHint;
             listener.onStaleRepeaterPath(contact.pubKeyHex.trim(), label);
         }
     }
@@ -347,6 +403,26 @@ final class MeshContactRouteResolver {
             }
         }
         return max;
+    }
+
+    private boolean isRepeaterRouteRecentlyConfirmed(String peerHint) {
+        long now = System.currentTimeMillis();
+        for (String key : nameKeysForHint(peerHint)) {
+            Long last = lastRepeaterRouteConfirmedMsByNameKey.get(key);
+            if (last != null && now - last <= REPEATER_ROUTE_CONFIRMED_TTL_MS) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void clearRepeaterRouteConfirmed(@Nullable String peerName) {
+        if (peerName == null || peerName.trim().isEmpty()) {
+            return;
+        }
+        for (String key : nameKeysForHint(peerName.trim())) {
+            lastRepeaterRouteConfirmedMsByNameKey.remove(key);
+        }
     }
 
     private boolean isRecentlyDirect(String peerHint) {

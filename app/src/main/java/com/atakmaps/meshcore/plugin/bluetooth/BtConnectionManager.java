@@ -607,8 +607,22 @@ public class BtConnectionManager {
             Log.d(TAG, "Refreshing stale repeater route for " + peerLabel);
             requestContactByPubKeyHex(pubKeyHex);
         });
-        this.packetRouter.setInboundPathListener(
-                (callsign, rxPathLen) -> routeResolver.noteInboundPath(callsign, rxPathLen));
+        this.packetRouter.setInboundPathListener((callsign, rxPathLen, signal) -> {
+            MeshContactRouteResolver.InboundPathSignal mapped;
+            switch (signal) {
+                case PacketRouter.InboundPathListener.SIGNAL_APP_TRAFFIC:
+                    mapped = MeshContactRouteResolver.InboundPathSignal.APP_TRAFFIC;
+                    break;
+                case PacketRouter.InboundPathListener.SIGNAL_PERIODIC_BEACON:
+                    mapped = MeshContactRouteResolver.InboundPathSignal.PERIODIC_BEACON;
+                    break;
+                case PacketRouter.InboundPathListener.SIGNAL_STALE_REFRESH:
+                default:
+                    mapped = MeshContactRouteResolver.InboundPathSignal.STALE_REFRESH;
+                    break;
+            }
+            routeResolver.noteInboundPath(callsign, rxPathLen, mapped);
+        });
         this.btAdapter = BluetoothAdapter.getDefaultAdapter();
         ioThread.start();
         ioHandler = new Handler(ioThread.getLooper());
@@ -1586,6 +1600,14 @@ public class BtConnectionManager {
 
     public void clearTxRouteFailure(@Nullable String routePeerHint) {
         routeResolver.clearTxRouteFailure(routePeerHint);
+    }
+
+    public void noteRepeaterRouteConfirmed(@Nullable String routePeerHint) {
+        routeResolver.noteRepeaterRouteConfirmed(routePeerHint);
+    }
+
+    public int resolveTxHopCount(@Nullable String routePeerHint) {
+        return routeResolver.resolveTxHopCount(routePeerHint, getConnectedDeviceAddress());
     }
 
     /** TX route label for a resolved peer hint ({@code flood}, {@code direct-zero-hop}, etc.). */

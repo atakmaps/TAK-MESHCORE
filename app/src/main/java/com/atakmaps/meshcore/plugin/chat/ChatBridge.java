@@ -202,11 +202,12 @@ public class ChatBridge {
         final String message;
         final String geoChatLineUid; // may be null
         final String routePeerHint; // may be null
+        final int txPathHops;
         volatile int retryCount;
 
         PendingOutboundChat(int wireMid, String sender, String room, String message,
                             String geoChatLineUid, String routePeerHint,
-                            @Nullable String recipientLabel) {
+                            @Nullable String recipientLabel, int txPathHops) {
             this.wireMid = wireMid;
             this.sender = sender;
             this.room = room;
@@ -214,6 +215,7 @@ public class ChatBridge {
             this.message = message;
             this.geoChatLineUid = geoChatLineUid;
             this.routePeerHint = routePeerHint;
+            this.txPathHops = txPathHops;
             this.retryCount = 0;
         }
     }
@@ -2228,7 +2230,9 @@ public class ChatBridge {
 
             Log.d(TAG, "Sending chat over radio: " + ax25.length + " bytes");
             String routePeerHint = resolveRoutePeerHintForRoom(room);
+            int txPathHops = -1;
             if (routePeerHint != null && btManager != null) {
+                txPathHops = btManager.resolveTxHopCount(routePeerHint);
                 Log.d(TAG, "Chat TX route=" + btManager.formatTxRouteLabel(routePeerHint)
                         + " room=" + room + " mid=" + wireMid);
             }
@@ -2238,7 +2242,7 @@ public class ChatBridge {
             // and don't fall back to the raw room which createChatPacket would truncate differently.
             PendingOutboundChat pending =
                     new PendingOutboundChat(wireMid, sender, wireRoom, message,
-                            geoChatLineUidOrNull, routePeerHint, room);
+                            geoChatLineUidOrNull, routePeerHint, room, txPathHops);
             pendingOutboundChats.put(wireMid, pending);
             Log.d(TAG, "Outbound pending registered mid=" + wireMid + " room=" + room);
             scheduleRetryCheck(wireMid);
@@ -2699,6 +2703,9 @@ public class ChatBridge {
             if (removed != null) {
                 if (btManager != null) {
                     btManager.clearTxRouteFailure(removed.routePeerHint);
+                    if (removed.txPathHops > 0) {
+                        btManager.noteRepeaterRouteConfirmed(removed.routePeerHint);
+                    }
                 }
                 Log.d(TAG, "DELIVERED ACK cancelled retry watchdog mid=" + wireMessageId);
             }

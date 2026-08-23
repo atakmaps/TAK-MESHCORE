@@ -56,7 +56,11 @@ public class PacketRouter {
     private PacketCountListener packetCountListener;
 
     public interface InboundPathListener {
-        void onPeerInbound(String srcCallsign, int rxPathLen);
+        int SIGNAL_STALE_REFRESH = 0;
+        int SIGNAL_APP_TRAFFIC = 1;
+        int SIGNAL_PERIODIC_BEACON = 2;
+
+        void onPeerInbound(String srcCallsign, int rxPathLen, int signal);
     }
 
     private InboundPathListener inboundPathListener;
@@ -137,7 +141,8 @@ public class PacketRouter {
                 + " rxPath=" + MeshPathUtil.formatRxRepeaterPath(pathLen));
 
         if (inboundPathListener != null && srcCall != null && !srcCall.trim().isEmpty()) {
-            inboundPathListener.onPeerInbound(srcCall.trim(), pathLen);
+            inboundPathListener.onPeerInbound(srcCall.trim(), pathLen,
+                    InboundPathListener.SIGNAL_STALE_REFRESH);
         }
 
         // Notify listener of received packet
@@ -227,14 +232,20 @@ public class PacketRouter {
                         PingReplyNotifier.maybeNotifyPingReply(
                                 pingMv.getContext(), gps.callsign);
                     }
+                    noteInboundPath(gps.callsign, pathLen,
+                            InboundPathListener.SIGNAL_PERIODIC_BEACON);
                 }
                 break;
 
             case MeshCorePacket.TYPE_CHAT:
+                noteInboundPath(callsign, pathLen,
+                        InboundPathListener.SIGNAL_APP_TRAFFIC);
                 routeChatPacket(packet.getPayload());
                 break;
 
             case MeshCorePacket.TYPE_COT:
+                noteInboundPath(callsign, pathLen,
+                        InboundPathListener.SIGNAL_APP_TRAFFIC);
                 cotBridge.injectCompressedCot(packet.getPayload(), pathLen);
                 break;
 
@@ -278,6 +289,8 @@ public class PacketRouter {
                 if (shouldReply) {
                     schedulePingReply(RfInboundTransport.MESHCORE);
                 }
+                noteInboundPath(pingCall, pathLen,
+                        InboundPathListener.SIGNAL_PERIODIC_BEACON);
                 break;
 
             case MeshCorePacket.TYPE_NET_SLOT_CONFIG:
@@ -289,6 +302,8 @@ public class PacketRouter {
                 break;
 
             case MeshCorePacket.TYPE_ACK:
+                noteInboundPath(callsign, pathLen,
+                        InboundPathListener.SIGNAL_APP_TRAFFIC);
                 MeshCorePacket.AckPayload ack =
                         MeshCorePacket.decodeAckPayload(packet.getPayload());
                 if (ack != null) {
@@ -298,6 +313,8 @@ public class PacketRouter {
                 break;
 
             case MeshCorePacket.TYPE_COT_ACK:
+                noteInboundPath(callsign, pathLen,
+                        InboundPathListener.SIGNAL_APP_TRAFFIC);
                 String ackedUid = MeshCorePacket.decodeCotAckUid(packet.getPayload());
                 if (ackedUid != null) {
                     cotBridge.handleCotAck(ackedUid);
@@ -311,6 +328,8 @@ public class PacketRouter {
                     Log.d(TAG, "Fragment reassembly complete: "
                             + reassembled.length + " bytes"
                             + " rxPath=" + MeshPathUtil.formatRxRepeaterPath(pathLen));
+                    noteInboundPath(callsign, pathLen,
+                            InboundPathListener.SIGNAL_APP_TRAFFIC);
                     cotBridge.injectCompressedCot(reassembled, pathLen);
                 }
                 break;
@@ -318,6 +337,13 @@ public class PacketRouter {
             default:
                 Log.w(TAG, "Unknown MeshCore packet type: " + packet.getType());
         }
+    }
+
+    private void noteInboundPath(String callsign, int pathLen, int signal) {
+        if (inboundPathListener == null || callsign == null || callsign.trim().isEmpty()) {
+            return;
+        }
+        inboundPathListener.onPeerInbound(callsign.trim(), pathLen, signal);
     }
 
     /**
