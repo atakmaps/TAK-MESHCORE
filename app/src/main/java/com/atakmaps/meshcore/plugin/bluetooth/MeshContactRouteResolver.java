@@ -56,8 +56,8 @@ final class MeshContactRouteResolver {
     private final ConcurrentHashMap<String, Long> lastDirectInboundMsByNameKey =
             new ConcurrentHashMap<>();
     /**
-     * TX escalation when directed delivery fails: 0=normal cache, 1=force zero-hop,
-     * 2+=flood.
+     * TX escalation when directed delivery fails: 0=normal cache, 1+=flood after
+     * {@link #noteTxRouteFailure} resets firmware {@code out_path}.
      */
     private final ConcurrentHashMap<String, Integer> txRouteEscalationByNameKey =
             new ConcurrentHashMap<>();
@@ -140,23 +140,30 @@ final class MeshContactRouteResolver {
         if (peerHint == null || peerHint.trim().isEmpty()) {
             return;
         }
-        if (signal != InboundPathSignal.STALE_REFRESH && rxPathLen <= 0) {
+        String trimmed = peerHint.trim();
+        if (rxPathLen > 0) {
+            noteRepeaterRouteConfirmed(trimmed);
+            return;
+        }
+        if (signal != InboundPathSignal.STALE_REFRESH) {
+            int cachedHops = cachedHopCountForPeer(trimmed, null);
+            boolean suppressAppTraffic = signal == InboundPathSignal.APP_TRAFFIC && cachedHops > 0;
             boolean suppressPeriodic = signal == InboundPathSignal.PERIODIC_BEACON
-                    && isRepeaterRouteRecentlyConfirmed(peerHint.trim());
-            if (!suppressPeriodic) {
-                for (String key : nameKeysForHint(peerHint.trim())) {
+                    && isRepeaterRouteRecentlyConfirmed(trimmed);
+            if (suppressAppTraffic) {
+                Log.d(TAG, "Skip recent-direct from app traffic: peer=" + trimmed
+                        + " (cached repeater path hops=" + cachedHops + ")");
+            } else if (suppressPeriodic) {
+                Log.d(TAG, "Skip recent-direct from periodic beacon: peer=" + trimmed
+                        + " (repeater route confirmed recently)");
+            } else {
+                for (String key : nameKeysForHint(trimmed)) {
                     lastDirectInboundMsByNameKey.put(key, System.currentTimeMillis());
                     txRouteEscalationByNameKey.remove(key);
                 }
-            } else {
-                Log.d(TAG, "Skip recent-direct from periodic beacon: peer=" + peerHint.trim()
-                        + " (repeater route confirmed recently)");
             }
         }
-        if (rxPathLen > 0) {
-            return;
-        }
-        maybeRefreshStaleRepeaterPath(peerHint.trim());
+        maybeRefreshStaleRepeaterPath(trimmed);
     }
 
     /** Record successful directed delivery via repeater ({@code hops > 0}). */
@@ -207,7 +214,7 @@ final class MeshContactRouteResolver {
         }
     }
 
-    /** Escalate TX routing after directed delivery fails (zero-hop, then flood). */
+    /** Escalate TX routing after directed delivery fails (reset path, then flood). */
     void noteTxRouteFailure(@Nullable String peerHint) {
         if (peerHint == null || peerHint.trim().isEmpty()) {
             return;
@@ -215,6 +222,7 @@ final class MeshContactRouteResolver {
         for (String key : nameKeysForHint(peerHint.trim())) {
             txRouteEscalationByNameKey.merge(key, 1, (oldVal, inc) ->
                     Math.min(2, oldVal + inc));
+            lastDirectInboundMsByNameKey.remove(key);
         }
     }
 
@@ -233,9 +241,9 @@ final class MeshContactRouteResolver {
             return null;
         }
         int escalation = escalationLevel(peerHint.trim());
-        if (escalation >= 2) {
+        if (escalation >= 1) {
             Log.d(TAG, "Route escalate flood: peer=" + peerHint.trim()
-                    + " (directed TX retries exhausted repeater/zero-hop)");
+                    + " reason=tx-retry-after-path-reset");
             return null;
         }
         BtConnectionManager.MeshDeviceContact contact =
@@ -247,12 +255,11 @@ final class MeshContactRouteResolver {
             return null;
         }
         int cachedHops = MeshPathUtil.pathHopCount(contact.outPathLen);
-        if (cachedHops > 0
-                && (escalation >= 1 || isRecentlyDirect(peerHint.trim()))) {
+        if (cachedHops > 0 && isRecentlyDirect(peerHint.trim())) {
             Log.d(TAG, "Route override zero-hop: peer=" + peerHint.trim()
                     + " cached out_path=0x" + Integer.toHexString(contact.outPathLen & 0xFF)
                     + " txRoute=" + MeshPathUtil.formatTxRoute(contact.outPathLen)
-                    + (escalation >= 1 ? " reason=tx-retry-escalation" : " reason=recent-direct-rx"));
+                    + " reason=recent-direct-rx");
             return new DirectRoute(0, new byte[0]);
         }
         byte[] wire = MeshPathUtil.pathWireBytes(contact.outPathLen, contact.outPath);
@@ -392,6 +399,47 @@ final class MeshContactRouteResolver {
 
     private static String normalizeNameKey(String name) {
         return CallsignUtil.alphanumericCallsignKey(name);
+    }
+
+    @Nullable
+    String lookupPubKeyHexForPeer(@Nullable String peerHint, @Nullable String deviceAddress) {
+        BtConnectionManager.MeshDeviceContact contact = lookupContact(peerHint, deviceAddress);
+        if (contact == null || contact.pubKeyHex == null || contact.pubKeyHex.trim().isEmpty()) {
+            return null;
+        }
+        return contact.pubKeyHex.trim();
+    }
+
+    void markContactPathUnknown(@Nullable String pubKeyHex) {
+        if (pubKeyHex == null || pubKeyHex.trim().length() < 12) {
+            return;
+        }
+        BtConnectionManager.MeshDeviceContact contact = findByPubKeyPrefix(pubKeyHex.trim());
+        if (contact == null) {
+            return;
+        }
+        BtConnectionManager.MeshDeviceContact unknownPath = new BtConnectionManager.MeshDeviceContact(
+                contact.pubKeyHex,
+                contact.type,
+                contact.flags,
+                BtConnectionManager.OUT_PATH_UNKNOWN,
+                contact.outPath,
+                contact.name,
+                contact.lastAdvertTimestamp,
+                contact.gpsLat,
+                contact.gpsLon,
+                contact.lastMod);
+        indexContact(unknownPath);
+        Log.d(TAG, "Contact path reset locally name=" + (contact.name != null ? contact.name : "?")
+                + " out_path=0xFF");
+    }
+
+    private int cachedHopCountForPeer(String peerHint, @Nullable String deviceAddress) {
+        BtConnectionManager.MeshDeviceContact contact = lookupContact(peerHint, deviceAddress);
+        if (contact == null) {
+            return -1;
+        }
+        return MeshPathUtil.pathHopCount(contact.outPathLen);
     }
 
     private int escalationLevel(String peerHint) {

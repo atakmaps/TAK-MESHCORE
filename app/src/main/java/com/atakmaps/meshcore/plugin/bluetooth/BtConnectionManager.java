@@ -93,6 +93,7 @@ public class BtConnectionManager {
     private static final byte CMD_ADD_UPDATE_CONTACT = 0x09;
     private static final byte CMD_REMOVE_CONTACT = 0x0F;
     private static final byte CMD_GET_CONTACT_BY_KEY = 0x1E;
+    private static final byte CMD_RESET_PATH = 0x0D;
     private static final byte CMD_GET_CHANNEL = 0x1F;
     private static final byte CMD_SET_CHANNEL = 0x20;
     private static final byte CMD_GET_GPS_STATE = 0x28;
@@ -228,6 +229,8 @@ public class BtConnectionManager {
     private final Map<String, Long> contactQueryThrottleMsByPubKey = new ConcurrentHashMap<>();
     private volatile int pendingNodeDiscoverTag = 0;
     private volatile long pendingNodeDiscoverUntilMs = 0L;
+    /** After connect, wait for the first startup beacon before flooding repeater discover. */
+    private volatile boolean postStartupRepeaterDiscoverPending = true;
     private volatile long roomPostSyncUntilMs = 0L;
     private static final long ROOM_CONTACT_REMOVE_SETTLE_MS = 1500L;
     private static final long ROOM_CONTACT_ADD_SETTLE_MS = 1200L;
@@ -1593,9 +1596,17 @@ public class BtConnectionManager {
         return routeResolver.describeRouteMiss(routePeerHint, getConnectedDeviceAddress());
     }
 
-    /** Escalate directed TX routing after delivery failure (zero-hop, then flood). */
+    /** Escalate directed TX routing after delivery failure (reset path, then flood). */
     public void noteTxRouteFailure(@Nullable String routePeerHint) {
         routeResolver.noteTxRouteFailure(routePeerHint);
+        if (routePeerHint == null || routePeerHint.trim().isEmpty()) {
+            return;
+        }
+        String pubKeyHex = routeResolver.lookupPubKeyHexForPeer(
+                routePeerHint.trim(), getConnectedDeviceAddress());
+        if (pubKeyHex != null) {
+            resetContactPath(pubKeyHex);
+        }
     }
 
     public void clearTxRouteFailure(@Nullable String routePeerHint) {
@@ -1972,6 +1983,44 @@ public class BtConnectionManager {
         System.arraycopy(pubKey, 0, advertFrame, 1, CONTACT_PUB_KEY_BYTES);
         enqueueCommand(buildGetContactByKeyCommand(advertFrame));
         Log.d(TAG, "CMD_GET_CONTACT_BY_KEY queued for name/path refresh");
+    }
+
+    /**
+     * Reset firmware {@code out_path} for a contact (native MeshCore "reset path").
+     * Next directed TX floods until delivery report relearns the route.
+     */
+    public boolean resetContactPath(@Nullable String pubKeyHex) {
+        if (!connected.get() || pubKeyHex == null) {
+            return false;
+        }
+        byte[] pubKey = pubKeyPrefixBytes(pubKeyHex, CONTACT_PUB_KEY_BYTES);
+        if (pubKey == null) {
+            return false;
+        }
+        byte[] cmd = new byte[1 + CONTACT_PUB_KEY_BYTES];
+        cmd[0] = CMD_RESET_PATH;
+        System.arraycopy(pubKey, 0, cmd, 1, CONTACT_PUB_KEY_BYTES);
+        enqueueCommand(cmd);
+        routeResolver.markContactPathUnknown(pubKeyHex);
+        Log.d(TAG, "CMD_RESET_PATH queued pubkey="
+                + pubKeyHex.trim().substring(0, Math.min(12, pubKeyHex.trim().length())));
+        return true;
+    }
+
+    /**
+     * Flood repeater node-discover once per session, after the first post-connect startup
+     * beacon has been sent (avoids racing companion init / first RF activity).
+     */
+    public void onStartupBeaconSent() {
+        if (!connected.get() || !postStartupRepeaterDiscoverPending) {
+            return;
+        }
+        postStartupRepeaterDiscoverPending = false;
+        if (sendNodeDiscoverRequest()) {
+            Log.i(TAG, "Post-startup repeater discover queued (after first beacon)");
+        } else {
+            Log.w(TAG, "Post-startup repeater discover not queued — not connected");
+        }
     }
 
     public void requestDeviceContacts(DeviceContactsListener listener) {
@@ -2547,6 +2596,7 @@ public class BtConnectionManager {
 
     private void notifyConnected(BluetoothDevice device) {
         cancelPassiveMeshWatch();
+        postStartupRepeaterDiscoverPending = true;
         // Remember this as the startup auto-connect target (replaces the old favorite mechanism).
         if (device != null && device.getAddress() != null) {
             try {

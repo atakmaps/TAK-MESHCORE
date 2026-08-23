@@ -622,6 +622,9 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                     + (meshLimitedBeacon ? " [mesh limits]" : ""));
             logBeaconSentToPluginUi(formatBeaconSentLog(
                     beaconKind, meshLimitedBeacon, meshLimitSec));
+            if (forceImmediate && btConnectionManager != null) {
+                btConnectionManager.onStartupBeaconSent();
+            }
             return true;
         } catch (Exception e) {
             Log.e(TAG, "Error sending periodic beacon", e);
