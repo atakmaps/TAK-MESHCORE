@@ -1915,13 +1915,14 @@ public class CotBridge {
             // GeoChatService may reset the sender's default connector to its own routing choice.
             // Re-apply MeshSendMessageConnector as default so the radio icon is preserved.
             ChatBridge.repairAtakPeerConnectorDefault(inboundSenderUid);
-            // For MESHCORE-* contacts our MeshSendMessageConnector is the sole badge source.
-            // GeoChatService.onCotEvent() posts an async increment of ATAK's native
-            // GeoChatConnector unread to the main thread ("Geo Chat: 1 + Send Message: 1").
-            // Schedule markmessageread on the main thread with a short delay so it fires
-            // AFTER that increment, clearing the native count before the user sees it.
-            // ANDROID-* contacts intentionally skip this — they rely on native GeoChatConnector only.
-            if (inboundSenderUid != null
+            // GeoChatService posts async native unread increments. During post-connect inbox
+            // replay, clear those for all mesh peers so stale lines do not inflate the badge.
+            if (inboundSenderUid != null && chatBridge != null
+                    && chatBridge.shouldSuppressInboundUnread()) {
+                final CotEvent eventForClear = event;
+                new android.os.Handler(android.os.Looper.getMainLooper())
+                        .postDelayed(() -> clearNativeGeoChatUnread(eventForClear), 300);
+            } else if (inboundSenderUid != null
                     && (inboundSenderUid.startsWith("MESHCORE-NODE-")
                         || inboundSenderUid.startsWith("MESHCORE-RPTR-"))) {
                 final CotEvent eventForClear = event;
@@ -2020,8 +2021,10 @@ public class CotBridge {
             }
         }
         if (conversationId != null && !conversationId.trim().isEmpty()) {
-            int msgId = uid.hashCode() & 0x7FFFFFFF;
-            MeshCoreContactHandler.incrementUnreadOnce(conversationId.trim(), msgId, message);
+            if (chatBridge == null || !chatBridge.shouldSuppressInboundUnread()) {
+                int msgId = uid.hashCode() & 0x7FFFFFFF;
+                MeshCoreContactHandler.incrementUnreadOnce(conversationId.trim(), msgId, message);
+            }
         }
         // Keep ATAK contact unread state only; suppress OS-level popups/notifications.
         Log.i(TAG, "Inbound RF chat recorded for ATAK unread only uid=" + uid

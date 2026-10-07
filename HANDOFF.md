@@ -72,7 +72,7 @@ Additional backend class cleanup is still possible, but this release intentional
 This document is a **high-signal handoff** for a new engineer/agent coming into this repo mid-stream. It focuses on: how ATAK ↔ plugin integration works, how radio packets flow (BLE/KISS/AX.25), and the non-obvious ATAK behaviors discovered during the current iteration.
 
 **Full operator onboarding (TPC, Fortify, `atakmaps.com` deploy, playbooks):**  
-`/home/paul/Documents/ATAK/Plugins/Handoff Docs/UV-PRO-v1.8.6-AGENT-HANDOFF.md`  
+`/home/paul/dev/atak/Plugins/Handoff Docs/UV-PRO-v1.8.6-AGENT-HANDOFF.md`  
 Read **§0** there first if you are a **new agent** with no prior context. This file (`HANDOFF.md`) is **gitignored** — local agent notes only.
 
 If you are new to ATAK plugin development, start with **`README.md`** for build/install basics and **`AGENTS.md`** for Cloud/VM setup details.
@@ -513,7 +513,7 @@ Short update-server-only recap: `Plugins/Handoff Docs/UPDATE-SERVER-CERT-INJECTI
 
 ### Structured handoff DB (local)
 
-**`/home/paul/Documents/ATAK/Plugins/Handoff Docs/handoff.db`** — SQLite table **`uvpro_handoff`** (`updated_utc`, `plugin_version`, `git_sha`, `topic`, `summary`, `evidence`). Append rows when findings change so new agents can `SELECT` without chat history.
+**`/home/paul/dev/atak/Plugins/Handoff Docs/handoff.db`** — SQLite table **`uvpro_handoff`** (`updated_utc`, `plugin_version`, `git_sha`, `topic`, `summary`, `evidence`). Append rows when findings change so new agents can `SELECT` without chat history.
 
 ---
 
@@ -696,7 +696,7 @@ adb install -r app/build/outputs/apk/civ/debug/ATAK-Plugin-UVPro-*-civ-debug.apk
 **Logcat filter** (matches recent operator captures):
 
 ```bash
-OUT="$HOME/Documents/ATAK/Plugins/Darksteal/aprs-log-$(date +%Y%m%d-%H%M%S).txt"
+OUT="$HOME//home/paul/dev/atak/Plugins/Darksteal/aprs-log-$(date +%Y%m%d-%H%M%S).txt"
 adb logcat -v threadtime \
   UVPro.Router:D UVPro.APRS:D UVPro.APRS.WX:D UVPro.APRS.Track:D UVPro.APRS.Details:D \
   UVPro.CotBridge:D UVPro.BT:D '*:S' | tee "$OUT"

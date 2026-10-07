@@ -56,14 +56,16 @@ public class PacketRouter {
     private PacketCountListener packetCountListener;
 
     public interface InboundPathListener {
-        int SIGNAL_STALE_REFRESH = 0;
-        int SIGNAL_APP_TRAFFIC = 1;
-        int SIGNAL_PERIODIC_BEACON = 2;
+        void onPeerInbound(String srcCallsign, int rxPathLen);
+    }
 
-        void onPeerInbound(String srcCallsign, int rxPathLen, int signal);
+    /** Native-style reciprocal path return after flood-routed OPENRL RX. */
+    public interface InboundFloodPathListener {
+        void onFloodInboundFromPeer(String srcCallsign);
     }
 
     private InboundPathListener inboundPathListener;
+    private InboundFloodPathListener inboundFloodPathListener;
 
     public interface PacketCountListener {
         void onPacketReceived();
@@ -87,6 +89,10 @@ public class PacketRouter {
 
     public void setInboundPathListener(@Nullable InboundPathListener listener) {
         this.inboundPathListener = listener;
+    }
+
+    public void setInboundFloodPathListener(@Nullable InboundFloodPathListener listener) {
+        this.inboundFloodPathListener = listener;
     }
 
     /** Called by {@link com.atakmaps.meshcore.plugin.bluetooth.BtConnectionManager} after a successful KISS TX. */
@@ -124,6 +130,10 @@ public class PacketRouter {
      * pathLen (number of repeater hops) for CoT display purposes.
      */
     public void routeIncoming(byte[] ax25Data, int pathLen) {
+        routeIncoming(ax25Data, pathLen, false);
+    }
+
+    public void routeIncoming(byte[] ax25Data, int pathLen, boolean rxWasFloodRoute) {
         Ax25Frame frame = Ax25Frame.decode(ax25Data);
         if (frame == null) {
             Log.w(TAG, "Failed to decode AX.25 frame");
@@ -138,11 +148,16 @@ public class PacketRouter {
 
         Log.d(TAG, "Received from " + srcCall + "-" + srcSsid +
                 " → " + destCall + ": " + info.length() + " bytes"
-                + " rxPath=" + MeshPathUtil.formatRxRepeaterPath(pathLen));
+                + " rxPath=" + MeshPathUtil.formatRxRepeaterPath(pathLen)
+                + (rxWasFloodRoute ? " flood-rx" : ""));
+
+        if (rxWasFloodRoute && inboundFloodPathListener != null
+                && srcCall != null && !srcCall.trim().isEmpty()) {
+            inboundFloodPathListener.onFloodInboundFromPeer(srcCall.trim());
+        }
 
         if (inboundPathListener != null && srcCall != null && !srcCall.trim().isEmpty()) {
-            inboundPathListener.onPeerInbound(srcCall.trim(), pathLen,
-                    InboundPathListener.SIGNAL_STALE_REFRESH);
+            inboundPathListener.onPeerInbound(srcCall.trim(), pathLen);
         }
 
         // Notify listener of received packet
@@ -232,20 +247,17 @@ public class PacketRouter {
                         PingReplyNotifier.maybeNotifyPingReply(
                                 pingMv.getContext(), gps.callsign);
                     }
-                    noteInboundPath(gps.callsign, pathLen,
-                            InboundPathListener.SIGNAL_PERIODIC_BEACON);
+                    noteInboundPath(gps.callsign, pathLen);
                 }
                 break;
 
             case MeshCorePacket.TYPE_CHAT:
-                noteInboundPath(callsign, pathLen,
-                        InboundPathListener.SIGNAL_APP_TRAFFIC);
+                noteInboundPath(callsign, pathLen);
                 routeChatPacket(packet.getPayload());
                 break;
 
             case MeshCorePacket.TYPE_COT:
-                noteInboundPath(callsign, pathLen,
-                        InboundPathListener.SIGNAL_APP_TRAFFIC);
+                noteInboundPath(callsign, pathLen);
                 cotBridge.injectCompressedCot(packet.getPayload(), pathLen);
                 break;
 
@@ -289,8 +301,7 @@ public class PacketRouter {
                 if (shouldReply) {
                     schedulePingReply(RfInboundTransport.MESHCORE);
                 }
-                noteInboundPath(pingCall, pathLen,
-                        InboundPathListener.SIGNAL_PERIODIC_BEACON);
+                noteInboundPath(pingCall, pathLen);
                 break;
 
             case MeshCorePacket.TYPE_NET_SLOT_CONFIG:
@@ -302,8 +313,7 @@ public class PacketRouter {
                 break;
 
             case MeshCorePacket.TYPE_ACK:
-                noteInboundPath(callsign, pathLen,
-                        InboundPathListener.SIGNAL_APP_TRAFFIC);
+                noteInboundPath(callsign, pathLen);
                 MeshCorePacket.AckPayload ack =
                         MeshCorePacket.decodeAckPayload(packet.getPayload());
                 if (ack != null) {
@@ -313,8 +323,7 @@ public class PacketRouter {
                 break;
 
             case MeshCorePacket.TYPE_COT_ACK:
-                noteInboundPath(callsign, pathLen,
-                        InboundPathListener.SIGNAL_APP_TRAFFIC);
+                noteInboundPath(callsign, pathLen);
                 String ackedUid = MeshCorePacket.decodeCotAckUid(packet.getPayload());
                 if (ackedUid != null) {
                     cotBridge.handleCotAck(ackedUid);
@@ -328,8 +337,7 @@ public class PacketRouter {
                     Log.d(TAG, "Fragment reassembly complete: "
                             + reassembled.length + " bytes"
                             + " rxPath=" + MeshPathUtil.formatRxRepeaterPath(pathLen));
-                    noteInboundPath(callsign, pathLen,
-                            InboundPathListener.SIGNAL_APP_TRAFFIC);
+                    noteInboundPath(callsign, pathLen);
                     cotBridge.injectCompressedCot(reassembled, pathLen);
                 }
                 break;
@@ -339,11 +347,11 @@ public class PacketRouter {
         }
     }
 
-    private void noteInboundPath(String callsign, int pathLen, int signal) {
+    private void noteInboundPath(String callsign, int pathLen) {
         if (inboundPathListener == null || callsign == null || callsign.trim().isEmpty()) {
             return;
         }
-        inboundPathListener.onPeerInbound(callsign.trim(), pathLen, signal);
+        inboundPathListener.onPeerInbound(callsign.trim(), pathLen);
     }
 
     /**

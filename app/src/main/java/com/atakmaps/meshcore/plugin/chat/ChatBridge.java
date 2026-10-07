@@ -141,6 +141,18 @@ public class ChatBridge {
     private final Set<String> pendingUnreadConversationUids = ConcurrentHashMap.newKeySet();
     private volatile boolean unreadVisibilityPollRunning;
 
+    /**
+     * After BLE connect the companion replays its offline inbox; each injected GeoChat line
+     * bumps ATAK's native unread even though the user already saw those messages. Suppress
+     * unread increments until the replay burst finishes.
+     */
+    private static final long MESH_INBOX_BACKLOG_INITIAL_MS = 15_000L;
+    private static final long MESH_INBOX_BACKLOG_EXTEND_MS = 4_000L;
+    private volatile long meshInboxBacklogUntilMs = 0L;
+    private final android.os.Handler mainHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private Runnable meshInboxBacklogFinishRunnable;
+
     private volatile boolean disposed;
 
     /**
@@ -247,6 +259,84 @@ public class ChatBridge {
         this.btManager = btManager;
     }
 
+    /** Called when BLE connects; firmware may replay stored inbox messages as "new". */
+    public void onMeshBleConnected() {
+        long now = System.currentTimeMillis();
+        meshInboxBacklogUntilMs = now + MESH_INBOX_BACKLOG_INITIAL_MS;
+        scheduleMeshInboxBacklogFinish(MESH_INBOX_BACKLOG_INITIAL_MS);
+        Log.d(TAG, "Mesh inbox backlog suppression started (" + MESH_INBOX_BACKLOG_INITIAL_MS + "ms)");
+    }
+
+    /** Extend suppression while the companion is still draining stored messages. */
+    public void noteMeshInboxReplayActivity() {
+        if (!shouldSuppressInboundUnread()) {
+            return;
+        }
+        meshInboxBacklogUntilMs = System.currentTimeMillis() + MESH_INBOX_BACKLOG_EXTEND_MS;
+        scheduleMeshInboxBacklogFinish(MESH_INBOX_BACKLOG_EXTEND_MS);
+    }
+
+    public boolean shouldSuppressInboundUnread() {
+        return System.currentTimeMillis() < meshInboxBacklogUntilMs;
+    }
+
+    private void scheduleMeshInboxBacklogFinish(long delayMs) {
+        if (meshInboxBacklogFinishRunnable != null) {
+            mainHandler.removeCallbacks(meshInboxBacklogFinishRunnable);
+        }
+        meshInboxBacklogFinishRunnable = this::finishMeshInboxBacklogSuppression;
+        mainHandler.postDelayed(meshInboxBacklogFinishRunnable, delayMs);
+    }
+
+    private void finishMeshInboxBacklogSuppression() {
+        if (shouldSuppressInboundUnread()) {
+            scheduleMeshInboxBacklogFinish(
+                    Math.max(500L, meshInboxBacklogUntilMs - System.currentTimeMillis()));
+            return;
+        }
+        meshInboxBacklogFinishRunnable = null;
+        sweepNativeUnreadAfterInboxBacklog();
+        Log.d(TAG, "Mesh inbox backlog suppression finished — native unread swept");
+    }
+
+    /** Clear native GeoChat unread after replay so only post-connect traffic counts. */
+    public void sweepNativeUnreadAfterInboxBacklog() {
+        try {
+            for (com.atakmap.android.contact.Contact c
+                    : com.atakmap.android.contact.Contacts.getInstance().getAllContacts()) {
+                if (!(c instanceof com.atakmap.android.contact.IndividualContact)) {
+                    continue;
+                }
+                String uid = c.getUID();
+                if (uid == null || uid.trim().isEmpty()) {
+                    continue;
+                }
+                if (uid.startsWith(ANDROID_UID_PREFIX)
+                        || uid.startsWith(MESH_NODE_UID_PREFIX)
+                        || uid.startsWith(MESH_RPTR_UID_PREFIX)) {
+                    broadcastMarkMessageRead(uid.trim());
+                    clearUnreadLocal(uid.trim());
+                }
+            }
+            MeshCoreContactHandler.clearAllUnread();
+        } catch (Exception e) {
+            Log.w(TAG, "sweepNativeUnreadAfterInboxBacklog", e);
+        }
+    }
+
+    public static void broadcastMarkMessageRead(String conversationId) {
+        if (conversationId == null || conversationId.trim().isEmpty()) {
+            return;
+        }
+        try {
+            android.content.Intent markRead = new android.content.Intent(
+                    "com.atakmap.chat.markmessageread");
+            markRead.putExtra("conversationId", conversationId.trim());
+            com.atakmap.android.ipc.AtakBroadcast.getInstance().sendBroadcast(markRead);
+        } catch (Exception ignored) {
+        }
+    }
+
     public void setEncryptionManager(EncryptionManager em) {
         this.encryptionManager = em;
     }
@@ -274,6 +364,8 @@ public class ChatBridge {
             return false;
         }
         if (message == null || message.isEmpty()) return false;
+
+        noteMeshInboxReplayActivity();
 
         // Gateway envelope: wireDest|displayCallsign|lineUid|message (UV-PRO compatible).
         String gatewayWireDest = null;
@@ -453,10 +545,13 @@ public class ChatBridge {
             if (open != null && open.equals(chatRoom)) {
                 // Conversation is open; treat as already-seen.
                 clearUnreadLocal(chatRoom);
-            } else {
+            } else if (!shouldSuppressInboundUnread()) {
                 MeshCoreContactHandler.incrementUnreadOnce(chatRoom, radioPacketMessageId, message);
                 pendingUnreadConversationUids.add(chatRoom);
                 startUnreadVisibilityPollIfNeeded();
+            } else {
+                Log.d(TAG, "Suppressing unread for inbox replay mid=" + radioPacketMessageId
+                        + " room=" + chatRoom);
             }
         }
 

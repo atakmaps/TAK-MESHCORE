@@ -208,6 +208,9 @@ public class MeshCoreMapComponent extends DropDownMapComponent {
                 if (cotBridge != null) {
                     cotBridge.setBtManager(btConnectionManager);
                     cotBridge.refreshSendableMapItems();
+                    if (chatBridge != null) {
+                        chatBridge.onMeshBleConnected();
+                    }
                     if (mapView != null) {
                         mapView.post(() -> {
                             if (cotBridge != null) {

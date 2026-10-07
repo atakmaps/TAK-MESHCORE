@@ -42,7 +42,7 @@ See `Plugins/Handoff Docs/MESHCORE-TPC-SUBMISSION.md`.
 
 Produces `MeshCore-<ver>-ATAK-5.6.0-source.zip` in `Plugins/TAK Submissions/`. Uses `tools/use-atak-sdk.sh 5.6.0`.
 
-5.6 SDK default path: `~/Documents/ATAK/Versions/ATAK-CIV-5.6.0.18-SDK` (override with `ATAK_560_SDK`).
+5.6 SDK default path: `~//home/paul/dev/atak/Versions/ATAK-CIV-5.6.0.18-SDK` (override with `ATAK_560_SDK`).
 
 Manual build:
 

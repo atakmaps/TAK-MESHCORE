@@ -26,8 +26,8 @@ Source:
 - Local snapshot: `/home/paul/.cursor/projects/home-paul-Documents-ATAK/agent-tools/c9cf0130-84bf-447b-a0d7-6948016f6833.txt` (BLE section, command sequencing, MTU section)
 
 Firmware source confirms these UUIDs and security behavior:
-- `/home/paul/Documents/ATAK/MeshCore-upstream/src/helpers/esp32/SerialBLEInterface.cpp`
-- `/home/paul/Documents/ATAK/MeshCore-upstream/src/helpers/nrf52/SerialBLEInterface.cpp`
+- `/home/paul/dev/atak/MeshCore-upstream/src/helpers/esp32/SerialBLEInterface.cpp`
+- `/home/paul/dev/atak/MeshCore-upstream/src/helpers/nrf52/SerialBLEInterface.cpp`
 
 Notable confirmation from firmware source:
 - BLE UART UUIDs match docs (ESP32 file).
@@ -56,7 +56,7 @@ Upstream serial interface uses:
 - `MAX_FRAME_SIZE 172`
 
 Source:
-- `/home/paul/Documents/ATAK/MeshCore-upstream/src/helpers/BaseSerialInterface.h`
+- `/home/paul/dev/atak/MeshCore-upstream/src/helpers/BaseSerialInterface.h`
 
 This helps align chunk sizing assumptions for tunneled payload design.
 
@@ -65,13 +65,13 @@ This helps align chunk sizing assumptions for tunneled payload design.
 ## Current State in This Repo
 
 Repository:
-- `/home/paul/Documents/ATAK/Plugins/MeshcoreAtak`
+- `/home/paul/dev/atak/Plugins/MeshcoreAtak`
 - GitHub remote: `https://github.com/atakmaps/TAK-MESHCORE`
 
 Current progress:
 - `BtConnectionManager` has been replaced with BLE-based MeshCore transport logic while preserving legacy method names (`sendKissFrame`, `sendRawBytes`) used across existing UV-PRO code.
 - File:
-  - `/home/paul/Documents/ATAK/Plugins/MeshcoreAtak/app/src/main/java/com/uvpro/plugin/bluetooth/BtConnectionManager.java`
+  - `/home/paul/dev/atak/Plugins/MeshcoreAtak/app/src/main/java/com/uvpro/plugin/bluetooth/BtConnectionManager.java`
 - Compile validation performed successfully with:
   - `./gradlew assembleCivDebug -PlocalDev=true`
 
@@ -206,6 +206,6 @@ Immediate high-value next step:
 - Local companion protocol snapshot used during implementation:
   - `/home/paul/.cursor/projects/home-paul-Documents-ATAK/agent-tools/c9cf0130-84bf-447b-a0d7-6948016f6833.txt`
 - Upstream MeshCore firmware code:
-  - `/home/paul/Documents/ATAK/MeshCore-upstream/src/helpers/esp32/SerialBLEInterface.cpp`
-  - `/home/paul/Documents/ATAK/MeshCore-upstream/src/helpers/nrf52/SerialBLEInterface.cpp`
-  - `/home/paul/Documents/ATAK/MeshCore-upstream/src/helpers/BaseSerialInterface.h`
+  - `/home/paul/dev/atak/MeshCore-upstream/src/helpers/esp32/SerialBLEInterface.cpp`
+  - `/home/paul/dev/atak/MeshCore-upstream/src/helpers/nrf52/SerialBLEInterface.cpp`
+  - `/home/paul/dev/atak/MeshCore-upstream/src/helpers/BaseSerialInterface.h`

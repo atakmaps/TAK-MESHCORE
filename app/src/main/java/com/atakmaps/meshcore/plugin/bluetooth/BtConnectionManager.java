@@ -33,6 +33,7 @@ import androidx.annotation.Nullable;
 import androidx.annotation.NonNull;
 
 import com.atakmaps.meshcore.plugin.protocol.PacketRouter;
+import com.atakmaps.meshcore.plugin.util.MeshPathUtil;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -99,6 +100,12 @@ public class BtConnectionManager {
     private static final byte CMD_GET_GPS_STATE = 0x28;
     private static final byte CMD_SET_SETTING_TEXT = 0x29;
     private static final byte CMD_SEND_CHANNEL_DATA = 0x3E;
+    /** Firmware routes like native DM using contact {@code out_path} (ATAK build / FIRMWARE_VER 14+). */
+    private static final byte CMD_SEND_CONTACT_CHANNEL_DATA = 0x42;
+    /** Reciprocal path return after flood OPENRL RX (pairs with stashed RF path on node). */
+    private static final byte CMD_SEND_PATH_RETURN = 0x43;
+    /** Minimum {@code FIRMWARE_VER_CODE} for node-routed OPENRL (CMD 66/67). */
+    private static final int MIN_FW_NODE_ROUTED_OPENRL = 14;
     private static final byte CMD_SEND_CONTROL_DATA = 0x37;
     private static final byte CMD_GET_BATTERY = 0x14;
     private static final byte CMD_GET_STATS = 0x38;
@@ -231,6 +238,8 @@ public class BtConnectionManager {
     private volatile long pendingNodeDiscoverUntilMs = 0L;
     /** After connect, wait for the first startup beacon before flooding repeater discover. */
     private volatile boolean postStartupRepeaterDiscoverPending = true;
+    /** From {@code RESP_DEVICE_INFO} byte 1; -1 until first query after connect. */
+    private volatile int firmwareVerCode = -1;
     private volatile long roomPostSyncUntilMs = 0L;
     private static final long ROOM_CONTACT_REMOVE_SETTLE_MS = 1500L;
     private static final long ROOM_CONTACT_ADD_SETTLE_MS = 1200L;
@@ -607,25 +616,12 @@ public class BtConnectionManager {
         this.packetRouter = packetRouter;
         this.routeResolver = new MeshContactRouteResolver(atakContext);
         this.routeResolver.setStaleRepeaterPathListener((pubKeyHex, peerLabel) -> {
-            Log.d(TAG, "Refreshing stale repeater route for " + peerLabel);
+            Log.d(TAG, "Refreshing contact route after inbound repeater hops: " + peerLabel);
             requestContactByPubKeyHex(pubKeyHex);
         });
-        this.packetRouter.setInboundPathListener((callsign, rxPathLen, signal) -> {
-            MeshContactRouteResolver.InboundPathSignal mapped;
-            switch (signal) {
-                case PacketRouter.InboundPathListener.SIGNAL_APP_TRAFFIC:
-                    mapped = MeshContactRouteResolver.InboundPathSignal.APP_TRAFFIC;
-                    break;
-                case PacketRouter.InboundPathListener.SIGNAL_PERIODIC_BEACON:
-                    mapped = MeshContactRouteResolver.InboundPathSignal.PERIODIC_BEACON;
-                    break;
-                case PacketRouter.InboundPathListener.SIGNAL_STALE_REFRESH:
-                default:
-                    mapped = MeshContactRouteResolver.InboundPathSignal.STALE_REFRESH;
-                    break;
-            }
-            routeResolver.noteInboundPath(callsign, rxPathLen, mapped);
-        });
+        this.packetRouter.setInboundPathListener(
+                (callsign, rxPathLen) -> routeResolver.noteInboundPath(callsign, rxPathLen));
+        this.packetRouter.setInboundFloodPathListener(this::sendPathReturnForCallsign);
         this.btAdapter = BluetoothAdapter.getDefaultAdapter();
         ioThread.start();
         ioHandler = new Handler(ioThread.getLooper());
@@ -1660,28 +1656,46 @@ public class BtConnectionManager {
         int msgId = outboundMsgId.getAndIncrement() & 0x7fffffff;
         String msgIdStr = String.valueOf(msgId);
 
-        MeshContactRouteResolver.DirectRoute route = null;
+        String pubKeyHex = null;
         if (routePeerHint != null && !routePeerHint.trim().isEmpty()) {
-            route = routeResolver.resolveDirectRoute(routePeerHint, getConnectedDeviceAddress());
-        }
-        int pathLenEncoded = OUT_PATH_FLOOD;
-        byte[] pathWire = null;
-        if (route != null) {
-            pathLenEncoded = route.pathLenEncoded;
-            pathWire = route.pathWireBytes;
-        } else if (routePeerHint != null && !routePeerHint.trim().isEmpty()) {
-            Log.d(TAG, "TX flood fallback peer=" + routePeerHint.trim()
-                    + " reason=" + routeResolver.describeRouteMiss(
-                            routePeerHint.trim(), getConnectedDeviceAddress()));
+            pubKeyHex = routeResolver.lookupPubKeyHexForPeer(
+                    routePeerHint.trim(), getConnectedDeviceAddress());
         }
 
-        int total = sendAx25EnvelopeChunks(channel, msgIdStr, ax25Frame, pathLenEncoded, pathWire);
+        int total;
+        String routeLabel;
+        if (pubKeyHex != null && supportsNodeRoutedOpenrl()) {
+            total = sendAx25EnvelopeChunksViaContact(channel, msgIdStr, ax25Frame, pubKeyHex);
+            MeshContactRouteResolver.DirectRoute mirror =
+                    routeResolver.resolveDirectRoute(routePeerHint, getConnectedDeviceAddress());
+            if (mirror != null) {
+                routeLabel = "node-routed " + MeshPathUtil.formatTxRoute(mirror.pathLenEncoded);
+            } else {
+                routeLabel = "node-routed flood";
+            }
+        } else {
+            MeshContactRouteResolver.DirectRoute route = null;
+            if (routePeerHint != null && !routePeerHint.trim().isEmpty()) {
+                route = routeResolver.resolveDirectRoute(routePeerHint, getConnectedDeviceAddress());
+            }
+            int pathLenEncoded = OUT_PATH_FLOOD;
+            byte[] pathWire = null;
+            if (route != null) {
+                pathLenEncoded = route.pathLenEncoded;
+                pathWire = route.pathWireBytes;
+            } else if (routePeerHint != null && !routePeerHint.trim().isEmpty()) {
+                Log.d(TAG, "TX flood fallback peer=" + routePeerHint.trim()
+                        + " reason=" + routeResolver.describeRouteMiss(
+                                routePeerHint.trim(), getConnectedDeviceAddress()));
+            }
+            total = sendAx25EnvelopeChunks(channel, msgIdStr, ax25Frame, pathLenEncoded, pathWire);
+            routeLabel = MeshPathUtil.formatTxRoute(pathLenEncoded);
+        }
+
         if (total <= 0) {
             Log.w(TAG, "sendKissFrame failed: envelope too large for mesh channel");
             return false;
         }
-        String routeLabel = com.atakmaps.meshcore.plugin.util.MeshPathUtil
-                .formatTxRoute(pathLenEncoded);
         Log.d(TAG, "TX ATAK_DATA ch=" + channel + " route=" + routeLabel
                 + " ax25=" + ax25Frame.length + " bytes chunks=" + total
                 + (routePeerHint != null ? " peer=" + routePeerHint : ""));
@@ -1693,6 +1707,61 @@ public class BtConnectionManager {
      * Send UVAX1 envelope chunk(s). Prefer a single companion frame when the full AX.25
      * frame fits the 130-char mesh envelope limit (typical OPENRL GPS beacons).
      */
+    private int sendAx25EnvelopeChunksViaContact(int channel, String msgIdStr, byte[] ax25Frame,
+                                                 String pubKeyHex) {
+        byte[] prefix = pubKeyPrefixBytes(pubKeyHex, 6);
+        if (prefix == null) {
+            return 0;
+        }
+        String singlePayload = buildAx25EnvelopePayload(msgIdStr, 1, 1, ax25Frame);
+        if (singlePayload != null && singlePayload.length() <= MAX_MESH_MESSAGE_LEN) {
+            enqueueCommand(buildSendContactChannelDataCommand(
+                    channel,
+                    prefix,
+                    ATAK_DATA_TYPE_AX25,
+                    singlePayload.getBytes(StandardCharsets.UTF_8)));
+            return 1;
+        }
+
+        int chunkSize = maxRawAx25ChunkBytes(msgIdStr, MAX_RAW_AX25_CHUNK);
+        if (chunkSize < 1) {
+            return 0;
+        }
+        int total = (ax25Frame.length + chunkSize - 1) / chunkSize;
+        for (int i = 0; i < total; i++) {
+            int off = i * chunkSize;
+            int len = Math.min(chunkSize, ax25Frame.length - off);
+            byte[] chunk = new byte[len];
+            System.arraycopy(ax25Frame, off, chunk, 0, len);
+            String payload = buildAx25EnvelopePayload(msgIdStr, i + 1, total, chunk);
+            if (payload == null || payload.length() > MAX_MESH_MESSAGE_LEN) {
+                return 0;
+            }
+            enqueueCommand(buildSendContactChannelDataCommand(
+                    channel,
+                    prefix,
+                    ATAK_DATA_TYPE_AX25,
+                    payload.getBytes(StandardCharsets.UTF_8)));
+        }
+        return total;
+    }
+
+    private byte[] buildSendContactChannelDataCommand(int channel, byte[] pubKeyPrefix6,
+                                                      int dataType, byte[] payload) {
+        int payloadLen = payload != null ? payload.length : 0;
+        ByteBuffer buf = ByteBuffer.allocate(1 + 1 + 6 + 2 + payloadLen);
+        buf.order(ByteOrder.LITTLE_ENDIAN);
+        buf.put(CMD_SEND_CONTACT_CHANNEL_DATA);
+        buf.put((byte) Math.max(0, Math.min(7, channel)));
+        buf.put(pubKeyPrefix6);
+        buf.put((byte) (dataType & 0xFF));
+        buf.put((byte) ((dataType >> 8) & 0xFF));
+        if (payloadLen > 0) {
+            buf.put(payload);
+        }
+        return buf.array();
+    }
+
     private int sendAx25EnvelopeChunks(int channel, String msgIdStr, byte[] ax25Frame) {
         return sendAx25EnvelopeChunks(channel, msgIdStr, ax25Frame, OUT_PATH_FLOOD, null);
     }
@@ -1812,6 +1881,7 @@ public class BtConnectionManager {
     private void handleConnectionLost() {
         connected.set(false);
         connecting.set(false);
+        firmwareVerCode = -1;
         if (deviceContactsFetchActive) {
             finishDeviceContactsFetch(false, "Disconnected");
         }
@@ -2007,20 +2077,63 @@ public class BtConnectionManager {
         return true;
     }
 
+    private boolean supportsNodeRoutedOpenrl() {
+        return firmwareVerCode >= MIN_FW_NODE_ROUTED_OPENRL;
+    }
+
     /**
-     * Flood repeater node-discover once per session, after the first post-connect startup
-     * beacon has been sent (avoids racing companion init / first RF activity).
+     * Native-style reciprocal path return so the sender learns {@code out_path} (requires
+     * firmware {@code CMD_SEND_PATH_RETURN} and recent flood ATAK RX on the node).
      */
-    public void onStartupBeaconSent() {
-        if (!connected.get() || !postStartupRepeaterDiscoverPending) {
+    private void sendPathReturnForCallsign(String callsign) {
+        if (!supportsNodeRoutedOpenrl()) {
             return;
         }
-        postStartupRepeaterDiscoverPending = false;
-        if (sendNodeDiscoverRequest()) {
-            Log.i(TAG, "Post-startup repeater discover queued (after first beacon)");
-        } else {
-            Log.w(TAG, "Post-startup repeater discover not queued — not connected");
+        if (callsign == null || callsign.trim().isEmpty() || !connected.get()) {
+            return;
         }
+        String pubKeyHex = routeResolver.lookupPubKeyHexForPeer(
+                callsign.trim(), getConnectedDeviceAddress());
+        if (pubKeyHex == null) {
+            Log.d(TAG, "Path return skipped — no firmware contact for " + callsign.trim());
+            return;
+        }
+        byte[] prefix = pubKeyPrefixBytes(pubKeyHex, 6);
+        if (prefix == null) {
+            return;
+        }
+        byte[] cmd = new byte[1 + 6];
+        cmd[0] = CMD_SEND_PATH_RETURN;
+        System.arraycopy(prefix, 0, cmd, 1, 6);
+        enqueueCommand(cmd);
+        Log.d(TAG, "CMD_SEND_PATH_RETURN queued for " + callsign.trim());
+    }
+
+    public boolean sendPathReturnForPeerHint(@Nullable String peerHint) {
+        if (peerHint == null || peerHint.trim().isEmpty()) {
+            return false;
+        }
+        String pubKeyHex = routeResolver.lookupPubKeyHexForPeer(
+                peerHint.trim(), getConnectedDeviceAddress());
+        if (pubKeyHex == null) {
+            return false;
+        }
+        byte[] prefix = pubKeyPrefixBytes(pubKeyHex, 6);
+        if (prefix == null) {
+            return false;
+        }
+        byte[] cmd = new byte[1 + 6];
+        cmd[0] = CMD_SEND_PATH_RETURN;
+        System.arraycopy(prefix, 0, cmd, 1, 6);
+        enqueueCommand(cmd);
+        return true;
+    }
+
+    /**
+     * Post-connect hook retained for API compatibility; routing is delegated to firmware.
+     */
+    public void onStartupBeaconSent() {
+        postStartupRepeaterDiscoverPending = false;
     }
 
     public void requestDeviceContacts(DeviceContactsListener listener) {
@@ -3225,38 +3338,45 @@ public class BtConnectionManager {
             Log.d(TAG, "RX mesh datagram env len=" + routed.length()
                     + " ch=" + parsed.channelIndex
                     + " rxPath=" + com.atakmaps.meshcore.plugin.util.MeshPathUtil
-                            .formatRxRepeaterPath(pathLen));
-            handleMeshMessage(routed, pathLen);
+                            .formatRxRepeaterPath(pathLen)
+                    + (parsed.rxWasFloodRoute ? " flood-rx" : ""));
+            handleMeshMessage(routed, pathLen, parsed.rxWasFloodRoute);
         }
     }
 
     private static final class ChannelDataRecv {
         final int channelIndex;
         final Integer hopCount;
+        final boolean rxWasFloodRoute;
         final String payloadText;
 
-        ChannelDataRecv(int channelIndex, Integer hopCount, String payloadText) {
+        ChannelDataRecv(int channelIndex, Integer hopCount, boolean rxWasFloodRoute,
+                        String payloadText) {
             this.channelIndex = channelIndex;
             this.hopCount = hopCount;
+            this.rxWasFloodRoute = rxWasFloodRoute;
             this.payloadText = payloadText;
         }
     }
 
     /**
-     * Parse {@code RESP_CHANNEL_DATA_RECV} (0x1B). Layout mirrors TX with optional
-     * path wire bytes after {@code path_len}; falls back to legacy fixed offsets.
+     * Parse {@code RESP_CHANNEL_DATA_RECV} (0x1B). Firmware layout (MyMesh.cpp):
+     * [0x1B][snr][rsv][rsv][channel][path_len][path_wire?][data_type u16 LE][data_len][payload]
      */
     @Nullable
     private ChannelDataRecv parseChannelDataRecv(byte[] pkt) {
-        if (pkt == null || pkt.length < 9) {
+        if (pkt == null || pkt.length < 10) {
             return null;
         }
-        int channelIndex = pkt[1] & 0xFF;
-        int pathLenRaw = pkt[2] & 0xFF;
+        int channelIndex = pkt[4] & 0xFF;
+        int pathLenRaw = pkt[5] & 0xFF;
+        boolean rxWasFloodRoute = (pathLenRaw & 0xFF) != 0xFF;
         Integer hopCount = com.atakmaps.meshcore.plugin.util.MeshPathUtil
                 .rxPathLenToHopCount(pathLenRaw);
-        int payloadOff = findChannelDataPayloadOffset(pkt, pathLenRaw);
-        if (payloadOff < 0 || pkt.length < payloadOff + 3) {
+        int pathWireLen = com.atakmaps.meshcore.plugin.util.MeshPathUtil
+                .pathWireByteLen(pathLenRaw);
+        int payloadOff = 6 + pathWireLen;
+        if (pkt.length < payloadOff + 3) {
             return null;
         }
         int dataType = ((pkt[payloadOff + 1] & 0xFF) << 8) | (pkt[payloadOff] & 0xFF);
@@ -3271,24 +3391,7 @@ public class BtConnectionManager {
             return null;
         }
         String text = new String(pkt, dataStart, copyLen, StandardCharsets.UTF_8);
-        return new ChannelDataRecv(channelIndex, hopCount, text);
-    }
-
-    /** Locate dataType/dataLen/payload start; tries path-aware offset then legacy. */
-    private int findChannelDataPayloadOffset(byte[] pkt, int pathLenRaw) {
-        int pathWireLen = com.atakmaps.meshcore.plugin.util.MeshPathUtil
-                .pathWireByteLen(pathLenRaw);
-        int[] candidates = {3 + pathWireLen, 6};
-        for (int base : candidates) {
-            if (pkt.length < base + 3) {
-                continue;
-            }
-            int dataType = ((pkt[base + 1] & 0xFF) << 8) | (pkt[base] & 0xFF);
-            if (dataType == ATAK_DATA_TYPE_AX25 || dataType == ATAK_DATA_TYPE_RAW) {
-                return base;
-            }
-        }
-        return -1;
+        return new ChannelDataRecv(channelIndex, hopCount, rxWasFloodRoute, text);
     }
 
     private void applyChannelInfo(byte[] pkt) {
@@ -3513,7 +3616,9 @@ public class BtConnectionManager {
             }
             Log.i(TAG, "Device info fwCode=" + fwCode + " maxChannels=" + maxChannels
                     + " maxContacts=" + (maxContactsHalf * 2)
-                    + " mfg='" + manufacturer + "' ver='" + version + "'");
+                    + " mfg='" + manufacturer + "' ver='" + version + "'"
+                    + " nodeRoutedOpenrl=" + (fwCode >= MIN_FW_NODE_ROUTED_OPENRL));
+            firmwareVerCode = fwCode;
         } catch (Exception e) {
             Log.w(TAG, "Failed parsing device-info: " + e.getMessage());
         }
@@ -4119,6 +4224,10 @@ public class BtConnectionManager {
     }
 
     private void handleMeshMessage(String msg, int pathLen) {
+        handleMeshMessage(msg, pathLen, false);
+    }
+
+    private void handleMeshMessage(String msg, int pathLen, boolean rxWasFloodRoute) {
         if (msg == null || !msg.startsWith(ENV_PREFIX)) return;
         String[] parts = msg.split("\\|", 5);
         if (parts.length != 5) return;
@@ -4132,6 +4241,7 @@ public class BtConnectionManager {
             ChunkAccumulator acc = chunkBuffers.get(msgId);
             if (acc == null || acc.total != total) {
                 acc = new ChunkAccumulator(total);
+                acc.rxWasFloodRoute = rxWasFloodRoute;
                 chunkBuffers.put(msgId, acc);
             }
             acc.parts.put(seq, chunk);
@@ -4173,7 +4283,7 @@ public class BtConnectionManager {
             Log.d(TAG, "Routing reassembled AX.25 bytes=" + ax25.length
                     + " rxPath=" + com.atakmaps.meshcore.plugin.util.MeshPathUtil
                             .formatRxRepeaterPath(pathLen));
-            packetRouter.routeIncoming(ax25, pathLen);
+            packetRouter.routeIncoming(ax25, pathLen, acc.rxWasFloodRoute);
         } catch (Exception ignored) {
         }
     }
@@ -4281,6 +4391,7 @@ public class BtConnectionManager {
 
     private static final class ChunkAccumulator {
         final int total;
+        boolean rxWasFloodRoute;
         final Map<Integer, byte[]> parts = new ConcurrentHashMap<>();
         long lastUpdateMs;
 

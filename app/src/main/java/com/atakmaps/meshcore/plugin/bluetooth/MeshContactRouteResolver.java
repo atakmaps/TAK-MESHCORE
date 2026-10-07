@@ -12,22 +12,15 @@ import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Resolves ATAK peer labels to MeshCore device-contact routes for direct TX.
+ * Maps ATAK peer labels to firmware contact records. TX routing for OPENRL is delegated to
+ * {@link BtConnectionManager#sendKissFrame} via {@code CMD_SEND_CONTACT_CHANNEL_DATA} when
+ * possible; this class only mirrors {@code contact.out_path} for legacy channel-data fallback
+ * and post-failure flood escalation.
  */
 final class MeshContactRouteResolver {
 
     private static final String TAG = "MeshCore.Route";
-
-    /** After direct RF from a peer, prefer zero-hop over a cached repeater {@code out_path}. */
-    private static final long DIRECT_RX_ROUTE_TTL_MS = 5L * 60L * 1000L;
-    /** Throttle firmware {@code GET_CONTACT_BY_KEY} refresh requests per peer. */
     private static final long CONTACT_REFRESH_MIN_INTERVAL_MS = 60L * 1000L;
-    /**
-     * After a directed delivery ACK via repeater ({@code hops > 0}), ignore periodic
-     * GPS/ping for {@link #lastDirectInboundMsByNameKey} so idle marker TX keeps
-     * {@code out_path=0x1}. Same TTL as direct-RX window.
-     */
-    private static final long REPEATER_ROUTE_CONFIRMED_TTL_MS = DIRECT_RX_ROUTE_TTL_MS;
 
     interface StaleRepeaterPathListener {
         void onStaleRepeaterPath(String pubKeyHex, String peerLabel);
@@ -52,19 +45,10 @@ final class MeshContactRouteResolver {
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, BtConnectionManager.MeshDeviceContact> liveByNameKey =
             new ConcurrentHashMap<>();
-    /** Last time a peer was heard with zero-hop / direct RX metadata. */
-    private final ConcurrentHashMap<String, Long> lastDirectInboundMsByNameKey =
-            new ConcurrentHashMap<>();
-    /**
-     * TX escalation when directed delivery fails: 0=normal cache, 1+=flood after
-     * {@link #noteTxRouteFailure} resets firmware {@code out_path}.
-     */
+    /** After {@link #noteTxRouteFailure}, next TX uses flood until contact sync updates. */
     private final ConcurrentHashMap<String, Integer> txRouteEscalationByNameKey =
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> lastContactRefreshRequestMsByNameKey =
-            new ConcurrentHashMap<>();
-    /** Last time directed TX via repeater ({@code hops > 0}) was ACK'd for a peer. */
-    private final ConcurrentHashMap<String, Long> lastRepeaterRouteConfirmedMsByNameKey =
             new ConcurrentHashMap<>();
     private volatile StaleRepeaterPathListener staleRepeaterPathListener;
 
@@ -79,10 +63,8 @@ final class MeshContactRouteResolver {
     void clear() {
         liveByPubKeyPrefix.clear();
         liveByNameKey.clear();
-        lastDirectInboundMsByNameKey.clear();
         txRouteEscalationByNameKey.clear();
         lastContactRefreshRequestMsByNameKey.clear();
-        lastRepeaterRouteConfirmedMsByNameKey.clear();
     }
 
     void indexContact(BtConnectionManager.MeshDeviceContact contact) {
@@ -92,9 +74,6 @@ final class MeshContactRouteResolver {
         String prefix = contact.pubKeyHex.trim().toUpperCase(Locale.US).substring(0, 12);
         liveByPubKeyPrefix.put(prefix, contact);
         indexNameKeys(contact);
-        if (MeshPathUtil.pathHopCount(contact.outPathLen) <= 0) {
-            clearRepeaterRouteConfirmed(contact.name);
-        }
         if (contact.name != null && !contact.name.trim().isEmpty()) {
             Log.d(TAG, "Contact route name=" + contact.name.trim()
                     + " out_path=0x" + Integer.toHexString(contact.outPathLen & 0xFF)
@@ -118,62 +97,20 @@ final class MeshContactRouteResolver {
         }
     }
 
-    enum InboundPathSignal {
-        /** Stale {@code out_path} refresh only (no recent-direct tracking). */
-        STALE_REFRESH,
-        /** Chat / CoT / ACK — may mark peer recently direct. */
-        APP_TRAFFIC,
-        /** Periodic GPS beacon or ping — may mark direct unless repeater path is confirmed. */
-        PERIODIC_BEACON
-    }
-
-    void noteInboundPath(@Nullable String peerHint, int rxPathLen) {
-        noteInboundPath(peerHint, rxPathLen, InboundPathSignal.STALE_REFRESH);
-    }
-
     /**
-     * Record inbound RF from a peer. App traffic and (usually) beacons can mark a peer
-     * recently direct for stale-repeater override; firmware contact refresh still runs
-     * for all zero-hop / unknown RX when cache says {@code hops > 0}.
+     * Inbound RF metadata: request a firmware contact refresh when we heard repeater hops
+     * (path learning may have updated {@code out_path} on the node).
      */
-    void noteInboundPath(@Nullable String peerHint, int rxPathLen, InboundPathSignal signal) {
-        if (peerHint == null || peerHint.trim().isEmpty()) {
+    void noteInboundPath(@Nullable String peerHint, int rxPathLen) {
+        if (peerHint == null || peerHint.trim().isEmpty() || rxPathLen <= 0) {
             return;
         }
-        String trimmed = peerHint.trim();
-        if (rxPathLen > 0) {
-            noteRepeaterRouteConfirmed(trimmed);
-            return;
-        }
-        if (signal != InboundPathSignal.STALE_REFRESH) {
-            int cachedHops = cachedHopCountForPeer(trimmed, null);
-            boolean suppressAppTraffic = signal == InboundPathSignal.APP_TRAFFIC && cachedHops > 0;
-            boolean suppressPeriodic = signal == InboundPathSignal.PERIODIC_BEACON
-                    && isRepeaterRouteRecentlyConfirmed(trimmed);
-            if (suppressAppTraffic) {
-                Log.d(TAG, "Skip recent-direct from app traffic: peer=" + trimmed
-                        + " (cached repeater path hops=" + cachedHops + ")");
-            } else if (suppressPeriodic) {
-                Log.d(TAG, "Skip recent-direct from periodic beacon: peer=" + trimmed
-                        + " (repeater route confirmed recently)");
-            } else {
-                for (String key : nameKeysForHint(trimmed)) {
-                    lastDirectInboundMsByNameKey.put(key, System.currentTimeMillis());
-                    txRouteEscalationByNameKey.remove(key);
-                }
-            }
-        }
-        maybeRefreshStaleRepeaterPath(trimmed);
+        maybeRefreshContact(peerHint.trim());
     }
 
-    /** Record successful directed delivery via repeater ({@code hops > 0}). */
     void noteRepeaterRouteConfirmed(@Nullable String peerHint) {
-        if (peerHint == null || peerHint.trim().isEmpty()) {
-            return;
-        }
-        long now = System.currentTimeMillis();
-        for (String key : nameKeysForHint(peerHint.trim())) {
-            lastRepeaterRouteConfirmedMsByNameKey.put(key, now);
+        if (peerHint != null && !peerHint.trim().isEmpty()) {
+            clearTxRouteFailure(peerHint.trim());
         }
     }
 
@@ -185,23 +122,17 @@ final class MeshContactRouteResolver {
         return MeshPathUtil.pathHopCount(route.pathLenEncoded);
     }
 
-    private void maybeRefreshStaleRepeaterPath(String peerHint) {
-        BtConnectionManager.MeshDeviceContact contact =
-                lookupContact(peerHint, null);
-        if (contact == null || MeshPathUtil.pathHopCount(contact.outPathLen) <= 0) {
+    private void maybeRefreshContact(String peerHint) {
+        BtConnectionManager.MeshDeviceContact contact = lookupContact(peerHint, null);
+        if (contact == null) {
             return;
         }
         long now = System.currentTimeMillis();
-        boolean shouldRefresh = true;
         for (String key : nameKeysForHint(peerHint)) {
             Long last = lastContactRefreshRequestMsByNameKey.get(key);
             if (last != null && now - last < CONTACT_REFRESH_MIN_INTERVAL_MS) {
-                shouldRefresh = false;
-                break;
+                return;
             }
-        }
-        if (!shouldRefresh) {
-            return;
         }
         for (String key : nameKeysForHint(peerHint)) {
             lastContactRefreshRequestMsByNameKey.put(key, now);
@@ -214,7 +145,7 @@ final class MeshContactRouteResolver {
         }
     }
 
-    /** Escalate TX routing after directed delivery fails (reset path, then flood). */
+    /** Mirror native: after delivery failure, reset path and flood on retry. */
     void noteTxRouteFailure(@Nullable String peerHint) {
         if (peerHint == null || peerHint.trim().isEmpty()) {
             return;
@@ -222,7 +153,6 @@ final class MeshContactRouteResolver {
         for (String key : nameKeysForHint(peerHint.trim())) {
             txRouteEscalationByNameKey.merge(key, 1, (oldVal, inc) ->
                     Math.min(2, oldVal + inc));
-            lastDirectInboundMsByNameKey.remove(key);
         }
     }
 
@@ -235,13 +165,16 @@ final class MeshContactRouteResolver {
         }
     }
 
+    /**
+     * Legacy {@code CMD_SEND_CHANNEL_DATA} fallback: pass firmware {@code out_path} verbatim.
+     * Prefer {@code CMD_SEND_CONTACT_CHANNEL_DATA} from {@link BtConnectionManager} instead.
+     */
     @Nullable
     DirectRoute resolveDirectRoute(@Nullable String peerHint, @Nullable String deviceAddress) {
         if (peerHint == null || peerHint.trim().isEmpty()) {
             return null;
         }
-        int escalation = escalationLevel(peerHint.trim());
-        if (escalation >= 1) {
+        if (escalationLevel(peerHint.trim()) >= 1) {
             Log.d(TAG, "Route escalate flood: peer=" + peerHint.trim()
                     + " reason=tx-retry-after-path-reset");
             return null;
@@ -254,14 +187,6 @@ final class MeshContactRouteResolver {
         if (!MeshPathUtil.isUsableDirectPath(contact.outPathLen)) {
             return null;
         }
-        int cachedHops = MeshPathUtil.pathHopCount(contact.outPathLen);
-        if (cachedHops > 0 && isRecentlyDirect(peerHint.trim())) {
-            Log.d(TAG, "Route override zero-hop: peer=" + peerHint.trim()
-                    + " cached out_path=0x" + Integer.toHexString(contact.outPathLen & 0xFF)
-                    + " txRoute=" + MeshPathUtil.formatTxRoute(contact.outPathLen)
-                    + " reason=recent-direct-rx");
-            return new DirectRoute(0, new byte[0]);
-        }
         byte[] wire = MeshPathUtil.pathWireBytes(contact.outPathLen, contact.outPath);
         if (wire == null) {
             return null;
@@ -269,7 +194,6 @@ final class MeshContactRouteResolver {
         return new DirectRoute(contact.outPathLen & 0xFF, wire);
     }
 
-    /** Human-readable reason direct routing failed (for TX logs). */
     String describeRouteMiss(@Nullable String peerHint, @Nullable String deviceAddress) {
         if (peerHint == null || peerHint.trim().isEmpty()) {
             return "empty peer hint";
@@ -434,14 +358,6 @@ final class MeshContactRouteResolver {
                 + " out_path=0xFF");
     }
 
-    private int cachedHopCountForPeer(String peerHint, @Nullable String deviceAddress) {
-        BtConnectionManager.MeshDeviceContact contact = lookupContact(peerHint, deviceAddress);
-        if (contact == null) {
-            return -1;
-        }
-        return MeshPathUtil.pathHopCount(contact.outPathLen);
-    }
-
     private int escalationLevel(String peerHint) {
         int max = 0;
         for (String key : nameKeysForHint(peerHint)) {
@@ -451,37 +367,6 @@ final class MeshContactRouteResolver {
             }
         }
         return max;
-    }
-
-    private boolean isRepeaterRouteRecentlyConfirmed(String peerHint) {
-        long now = System.currentTimeMillis();
-        for (String key : nameKeysForHint(peerHint)) {
-            Long last = lastRepeaterRouteConfirmedMsByNameKey.get(key);
-            if (last != null && now - last <= REPEATER_ROUTE_CONFIRMED_TTL_MS) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void clearRepeaterRouteConfirmed(@Nullable String peerName) {
-        if (peerName == null || peerName.trim().isEmpty()) {
-            return;
-        }
-        for (String key : nameKeysForHint(peerName.trim())) {
-            lastRepeaterRouteConfirmedMsByNameKey.remove(key);
-        }
-    }
-
-    private boolean isRecentlyDirect(String peerHint) {
-        long now = System.currentTimeMillis();
-        for (String key : nameKeysForHint(peerHint)) {
-            Long last = lastDirectInboundMsByNameKey.get(key);
-            if (last != null && now - last <= DIRECT_RX_ROUTE_TTL_MS) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private java.util.List<String> nameKeysForHint(String peerHint) {

@@ -134,6 +134,23 @@ public final class GeoChatContactListHelper {
         return id != null ? id.trim() : null;
     }
 
+    /** {@code chatgrp} {@code id} → peer thread UID for DMs (often {@code ANDROID-*}. */
+    public static String extractChatThreadUid(CotEvent event) {
+        CotDetail chat = findChatDetail(event);
+        if (chat == null) {
+            return null;
+        }
+        CotDetail chatgrp = chat.getFirstChildByName(0, "chatgrp");
+        if (chatgrp == null) {
+            chatgrp = chat.getFirstChildByName(0, "chatGroup");
+        }
+        if (chatgrp == null) {
+            return null;
+        }
+        String id = chatgrp.getAttribute("id");
+        return id != null ? id.trim() : null;
+    }
+
     /** {@code __chat} {@code chatroom} → human group name (e.g. {@code news}). */
     public static String extractConversationName(CotEvent event) {
         CotDetail chat = findChatDetail(event);
