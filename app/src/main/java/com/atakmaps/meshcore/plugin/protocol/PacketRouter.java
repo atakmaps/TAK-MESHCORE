@@ -170,14 +170,17 @@ public class PacketRouter {
             RfTxArbitrator.get().markInboundOpenRl();
             byte[] infoField = frame.getInfoField();
 
-            // Decrypt if encryption is enabled
+            // Decrypt if encryption is enabled. When RF crypto is on, anything that does not
+            // authenticate is dropped: falling back to the raw bytes would let any radio
+            // inject unencrypted CoT, chat or positions into an encrypted net.
             if (encryptionManager != null && encryptionManager.isEnabled()) {
                 byte[] decrypted = encryptionManager.decrypt(infoField);
-                if (decrypted != null) {
-                    infoField = java.util.Arrays.copyOf(decrypted, decrypted.length);
-                    java.util.Arrays.fill(decrypted, (byte) 0);
+                if (decrypted == null) {
+                    Log.w(TAG, "Dropping OPENRL frame from " + srcCall + "-" + srcSsid
+                            + ": failed RF crypto (wrong secret, tampered, or unencrypted)");
+                    return;
                 }
-                // If decryption returns null, use raw (unencrypted packet)
+                infoField = decrypted;
             }
 
             routeMeshCorePacket(srcCall, srcSsid, infoField, pathLen);
@@ -332,7 +335,7 @@ public class PacketRouter {
 
             case MeshCorePacket.TYPE_COT_FRAGMENT:
                 byte[] reassembled = reassembler.addFragment(
-                        packet.getPayload());
+                        callsign + "-" + ssid, packet.getPayload());
                 if (reassembled != null) {
                     Log.d(TAG, "Fragment reassembly complete: "
                             + reassembled.length + " bytes"

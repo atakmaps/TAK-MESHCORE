@@ -60,6 +60,12 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    // Plain-JVM unit tests (./gradlew testCivDebugUnitTest). android.util.Log calls
+    // return defaults instead of throwing, so pure protocol/crypto classes test cleanly.
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+
     // Signing uses the ATAK SDK demo keystore (well-known credentials — not secrets).
     // Local: app/libs/atak-civ/. takrepo/CI: takdev copies keystore to app/build/ (see resolveAtakSigningKeystore).
     signingConfigs {
@@ -155,4 +161,6 @@ dependencies {
         compileOnly files(atakMainJar)
     }
     implementation 'com.google.zxing:core:3.5.3'
+
+    testImplementation 'junit:junit:4.13.2'
 }

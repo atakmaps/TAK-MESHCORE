@@ -34,8 +34,11 @@ public class PacketFragmenter {
     /** Fragment header size */
     public static final int FRAGMENT_HEADER_SIZE = 4;
 
-    /** Counter for generating fragment IDs */
-    private static int nextFragmentId = 0;
+    /**
+     * Counter for generating fragment IDs. Starts at a random value so a freshly restarted
+     * station does not reuse the IDs it (or another station) sent moments ago.
+     */
+    private static int nextFragmentId = new java.security.SecureRandom().nextInt(0x10000);
 
     /**
      * Fragment a payload if it exceeds the maximum frame size.
@@ -97,24 +100,32 @@ public class PacketFragmenter {
     /**
      * Reassembler: collects fragments and emits complete payloads.
      *
-     * Thread-safe. Fragments are identified by their fragmentId.
-     * Incomplete fragment sets are expired after a timeout.
+     * Thread-safe. Fragments are identified by (sender, fragmentId) so two stations that
+     * happen to pick the same 16-bit ID cannot corrupt each other's payloads.
+     * Incomplete fragment sets are expired after a timeout, and the number of
+     * in-flight sets is capped so junk traffic cannot grow memory without bound.
      */
     public static class Reassembler {
 
         private static final long FRAGMENT_TIMEOUT_MS = 30_000; // 30 seconds
 
-        private final Map<Integer, FragmentSet> pending = new HashMap<>();
+        /** Max incomplete fragment sets held at once; oldest is evicted beyond this. */
+        static final int MAX_PENDING_SETS = 64;
+
+        private final Map<String, FragmentSet> pending = new HashMap<>();
 
         /**
          * Add a fragment. If this completes a set, returns the full payload.
          *
+         * @param sender          Stable identifier of the transmitting station
+         *                        (e.g. callsign-SSID); {@code null} is treated as unknown
          * @param fragmentPayload The fragment data including the 4-byte header
          * @return Complete reassembled payload, or null if still waiting
          */
-        public synchronized byte[] addFragment(byte[] fragmentPayload) {
-            if (fragmentPayload.length < FRAGMENT_HEADER_SIZE) {
-                Log.w(TAG, "Fragment too short: " + fragmentPayload.length);
+        public synchronized byte[] addFragment(String sender, byte[] fragmentPayload) {
+            if (fragmentPayload == null || fragmentPayload.length < FRAGMENT_HEADER_SIZE) {
+                Log.w(TAG, "Fragment too short: "
+                        + (fragmentPayload == null ? "null" : fragmentPayload.length));
                 return null;
             }
 
@@ -132,10 +143,19 @@ public class PacketFragmenter {
             // Expire old fragment sets
             expireOld();
 
-            FragmentSet set = pending.get(fragmentId);
+            String key = (sender != null ? sender : "?") + "#" + fragmentId;
+            FragmentSet set = pending.get(key);
+            if (set != null && set.totalFragments != totalFragments) {
+                // Same sender reused the ID for a different payload; start over.
+                Log.d(TAG, "Fragment set " + key + " restarted (total "
+                        + set.totalFragments + " -> " + totalFragments + ")");
+                pending.remove(key);
+                set = null;
+            }
             if (set == null) {
+                evictOldestIfFull();
                 set = new FragmentSet(fragmentId, totalFragments);
-                pending.put(fragmentId, set);
+                pending.put(key, set);
             }
 
             // Copy data (without header)
@@ -146,7 +166,7 @@ public class PacketFragmenter {
             set.addFragment(seqNum, data);
 
             if (set.isComplete()) {
-                pending.remove(fragmentId);
+                pending.remove(key);
                 byte[] result = set.reassemble();
                 Log.d(TAG, "Reassembled fragment set " + fragmentId
                         + ": " + result.length + " bytes");
@@ -157,6 +177,27 @@ public class PacketFragmenter {
                     + " of set " + fragmentId + " received ("
                     + set.getReceivedCount() + "/" + totalFragments + ")");
             return null;
+        }
+
+        private void evictOldestIfFull() {
+            if (pending.size() < MAX_PENDING_SETS) {
+                return;
+            }
+            String oldestKey = null;
+            long oldest = Long.MAX_VALUE;
+            for (Map.Entry<String, FragmentSet> e : pending.entrySet()) {
+                if (e.getValue().createdAt < oldest) {
+                    oldest = e.getValue().createdAt;
+                    oldestKey = e.getKey();
+                }
+            }
+            if (oldestKey != null) {
+                pending.remove(oldestKey);
+            }
+        }
+
+        synchronized int pendingCount() {
+            return pending.size();
         }
 
         private void expireOld() {

@@ -15,14 +15,12 @@ import com.atakmap.coremap.maps.coords.GeoPoint;
 
 import com.atakmaps.meshcore.plugin.protocol.PacketFragmenter;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.TimeZone;
 import java.util.regex.Pattern;
-import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -1010,23 +1008,27 @@ public class CotBuilder {
     }
 
     /**
+     * Upper bound on decompressed CoT size. Real CoT over LoRa is a few KB; the cap stops a
+     * small RF payload from inflating into an out-of-memory "zip bomb".
+     */
+    static final int MAX_DECOMPRESSED_COT_BYTES = 256 * 1024;
+
+    /**
      * Decompress a GZIP-compressed CoT XML.
+     *
+     * @return the XML, or {@code null} if the data is corrupt or inflates past
+     *         {@link #MAX_DECOMPRESSED_COT_BYTES}
      */
     public static String decompressCot(byte[] compressed) {
-        byte[] buf = new byte[512];
         try {
-            ByteArrayInputStream bais = new ByteArrayInputStream(compressed);
-            GZIPInputStream gzip = new GZIPInputStream(bais);
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            int n;
-            while ((n = gzip.read(buf)) > 0) {
-                baos.write(buf, 0, n);
-            }
-            gzip.close();
-            byte[] cotBytes = baos.toByteArray();
+            byte[] cotBytes = com.atakmaps.meshcore.plugin.util.BoundedGzip.gunzip(
+                    compressed, MAX_DECOMPRESSED_COT_BYTES);
             String cotXml = new String(cotBytes, java.nio.charset.StandardCharsets.UTF_8);
             java.util.Arrays.fill(cotBytes, (byte) 0);
             return cotXml;
+        } catch (com.atakmaps.meshcore.plugin.util.BoundedGzip.LimitExceededException e) {
+            Log.w(TAG, "Dropping CoT: " + e.getMessage());
+            return null;
         } catch (Exception e) {
             Log.e(TAG, "Failed to decompress CoT", e);
             return null;
