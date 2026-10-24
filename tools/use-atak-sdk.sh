@@ -6,19 +6,21 @@
 #   ./tools/use-atak-sdk.sh 5.6.0
 #
 # Override 5.6 SDK path:
-#   ATAK_560_SDK=/path/to/ATAK-CIV-5.6.0.18-SDK ./tools/use-atak-sdk.sh 5.6.0
+#   ATAK_560_SDK=/path/to/ATAK-CIV-5.6.0.24-SDK ./tools/use-atak-sdk.sh 5.6.0
+#
+# Any 5.6.0.x SDK works: the plugin declares com.atakmap.app@5.6.0.CIV.
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="${ROOT}/app/libs/atak-civ"
-SDK_560="${ATAK_560_SDK:-${HOME}/Documents/ATAK/Versions/ATAK-CIV-5.6.0.18-SDK}"
+SDK_560="${ATAK_560_SDK:-${HOME}/Documents/ATAK/Versions/ATAK-CIV-5.6.0.24-SDK}"
 
 usage() {
   cat <<'EOF'
 Usage: ./tools/use-atak-sdk.sh <status|5.6.0>
 
   status   Show active SDK and configured 5.6.0 path
-  5.6.0    Use ATAK-CIV-5.6.0.18-SDK main.jar + android_keystore
+  5.6.0    Use ATAK-CIV-5.6.0.24-SDK main.jar + android_keystore (set ATAK_560_SDK to override)
 EOF
 }
 

@@ -3,7 +3,7 @@
 Dedicated ATAK plugin for MeshCore BLE companion transport.
 
 - Package: `com.atakmaps.meshcore.plugin`
-- Current version: `1.5.10`
+- Current version: `1.5.15`
 - Target ATAK: **5.6.0** CIV only
 
 ## Quick Start
@@ -127,6 +127,15 @@ Administrative rows unlock after the admin password is accepted. **Restore All D
 
 ## Changelog
 
+### v1.5.15
+
+- **RF crypto is now authenticated-only:** when an RF crypto string is set, frames that fail to decrypt are dropped. Previously they fell back to plaintext, letting any radio inject CoT, chat or positions into an encrypted net. All nodes on a net must now use the same crypto setting.
+- **Faster crypto:** PBKDF2 key derivation is cached per session instead of running on every packet; new-salt derivations are rate-limited. Wire format (envelope v3) is unchanged.
+- **Fragment reassembly per sender:** fixes corrupted CoT when two stations send fragmented payloads with the same ID; capped in-flight fragment sets.
+- **Decompression cap:** inbound CoT is limited to 256 KB decompressed (zip-bomb protection).
+- Added JUnit unit tests (`./gradlew :app:testCivDebugUnitTest`) and BUILDING.md.
+
+
 ### v1.5.7
 
 - SA Relay RF broadcast throttle (10 min per contact); throttled Auto Send map RF chirp (2 min, no retries).
@@ -225,7 +234,10 @@ This repository is MeshCore-only. It does not include UV-PRO radio programming w
 
 ## Build
 
+See [BUILDING.md](BUILDING.md) for full macOS steps, signing, and TPC submission.
+
 ```bash
+./gradlew :app:testCivDebugUnitTest
 ./gradlew :app:assembleCivDebug
 ```
 
